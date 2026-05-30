@@ -30,18 +30,12 @@ Android uses JNI (`jniLibs/`), desktop JVM uses JNA (resource-classpath layout).
 
 ```kotlin
 import uniffi.moq.MoqClient
-import uniffi.moq.MoqOriginProducer
 
-// Wire an origin as both publish source and consume sink for the
-// typical full-duplex client. Set just one side for a subscribe-only
-// or publish-only client.
-val origin = MoqOriginProducer()
 val client = MoqClient()
-client.setPublish(origin)
-client.setConsume(origin)
-
-val session = client.connect("https://relay.example.com")
+val cs = client.connect("https://relay.example.com")
 ```
+
+`MoqClient.connect(url)` returns a `MoqSession`. The accessors `cs.publisher()` and `cs.consumer()` are always populated: by whatever origin you wired via `setPublish` / `setConsume` before connect, or by a fresh auto-created one for any side you didn't set.
 
 For development against a relay with a self-signed certificate, configure the client before connecting:
 
@@ -49,15 +43,13 @@ For development against a relay with a self-signed certificate, configure the cl
 val client = MoqClient()
 client.setTlsDisableVerify(true)
 client.setBind("127.0.0.1:0")
-client.setPublish(origin)
-client.setConsume(origin)
-val session = client.connect("https://localhost:4443")
+val cs = client.connect("https://localhost:4443")
 ```
 
 When you're done, signal graceful shutdown to the peer:
 
 ```kotlin
-session.shutdown()  // alias for cancel(0u)
+cs.shutdown()  // alias for cancel(0u)
 ```
 
 ## Subscribe
@@ -66,8 +58,7 @@ session.shutdown()  // alias for cancel(0u)
 import dev.moq.*
 import kotlinx.coroutines.flow.collect
 
-val consumer = origin.consume()
-val announced = consumer.announced("demos/")
+val announced = cs.consumer().announced("demos/")
 
 announced.announcements().collect { announcement ->
     val catalog = announcement.broadcast().subscribeCatalog()
@@ -86,7 +77,7 @@ import uniffi.moq.MoqBroadcastProducer
 val broadcast = MoqBroadcastProducer()
 val audio = broadcast.publishMedia("opus", opusInitBytes)
 
-origin.publish("my-stream", broadcast)
+cs.publisher().announce("my-stream", broadcast)
 
 audio.writeFrame(payload, timestampUs = 0u)
 audio.writeFrame(payload, timestampUs = 20_000u)

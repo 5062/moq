@@ -126,7 +126,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 
 	let pub_session = tokio::time::timeout(
 		TIMEOUT,
-		client().with_publish(pub_origin.consume()).connect(url.clone()),
+		client().with_publisher(pub_origin.clone()).connect(url.clone()),
 	)
 	.await
 	.expect("publisher connect timeout")
@@ -141,7 +141,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
 
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_consume(sub_origin).connect(url))
+	let sub_session = tokio::time::timeout(TIMEOUT, client().with_consumer(sub_origin).connect(url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");

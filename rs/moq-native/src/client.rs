@@ -314,13 +314,13 @@ impl Client {
 		self
 	}
 
-	pub fn with_publish(mut self, publish: impl Into<Option<moq_net::OriginConsumer>>) -> Self {
-		self.moq = self.moq.with_publish(publish);
+	pub fn with_publisher(mut self, publish: moq_net::OriginProducer) -> Self {
+		self.moq = self.moq.with_publisher(publish);
 		self
 	}
 
-	pub fn with_consume(mut self, consume: impl Into<Option<moq_net::OriginProducer>>) -> Self {
-		self.moq = self.moq.with_consume(consume);
+	pub fn with_consumer(mut self, consume: moq_net::OriginProducer) -> Self {
+		self.moq = self.moq.with_consumer(consume);
 		self
 	}
 
@@ -357,9 +357,9 @@ impl Client {
 		feature = "websocket"
 	))]
 	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_net::Session> {
-		let session = self.connect_inner(url).await?;
-		tracing::info!(version = %session.version(), "connected");
-		Ok(session)
+		let cs = self.connect_inner(url).await?;
+		tracing::info!(version = %cs.version(), "connected");
+		Ok(cs)
 	}
 
 	#[cfg(any(

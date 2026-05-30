@@ -22,7 +22,7 @@ impl Session {
 	pub fn connect(
 		&mut self,
 		url: Url,
-		publish: Option<moq_net::OriginConsumer>,
+		publish: Option<moq_net::OriginProducer>,
 		consume: Option<moq_net::OriginProducer>,
 		callback: ffi::OnStatus,
 	) -> Result<Id, Error> {
@@ -52,26 +52,31 @@ impl Session {
 	async fn connect_run(
 		task_id: Id,
 		url: Url,
-		publish: Option<moq_net::OriginConsumer>,
+		publish: Option<moq_net::OriginProducer>,
 		consume: Option<moq_net::OriginProducer>,
 	) -> Result<(), Error> {
-		let client = moq_native::ClientConfig::default()
+		let mut client = moq_native::ClientConfig::default()
 			.init()
 			.map_err(|err| Error::Connect(Arc::new(err)))?;
 
-		let session = client
-			.with_publish(publish)
-			.with_consume(consume)
-			.connect(url)
-			.await
-			.map_err(|err| Error::Connect(Arc::new(err)))?;
+		if let Some(publish) = publish {
+			client = client.with_publisher(publish);
+		}
+		if let Some(consume) = consume {
+			client = client.with_consumer(consume);
+		}
+
+		let cs = client.connect(url).await.map_err(|err| Error::Connect(Arc::new(err)))?;
 
 		// "Connected" callback — copy from slab if not revoked.
 		if let Some(Some(entry)) = State::lock().session.task.get(task_id) {
 			entry.callback.call(());
 		}
 
-		session.closed().await?;
+		// libmoq users wire their own origin via the explicit `publish`/
+		// `consume` params, so `cs.publisher` / `cs.consumer` are always
+		// None here; the relevant handle is just the session.
+		cs.closed().await?;
 		Ok(())
 	}
 

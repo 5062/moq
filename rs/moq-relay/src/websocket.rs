@@ -15,7 +15,7 @@ use axum::{
 	http::StatusCode,
 	response::Response,
 };
-use moq_net::{OriginConsumer, OriginProducer, StatsHandle, Tier};
+use moq_net::{OriginProducer, StatsHandle, Tier};
 
 use crate::{AuthParams, AuthToken, WebState, web::AuthQuery, web::MtlsPeer, web::landing_response};
 
@@ -85,7 +85,7 @@ async fn handle_socket<T>(
 	socket: T,
 	alpn: Option<String>,
 	publish: Option<OriginProducer>,
-	subscribe: Option<OriginConsumer>,
+	subscribe: Option<OriginProducer>,
 	stats: StatsHandle,
 ) -> anyhow::Result<()>
 where
@@ -104,12 +104,17 @@ where
 		None => bare,
 	};
 	let ws = bare.accept();
-	let session = moq_net::Server::new()
-		.with_publish(subscribe)
-		.with_consume(publish)
-		.with_stats(stats)
-		.accept(ws)
-		.await?;
+	// Only set the side the token actually grants. moq-net defaults the
+	// unset side to a fresh no-op origin, which is fine for a
+	// publish-only or subscribe-only token.
+	let mut server = moq_net::Server::new().with_stats(stats);
+	if let Some(subscribe) = subscribe {
+		server = server.with_publisher(subscribe);
+	}
+	if let Some(publish) = publish {
+		server = server.with_consumer(publish);
+	}
+	let session = server.accept(ws).await?;
 	session.closed().await.map_err(Into::into)
 }
 
