@@ -1,4 +1,10 @@
-name: Release Swift
+name: Release Swift FFI
+
+# Builds and publishes the raw `MoqFFI` Swift package (UniFFI bindings +
+# prebuilt XCFramework). Driven by the `moq-ffi-v*` tag that release-plz pushes
+# when it bumps rs/moq-ffi/Cargo.toml, so this package stays lockstep with the
+# moq-ffi crate. The ergonomic `Moq` wrapper is released separately
+# (release-swift-lib.yml) and versions independently.
 
 on:
   push:
@@ -6,19 +12,19 @@ on:
       - "moq-ffi-v*"
   pull_request:
     paths:
-      - ".github/workflows/release-swift.yml"
+      - ".github/workflows/release-swift-ffi.yml"
       - ".github/scripts/release.sh"
-      - "swift/Package.swift.template"
-      - "swift/scripts/package.sh"
-      - "swift/scripts/publish.sh"
-      - "swift/scripts/verify.sh"
+      - "swift/ffi/Package.swift.template"
+      - "swift/scripts/package-ffi.sh"
+      - "swift/scripts/publish-ffi.sh"
+      - "swift/scripts/verify-ffi.sh"
       - "rs/moq-ffi/build.sh"
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-swift
+  group: release-swift-ffi
   cancel-in-progress: false
 
 jobs:
@@ -161,7 +167,7 @@ jobs:
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
-          ./swift/scripts/package.sh \
+          ./swift/scripts/package-ffi.sh \
             --version "$BUILD_VERSION" \
             --lib-dir libs \
             --bindings-dir bindings \
@@ -170,14 +176,14 @@ jobs:
       - name: Upload Swift package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: swift-package
+          name: swift-ffi-package
           path: release-out/*
 
   release:
-    # Attach MoqFFI.xcframework.zip (and the staged Swift package
-    # tarball) to the moq-ffi-v* GitHub release. The mirror's
-    # Package.swift binaryTarget URL points at this asset, so it must
-    # exist before any consumer resolves the SPM tag.
+    # Attach MoqFFI.xcframework.zip (and the staged Swift package tarball) to
+    # the moq-ffi-v* GitHub release. The mirror's Package.swift binaryTarget URL
+    # points at this asset, so it must exist before any consumer resolves the
+    # SPM tag.
     name: Attach assets to GitHub release
     needs: [package, parse-version]
     runs-on: ubuntu-latest
@@ -189,9 +195,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
-          # No git operations here use the stored credential. gh CLI
-          # below picks up GH_TOKEN directly, so don't persist a
-          # contents-write token in .git/config.
+          # No git operations here use the stored credential. gh CLI below picks
+          # up GH_TOKEN directly, so don't persist a contents-write token.
           persist-credentials: false
 
       - name: Find previous tag
@@ -201,7 +206,7 @@ jobs:
       - name: Download package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: swift-package
+          name: swift-ffi-package
           path: artifacts
 
       - name: Create or update release
@@ -213,10 +218,10 @@ jobs:
         run: .github/scripts/release.sh create artifacts
 
   verify:
-    # Gate the mirror push on actually being able to resolve the staged
-    # package against the live release asset. Catches manifests that
-    # look syntactically fine but SPM cannot resolve (e.g. a path-based
-    # binaryTarget slipping in where a URL+checksum is expected).
+    # Gate the mirror push on actually being able to resolve the staged package
+    # against the live release asset. Catches manifests that look syntactically
+    # fine but SPM cannot resolve (e.g. a path-based binaryTarget slipping in
+    # where a URL+checksum is expected).
     name: Verify staged package resolves
     needs: [release, parse-version]
     runs-on: macos-latest
@@ -230,14 +235,14 @@ jobs:
       - name: Download staged package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: swift-package
+          name: swift-ffi-package
           path: artifacts
 
       - name: Resolve and build smoke consumer
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
-          ./swift/scripts/verify.sh --tarball "artifacts/moq-ffi-${BUILD_VERSION}-swift.tar.gz"
+          ./swift/scripts/verify-ffi.sh --tarball "artifacts/moq-ffi-${BUILD_VERSION}-swift-ffi.tar.gz"
 
   publish:
     name: Publish to Swift Package mirror
@@ -257,27 +262,24 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: moq-dev
-          repositories: moq-swift
-          # Narrow the minted token to only what publish.sh needs,
-          # rather than inheriting the full App installation scope.
+          repositories: moq-swift-ffi
+          # Narrow the minted token to only what publish-ffi.sh needs.
           permission-contents: write
 
       - name: Download package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: swift-package
+          name: swift-ffi-package
           path: swift-out
 
-      - name: Publish to moq-dev/moq-swift mirror
+      - name: Publish to moq-dev/moq-swift-ffi mirror
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
           # Token is minted fresh per run, expires in 1 hour, never at rest.
           SWIFT_MIRROR_TOKEN: ${{ steps.token.outputs.token }}
-          # Use the moq-bot identity for the commit author so the
-          # mirror's git log reflects who actually pushed.
           GIT_AUTHOR_NAME: moq-bot
           GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
-        run: ./swift/scripts/publish.sh
+        run: ./swift/scripts/publish-ffi.sh
 
   publish-dry-run:
     name: Publish dry-run
@@ -293,10 +295,10 @@ jobs:
       - name: Download package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: swift-package
+          name: swift-ffi-package
           path: swift-out
 
       - name: Dry-run publish to mirror
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-        run: ./swift/scripts/publish.sh --dry-run
+        run: ./swift/scripts/publish-ffi.sh --dry-run
