@@ -6,7 +6,7 @@ import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
-import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
+import { Announce, AnnounceInit, type AnnounceInterest, AnnounceOk } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -113,8 +113,19 @@ export class Publisher {
 				await init.encode(stream.writer, this.version);
 				break;
 			}
+			case Version.DRAFT_05_WIP: {
+				// Report our origin id once via AnnounceOk and the count of initial announces
+				// that follow; the subscriber stamps our origin onto each hop chain, so we omit it.
+				const ok = new AnnounceOk(this.origin, active.size);
+				await ok.encode(stream.writer, this.version);
+				for (const suffix of active) {
+					const wire = new Announce({ suffix, active: true });
+					await wire.encode(stream.writer, this.version);
+				}
+				break;
+			}
 			default:
-				// Draft03+: send individual Announce messages for initial state.
+				// Draft03/04: send individual Announce messages, stamping our origin as a hop.
 				for (const suffix of active) {
 					const wire = new Announce({ suffix, active: true, hops: [this.origin] });
 					await wire.encode(stream.writer, this.version);
@@ -144,10 +155,12 @@ export class Publisher {
 				newActive.add(suffix);
 			}
 
-			// Announce any new broadcasts.
+			// Announce any new broadcasts. Lite05+ reports our origin once via AnnounceOk, so
+			// the subscriber stamps it onto each hop chain; older versions stamp it here.
 			for (const added of newActive.difference(active)) {
 				console.debug(`announce: broadcast=${added} active=true`);
-				const wire = new Announce({ suffix: added, active: true, hops: [this.origin] });
+				const hops = this.version === Version.DRAFT_05_WIP ? [] : [this.origin];
+				const wire = new Announce({ suffix: added, active: true, hops });
 				await wire.encode(stream.writer, this.version);
 			}
 

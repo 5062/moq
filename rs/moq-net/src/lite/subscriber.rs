@@ -16,7 +16,7 @@ use crate::{
 	model::BroadcastProducer,
 };
 
-use super::Version;
+use super::{ConnectingProducer, Version};
 
 use web_async::Lock;
 
@@ -96,10 +96,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	pub async fn run(self) -> Result<(), Error> {
+	/// `connecting` is the connection-progress producer for this session (None for
+	/// versions with no initial-set boundary). It is threaded through the announce path
+	/// rather than stored on `Subscriber`: the struct is cloned for several long-lived
+	/// tasks (`bw`, `run_uni`), and any clone retaining a producer would keep the channel
+	/// open and hang `connect()`.
+	pub async fn run(self, connecting: Option<ConnectingProducer>) -> Result<(), Error> {
 		let bw = self.clone();
 		tokio::select! {
-			Err(err) = self.clone().run_announce() => Err(err),
+			Err(err) = self.clone().run_announce(connecting) => Err(err),
 			res = self.run_uni() => res,
 			Err(err) = bw.run_recv_bandwidth() => Err(err),
 		}
@@ -134,13 +139,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_announce(self) -> Result<(), Error> {
+	async fn run_announce(self, connecting: Option<ConnectingProducer>) -> Result<(), Error> {
 		let prefixes: Vec<PathOwned> = self.origin.allowed().map(|p| p.to_owned()).collect();
 
 		let mut tasks = FuturesUnordered::new();
 		for prefix in prefixes {
-			tasks.push(self.clone().run_announce_prefix(prefix));
+			tasks.push(self.clone().run_announce_prefix(prefix, connecting.clone()));
 		}
+
+		// Each prefix holds its own producer clone; drop ours so the channel closes (and
+		// connect() unblocks) once the last prefix finishes its initial set. With no
+		// prefixes, this is the only producer, so the session is connected now.
+		drop(connecting);
 
 		while let Some(result) = tasks.next().await {
 			result?;
@@ -149,7 +159,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_announce_prefix(mut self, prefix: PathOwned) -> Result<(), Error> {
+	async fn run_announce_prefix(
+		mut self,
+		prefix: PathOwned,
+		mut connecting: Option<ConnectingProducer>,
+	) -> Result<(), Error> {
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Announce).await?;
 
@@ -162,6 +176,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 		stream.writer.encode(&msg).await?;
 
+		// Lite05+: the publisher reports its own origin id (which we stamp onto every
+		// received Announce's hop chain, since it no longer does so itself) plus the
+		// count of initial active announces that follow immediately.
+		let (responder_origin, initial_count) = match self.version {
+			Version::Lite05Wip => {
+				let ok: lite::AnnounceOk = stream.reader.decode().await?;
+				(Some(ok.origin), ok.active)
+			}
+			_ => (None, 0),
+		};
+
 		let mut producers = HashMap::new();
 		// Per-broadcast subscriber-side stats guards. Dropping the guard records
 		// `subscriber.broadcasts_closed`. We only insert a guard when start_announce
@@ -173,6 +198,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// fanned-out level keys line up with the absolute broadcast paths a
 		// dashboard sees on the origin.
 
+		// `connecting` is a local (a param), not a `self` field, so the `self.clone()` that
+		// start_announce uses to spawn long-lived broadcast tasks doesn't carry the producer
+		// (which would keep the channel open for the broadcast's lifetime). Dropping it marks
+		// this prefix connected; on an early error it drops via scope exit, so a failed prefix
+		// can't hang connect().
+
 		match self.version {
 			Version::Lite01 | Version::Lite02 => {
 				let msg: lite::AnnounceInit = stream.reader.decode().await?;
@@ -180,7 +211,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.absolute(&path).to_owned();
 					// Lite01/02 don't carry hop information; the broadcast starts with an empty chain.
-					if self.start_announce(path.clone(), crate::OriginList::new(), &mut producers)? {
+					if self.start_announce(path.clone(), crate::OriginList::new(), responder_origin, &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}
@@ -189,6 +220,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				// Lite03+: no AnnounceInit, initial state comes via Announce messages.
 			}
 		}
+
+		// Release the producer once this prefix's initial set is in. Lite01/02 delivered it
+		// via AnnounceInit (consumed just above); Lite05 delivers `initial_count`
+		// Announce::Active counted in the loop below; Lite03/04 have no boundary (already None).
+		let mut initial_remaining = match self.version {
+			Version::Lite01 | Version::Lite02 => {
+				connecting.take();
+				0
+			}
+			Version::Lite05Wip => {
+				if initial_count == 0 {
+					connecting.take();
+				}
+				initial_count
+			}
+			_ => {
+				connecting.take();
+				0
+			}
+		};
 
 		while let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? {
 			match announce {
@@ -199,7 +250,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						// lite-05+ only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
 						// atomically replace the broadcast. Older versions fall through to start_announce,
 						// which rejects the duplicate (Error::Duplicate).
-						if self.restart_announce(path.clone(), hops, &mut producers)? {
+						if self.restart_announce(path.clone(), hops, responder_origin, &mut producers)? {
 							// Continuity: keep the existing stats guard if present.
 							stats_guards
 								.entry(abs.clone())
@@ -207,8 +258,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						} else {
 							stats_guards.remove(&abs);
 						}
-					} else if self.start_announce(path.clone(), hops, &mut producers)? {
+					} else if self.start_announce(path.clone(), hops, responder_origin, &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
+					}
+					// The first `initial_count` Active messages are the initial set; once
+					// they're all in, drop our producer to mark this prefix connected.
+					if initial_remaining > 0 {
+						initial_remaining -= 1;
+						if initial_remaining == 0 {
+							connecting.take();
+						}
 					}
 				}
 				lite::Announce::Ended { suffix, .. } => {
@@ -285,9 +344,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_announce(
 		&mut self,
 		path: PathOwned,
-		hops: crate::OriginList,
+		mut hops: crate::OriginList,
+		// Lite05+: the announce sender's origin id (from AnnounceOk). The sender no
+		// longer stamps itself onto the chain, so we append it here to reconstruct
+		// the full `[src...sender]` chain Lite04 stored. None for older versions,
+		// where the sender already appended itself.
+		responder_origin: Option<crate::Origin>,
 		producers: &mut HashMap<PathOwned, BroadcastProducer>,
 	) -> Result<bool, Error> {
+		if let Some(responder) = responder_origin {
+			// If the chain is already full, drop the announce — the same decision
+			// the Lite04 sender makes at its push site.
+			if hops.push(responder).is_err() {
+				tracing::warn!(
+					broadcast = %self.log_path(&path),
+					"dropping announce; hop chain at MAX_HOPS (possible loop)",
+				);
+				return Ok(false);
+			}
+		}
+
 		// Drop announces that already passed through us — this connection is
 		// a reflection, not a new path. Peers should be filtering via
 		// AnnounceInterest.exclude_hop, but Lite03 peers can't, so this is
@@ -330,11 +406,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn restart_announce(
 		&mut self,
 		path: PathOwned,
-		hops: crate::OriginList,
+		mut hops: crate::OriginList,
+		// Lite05+: the announce sender's origin id (from AnnounceOk), appended here to
+		// rebuild the full chain since the sender no longer stamps itself. None for older
+		// versions. See `start_announce`.
+		responder_origin: Option<crate::Origin>,
 		producers: &mut HashMap<PathOwned, BroadcastProducer>,
 	) -> Result<bool, Error> {
-		// Reflected loop: the replacement passed through us. Retire the broadcast.
-		if hops.contains(&self.self_origin) {
+		// Reflected loop (or a full chain): the replacement can't be used here. Retire the broadcast.
+		let reflected = match responder_origin {
+			Some(responder) => hops.push(responder).is_err() || hops.contains(&self.self_origin),
+			None => hops.contains(&self.self_origin),
+		};
+		if reflected {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected restart");
 			if let Some(mut old) = producers.remove(&path) {
 				old.abort(Error::Cancel).ok();
