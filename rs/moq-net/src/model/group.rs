@@ -417,6 +417,21 @@ impl GroupConsumer {
 	}
 }
 
+/// Options for a one-shot [`crate::TrackConsumer::fetch_group`] of a past group.
+#[derive(Clone, Debug, Default)]
+pub struct Fetch {
+	/// Delivery priority for the fetched group's stream. Defaults to 0.
+	pub priority: u8,
+}
+
+impl Fetch {
+	/// Set the delivery priority, returning `self` for chaining.
+	pub fn with_priority(mut self, priority: u8) -> Self {
+		self.priority = priority;
+		self
+	}
+}
+
 #[cfg(test)]
 mod test {
 	use super::*;
