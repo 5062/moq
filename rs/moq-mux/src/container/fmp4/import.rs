@@ -149,9 +149,14 @@ impl Import {
 			let handler = &trak.mdia.hdlr.handler;
 			let suffix = ".m4s";
 
+			// Declare the track at the fMP4's native timescale. Frame timestamps are
+			// emitted at this same scale (see below), so they satisfy the track's
+			// timescale invariant and ride the wire for the relay, redundant with the
+			// timing already inside each CMAF fragment.
+			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
 			let track = self.broadcast.create_track(
 				self.broadcast.unique_name(suffix),
-				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+				moq_net::TrackInfo::default().with_timescale(timescale),
 			)?;
 
 			let kind = match handler.as_ref() {
@@ -598,7 +603,23 @@ impl Import {
 				track.group.take().ok_or(Error::NoKeyframe)?
 			};
 
-			g.write_frame(fragment_bytes)?;
+			// Carry the fragment's earliest presentation time as the frame timestamp,
+			// and its total presentation span (sum of sample durations = final dts
+			// minus the fragment's base decode time) as the frame duration, both in
+			// the track's native timescale. The relay reads them off the wire; the
+			// consumer still drives playback from the fragment's internal timing.
+			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
+			let duration_units = dts.saturating_sub(tfdt.base_media_decode_time);
+			let duration = (duration_units > 0)
+				.then(|| moq_net::Timestamp::new(duration_units, timescale))
+				.transpose()?;
+			let mut frame = g.create_frame(moq_net::Frame {
+				size: fragment_bytes.len() as u64,
+				timestamp: Some(timestamp),
+				duration,
+			})?;
+			frame.write(fragment_bytes)?;
+			frame.finish()?;
 
 			track.group = Some(g);
 
