@@ -52,7 +52,7 @@ enum Command {
 		/// Serve HTTPS by setting `--tls-cert`/`--tls-key` or `--tls-generate`.
 		/// Most players require HTTPS.
 		#[command(flatten)]
-		tls: moq_native::ServerTlsConfig,
+		tls: moq_native::tls::Server,
 
 		/// LL-HLS part target duration (also caps the exporter's fragment duration).
 		#[arg(long, env = "MOQ_HLS_PART_TARGET", default_value = "500ms", value_parser = humantime::parse_duration)]
@@ -126,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
 
 			tokio::select! {
 				res = serve(app, listen, tls) => res,
-				res = reconnect.closed() => res,
+				res = reconnect.closed() => res.map_err(Into::into),
 				_ = tokio::signal::ctrl_c() => Ok(()),
 			}
 		}
@@ -140,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
 				.publish_broadcast(&broadcast, consumer)
 				.context("failed to publish broadcast")?;
 
-			let catalog = moq_mux::catalog::hang::Producer::new(&mut producer).context("failed to create catalog")?;
+			let catalog = moq_mux::catalog::Producer::new(&mut producer).context("failed to create catalog")?;
 			let mut importer = moq_hls::import::Import::new(producer, catalog, moq_hls::import::Config::new(playlist))?;
 
 			tracing::info!(%relay, %broadcast, "moq-hls importing HLS");
@@ -153,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
 					importer.init().await?;
 					importer.run().await
 				} => res.map_err(Into::into),
-				res = reconnect.closed() => res,
+				res = reconnect.closed() => res.map_err(Into::into),
 				_ = tokio::signal::ctrl_c() => Ok(()),
 			}
 		}

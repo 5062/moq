@@ -14,7 +14,7 @@ use bytes::Bytes;
 use m3u8_rs::{
 	AlternativeMedia, AlternativeMediaType, Map, MasterPlaylist, MediaPlaylist, MediaSegment, Resolution, VariantStream,
 };
-use moq_mux::catalog::hang::Producer as CatalogProducer;
+use moq_mux::catalog::Producer as CatalogProducer;
 use moq_mux::container::fmp4::Import as Fmp4;
 use reqwest::Client;
 use tracing::{debug, info, warn};

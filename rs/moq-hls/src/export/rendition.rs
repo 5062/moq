@@ -90,7 +90,7 @@ async fn run_pump(
 	store: &SegmentStore,
 	cfg: &Config,
 ) -> Result<()> {
-	let consumer = catalog::Consumer::new(&broadcast, CatalogFormat::Hang).await?;
+	let consumer = catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await?;
 	let mut filter = Filter::new(consumer);
 
 	// Narrow *both* axes to this rendition's name so the exporter sees exactly one

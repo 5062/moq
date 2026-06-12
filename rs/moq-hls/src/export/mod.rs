@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use hang::Catalog;
+use moq_mux::catalog::hang::Catalog;
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use tokio::sync::watch;
 
@@ -132,7 +132,7 @@ impl Broadcaster {
 }
 
 async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, broadcaster: Arc<Broadcaster>) {
-	let mut consumer = match catalog::Consumer::new(&broadcast, CatalogFormat::Hang).await {
+	let mut consumer = match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
 		Ok(consumer) => consumer,
 		Err(err) => {
 			tracing::warn!(%err, "failed to subscribe to broadcast catalog");

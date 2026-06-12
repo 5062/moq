@@ -23,7 +23,7 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
 		.create_track(
 			producer.unique_name(".avc3"),
@@ -64,7 +64,7 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::new(&consumer, crate::catalog::CatalogFormat::Hang)
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
 	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
@@ -127,7 +127,7 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
 		.create_track(
 			producer.unique_name(".aac"),
@@ -159,7 +159,7 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::new(&consumer, crate::catalog::CatalogFormat::Hang)
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.unwrap();
 	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
@@ -222,7 +222,7 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
 		.create_track(
 			producer.unique_name(".vp8"),
@@ -246,7 +246,7 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::new(&consumer, crate::catalog::CatalogFormat::Hang)
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
 	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
@@ -300,7 +300,7 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
 		.create_track(
 			producer.unique_name(".vp9"),
@@ -333,7 +333,7 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::new(&consumer, crate::catalog::CatalogFormat::Hang)
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
 	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
@@ -387,12 +387,12 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = crate::container::fmp4::Import::new(producer, catalog);
 	let mut buf = BytesMut::from(data.as_slice());
 	let _ = importer.decode(&mut buf);
 
-	let catalog_stream = crate::catalog::Consumer::new(&consumer, crate::catalog::CatalogFormat::Hang)
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
 	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
@@ -443,7 +443,7 @@ async fn next_fragment_reports_segment_metadata() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
 		.create_track(
 			producer.unique_name(".avc3"),
@@ -493,7 +493,7 @@ async fn next_fragment_reports_segment_metadata() {
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let catalog_stream = crate::catalog::Consumer::new(&consumer, crate::catalog::CatalogFormat::Hang)
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
 	// Sub-GOP cap so GOP 0 splits into two parts (the trailing part non-independent).
