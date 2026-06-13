@@ -11,7 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use moq_net::Timestamp;
 
 use crate::Error;
-use crate::capture::{self, Camera};
+use crate::capture::{self, FrameSource};
 
 use super::encoder::{self, Encoder};
 
@@ -101,7 +101,7 @@ pub async fn publish_capture(
 
 	let gate = Gate::new();
 
-	// ffmpeg capture + encode is blocking; keep it off the async runtime.
+	// Camera capture + encode is blocking; keep it off the async runtime.
 	let worker_gate = gate.clone();
 	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, capture, encode, worker_gate, clock));
 
@@ -154,8 +154,12 @@ fn capture_loop(
 	gate: Arc<Gate>,
 	clock: moq_mux::Clock,
 ) -> Result<(), Error> {
-	let mut camera: Option<Camera> = None;
+	let mut camera: Option<Box<dyn FrameSource>> = None;
 	let mut encoder: Option<Encoder> = None;
+	// Force an IDR on the first frame of each (re)open so a viewer subscribing
+	// after an idle gap can start decoding immediately, rather than waiting for
+	// the next GOP boundary.
+	let mut force_keyframe = false;
 	let mut last_ts = Timestamp::from_micros(0)?;
 	// The catalog video rendition only appears once a frame has been encoded
 	// (the importer reads the SPS). Until then we keep capturing regardless of
@@ -180,7 +184,7 @@ fn capture_loop(
 		// Open the camera (and an encoder sized to its negotiated mode) the
 		// first time we're watched after being idle.
 		if camera.is_none() {
-			let cam = Camera::open(&capture)?;
+			let cam = capture::open(&capture)?;
 			// Prefer an explicit --fps, otherwise use the camera's reported
 			// rate, falling back only if the backend doesn't expose one.
 			let framerate = capture
@@ -198,6 +202,7 @@ fn capture_loop(
 			);
 			camera = Some(cam);
 			encoder = Some(enc);
+			force_keyframe = true;
 		}
 
 		let frame = match camera.as_mut().expect("camera open above").read()? {
@@ -208,7 +213,11 @@ fn capture_loop(
 		let ts = Timestamp::from_micros(clock.micros())?;
 		last_ts = ts;
 
-		let packets = encoder.as_mut().expect("encoder built above").encode(&frame)?;
+		let packets = encoder
+			.as_mut()
+			.expect("encoder built above")
+			.encode(&frame, force_keyframe)?;
+		force_keyframe = false;
 		// Once the encoder has emitted a frame, the importer has parsed the SPS
 		// and the catalog rendition exists, so the gate can take over.
 		catalog_ready |= !packets.is_empty();

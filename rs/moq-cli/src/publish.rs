@@ -26,11 +26,15 @@ pub enum PublishFormat {
 #[cfg(feature = "capture")]
 #[derive(clap::Args, Clone)]
 pub struct CaptureArgs {
-	/// Camera device. Platform-specific: an avfoundation index/name on macOS,
-	/// a `/dev/videoN` path on Linux, or a dshow device name on Windows.
-	/// Omit to use the default camera.
-	#[arg(long)]
+	/// Camera device. Platform-specific: an AVFoundation `uniqueID` on macOS, or
+	/// a camera index / `/dev/videoN` path on Linux. Omit to use the default
+	/// camera. Ignored with `--screen`.
+	#[arg(long, conflicts_with = "screen")]
 	pub camera: Option<String>,
+
+	/// Capture a display (whole screen) instead of a camera. macOS only.
+	#[arg(long)]
+	pub screen: bool,
 
 	/// Requested capture width. The camera snaps to its nearest supported mode.
 	#[arg(long)]
@@ -52,7 +56,7 @@ pub struct CaptureArgs {
 	#[arg(long, conflicts_with = "software")]
 	pub hardware: bool,
 
-	/// Force the software encoder (libx264).
+	/// Force the software encoder (openh264).
 	#[arg(long)]
 	pub software: bool,
 
@@ -99,7 +103,7 @@ enum Source {
 	/// Decode a container read from stdin (or an HLS playlist).
 	Stream(PublishDecoder),
 	/// Capture from local devices. The per-medium producers are built on their
-	/// own capture threads (camera via ffmpeg, microphone via cpal), publishing
+	/// own capture threads (native camera/screen capture, microphone via cpal), publishing
 	/// onto the shared broadcast + catalog; [`Publish::run`] drives them
 	/// concurrently.
 	#[cfg(feature = "capture")]
@@ -220,7 +224,11 @@ impl Publish {
 impl CaptureArgs {
 	fn video_config(&self) -> moq_video::capture::Config {
 		let mut config = moq_video::capture::Config::default();
-		config.device = self.camera.clone();
+		if self.screen {
+			config.source = moq_video::capture::Source::Display;
+		} else {
+			config.device = self.camera.clone();
+		}
 		config.width = self.width;
 		config.height = self.height;
 		config.framerate = self.fps;
