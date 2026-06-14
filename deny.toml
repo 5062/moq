@@ -74,8 +74,4 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # The `vaapi` feature pulls discord/cros-codecs (the maintained fork: cros-libva
 # 0.0.13 + a hardened H.264 VAAPI encoder) and patches cros-libva to discord's
 # fork for the `dlopen` feature. Drop these once `dlopen` is upstreamed.
-allow-git = [
-    "https://github.com/kixelated/nvidia-video-codec-sdk",
-    "https://github.com/discord/cros-codecs",
-    "https://github.com/discord/cros-libva",
-]
+allow-git = ["https://github.com/kixelated/nvidia-video-codec-sdk", "https://github.com/discord/cros-codecs", "https://github.com/discord/cros-libva"]

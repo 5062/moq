@@ -8,6 +8,11 @@ license = "MIT OR Apache-2.0"
 version = "0.0.3"
 edition = "2024"
 rust-version.workspace = true
+# Not publishable to crates.io while the `vaapi` feature pulls cros-codecs from
+# git; flip back once that fork is published (tracked separately). This also lets
+# cargo-deny's allow-wildcard-paths exempt the git dep, which it only does for
+# unpublished crates.
+publish = false
 
 keywords = ["quic", "http3", "webtransport", "media", "video"]
 categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
@@ -41,7 +46,9 @@ bytes = "1"
 # against libva >= 2.23 (published cros-codecs pins the broken 0.0.12), plus a
 # hardened H.264 encoder (packed SPS/PPS + slice headers, frame_num, rate
 # control). `vaapi_dlopen` loads libva at runtime.
-cros-codecs = { git = "https://github.com/discord/cros-codecs.git", branch = "discord-0.0.5", optional = true, default-features = false, features = ["vaapi_dlopen"] }
+cros-codecs = { git = "https://github.com/discord/cros-codecs.git", branch = "discord-0.0.5", optional = true, default-features = false, features = [
+    "vaapi_dlopen",
+] }
 cudarc = { version = "0.19", optional = true, default-features = false, features = ["driver"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
@@ -76,7 +83,21 @@ objc2-screen-capture-kit = "0.3.2"
 objc2-video-toolbox = "0.3.2"
 
 [target.'cfg(target_os="windows")'.dependencies]
-# Native Media Foundation webcam capture (replaces nokhwa). An `IMFSourceReader`
-# with its video processor enabled converts the camera's native format to NV12,
-# which we deinterleave to I420. Links only system import libs, no vendor SDK.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_Media_MediaFoundation"] }
+# Native Media Foundation webcam capture + hardware H.264 encode (replaces
+# nokhwa). An `IMFSourceReader` backed by a D3D11 device hands us NV12 textures
+# that feed a hardware encoder MFT zero-copy; without a GPU it falls back to CPU
+# NV12 deinterleaved to I420 for openh264. Links only system import libs, no
+# vendor SDK. The Direct3D11 / Dxgi features cover the shared D3D11 device and
+# the `IMFDXGIBuffer` surfaces wrapping each captured texture.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Media_MediaFoundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D10",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
