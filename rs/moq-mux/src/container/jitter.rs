@@ -12,24 +12,18 @@ use moq_net::Timestamp;
 ///
 /// A non-reordered stream reports the frame duration; a B-frame stream reports the deeper
 /// reorder delay (e.g. up to 3 consecutive B-frames is 3x the frame duration).
+///
+/// Both contributions are kept as scale-free [`Duration`]s: the inputs are `Timestamp`s that
+/// may carry different timescales (frame PTS vs a 90 kHz reorder delay), and `Timestamp`
+/// arithmetic panics across scales, so they are converted at the boundary before comparison.
+#[derive(Default)]
 pub struct Jitter {
 	last_timestamp: Option<Timestamp>,
-	min_duration: Option<Timestamp>,
-	max_reorder: Timestamp,
+	min_duration: Option<Duration>,
+	max_reorder: Duration,
 	/// Last value handed back from [`observe`](Self::observe) /
 	/// [`observe_reorder`](Self::observe_reorder), so they only report on a change.
-	reported: Option<Timestamp>,
-}
-
-impl Default for Jitter {
-	fn default() -> Self {
-		Self {
-			last_timestamp: None,
-			min_duration: None,
-			max_reorder: Timestamp::ZERO,
-			reported: None,
-		}
-	}
+	reported: Option<Duration>,
 }
 
 impl Jitter {
@@ -45,6 +39,7 @@ impl Jitter {
 			&& let Ok(duration) = ts.checked_sub(last)
 			&& !duration.is_zero()
 		{
+			let duration = Duration::from(duration);
 			self.min_duration = Some(match self.min_duration {
 				Some(min) => min.min(duration),
 				None => duration,
@@ -56,7 +51,7 @@ impl Jitter {
 	/// Record a frame's reorder delay (`PTS - DTS`), updating the maximum. Returns the new
 	/// jitter as a [`Duration`] if it changed, else `None`.
 	pub fn observe_reorder(&mut self, reorder: Timestamp) -> Option<Duration> {
-		self.max_reorder = self.max_reorder.max(reorder);
+		self.max_reorder = self.max_reorder.max(Duration::from(reorder));
 		self.report()
 	}
 
@@ -66,11 +61,11 @@ impl Jitter {
 	/// rendition exists would otherwise be lost.
 	pub fn current(&self) -> Option<Duration> {
 		let jitter = self.combined();
-		(!jitter.is_zero()).then(|| jitter.into())
+		(!jitter.is_zero()).then_some(jitter)
 	}
 
-	fn combined(&self) -> Timestamp {
-		self.min_duration.unwrap_or(Timestamp::ZERO).max(self.max_reorder)
+	fn combined(&self) -> Duration {
+		self.min_duration.unwrap_or(Duration::ZERO).max(self.max_reorder)
 	}
 
 	/// Report the current jitter only when it changes.
@@ -80,6 +75,6 @@ impl Jitter {
 			return None;
 		}
 		self.reported = Some(jitter);
-		Some(jitter.into())
+		Some(jitter)
 	}
 }
