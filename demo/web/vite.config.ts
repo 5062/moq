@@ -14,15 +14,15 @@ export default defineConfig({
 		solidPlugin(),
 		workletInline(),
 		consoleOverlay(),
-		// Open the watch and publish demos each in their own tab.
-		openTabs(["index.html", "publish.html"]),
+		// Open the watch, publish, and stats demos each in their own tab.
+		openTabs(["watch.html", "publish.html", "stats.html"]),
 	],
 	build: {
 		target: "esnext",
 		sourcemap: process.env.NODE_ENV === "production" ? false : "inline",
 		rollupOptions: {
 			input: {
-				watch: resolve(__dirname, "src/index.html"),
+				watch: resolve(__dirname, "src/watch.html"),
 				publish: resolve(__dirname, "src/publish.html"),
 				stats: resolve(__dirname, "src/stats.html"),
 			},

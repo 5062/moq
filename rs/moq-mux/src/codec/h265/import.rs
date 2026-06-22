@@ -20,7 +20,7 @@ use crate::Result;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::NalIterator;
 use crate::container::Frame;
-use crate::container::jitter::MinFrameDuration;
+use crate::container::jitter::Jitter;
 
 /// A pure-publisher importer for H.265 with inline VPS/SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
@@ -34,7 +34,7 @@ pub struct Import<E: CatalogExt = ()> {
 	rendition: crate::catalog::VideoTrack<E>,
 	config: Option<hang::catalog::VideoConfig>,
 	last_sps: Option<Bytes>,
-	jitter: MinFrameDuration,
+	jitter: Jitter,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -46,7 +46,7 @@ impl<E: CatalogExt> Import<E> {
 			rendition,
 			config: None,
 			last_sps: None,
-			jitter: MinFrameDuration::new(),
+			jitter: Jitter::new(),
 		}
 	}
 
@@ -94,6 +94,15 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
+	/// Record a frame's reorder delay (`PTS - DTS`) so the catalog `jitter` reflects the
+	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The
+	/// container supplies this since the elementary stream alone carries no decode time.
+	pub fn observe_reorder(&mut self, reorder: moq_net::Timestamp) {
+		if let Some(jitter) = self.jitter.observe_reorder(reorder) {
+			self.rendition.update(|c| c.jitter = Some(jitter));
+		}
+	}
+
 	/// Resolve the config from an inline SPS, updating the rendition in place on a
 	/// change.
 	fn configure_from_sps(&mut self, sps_nal: &Bytes) -> Result<()> {
@@ -131,6 +140,12 @@ impl<E: CatalogExt> Import<E> {
 
 		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
 		self.rendition.set(config.clone());
+		// Seed jitter from whatever has accumulated: a dirty start (or a B-frame
+		// reorder observed via observe_reorder) can feed updates before this
+		// rendition exists, so those would otherwise be lost on (re)publish.
+		if let Some(jitter) = self.jitter.current() {
+			self.rendition.update(|c| c.jitter = Some(jitter));
+		}
 		self.config = Some(config);
 		Ok(())
 	}

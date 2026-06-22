@@ -2,7 +2,7 @@ use bytes::Bytes;
 
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
-use crate::container::jitter::MinFrameDuration;
+use crate::container::jitter::Jitter;
 
 use super::FrameHeader;
 
@@ -24,7 +24,7 @@ pub struct Import<E: CatalogExt = ()> {
 	config: Option<hang::catalog::VideoConfig>,
 
 	// Tracks the minimum frame duration and updates the catalog `jitter` field.
-	jitter: MinFrameDuration,
+	jitter: Jitter,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -35,7 +35,7 @@ impl<E: CatalogExt> Import<E> {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 			config: None,
-			jitter: MinFrameDuration::new(),
+			jitter: Jitter::new(),
 		}
 	}
 

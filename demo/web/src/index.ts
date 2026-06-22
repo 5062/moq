@@ -533,3 +533,15 @@ function formatBytes(n: number): string {
 	if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
 	return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+// Vite re-evaluates this module on hot reload, dropping the references to the
+// module-scoped effects/connection above. Close them on dispose so they don't
+// get garbage collected unclosed (which the signals library warns about).
+if (import.meta.hot) {
+	import.meta.hot.dispose(() => {
+		for (const effect of [discovery, tilesEffect, ui, viz]) effect.close();
+		for (const tile of tiles.values()) tile.close();
+		tiles.clear();
+		connection.close();
+	});
+}
