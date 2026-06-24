@@ -243,11 +243,11 @@ export class Subscriber {
 			};
 		});
 
-		(async () => {
+		void (async () => {
 			for (;;) {
 				const request = await broadcast.requested();
 				if (!request) break;
-				this.#runSubscribe(path, request);
+				void this.#runSubscribe(path, request);
 			}
 		})();
 

@@ -89,7 +89,7 @@ async function publish(config: Config) {
 		if (request.name === config.track) {
 			// Accept to commit the track's immutable properties (so a lite-05 TRACK
 			// request resolves) and obtain the Track to produce into.
-			publishTrack(request.accept());
+			void publishTrack(request.accept());
 		} else {
 			request.reject(new Error("not found"));
 		}

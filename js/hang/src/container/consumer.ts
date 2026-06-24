@@ -22,6 +22,58 @@ interface Group {
 	done?: boolean; // Set when #runGroup finishes reading all frames
 }
 
+/**
+ * A recorded rewind boundary.
+ *
+ * After a backwards timestamp jump, groups can still arrive out of order, so a single
+ * sequence floor is not enough: a late new-epoch group can have a lower sequence than the
+ * group that triggered detection. This keeps just enough state to classify any group by
+ * its (sequence, timestamp).
+ */
+class Reset {
+	/** Highest-sequence old-epoch group seen at detection. At or below this is old: drop. */
+	readonly prevMax: number;
+	/** The group whose backwards timestamp triggered detection. At or above this is new: keep. */
+	readonly group: number;
+	/** That group's timestamp; in the ambiguous span, old stragglers sit at or above it. */
+	readonly timestamp: Time.Micro;
+
+	constructor(prevMax: number, group: number, timestamp: Time.Micro) {
+		this.prevMax = prevMax;
+		this.group = group;
+		this.timestamp = timestamp;
+	}
+
+	/** Classify by sequence alone: true=old, false=new, undefined=ambiguous (resolve by timestamp). */
+	bySequence(sequence: number): boolean | undefined {
+		if (sequence <= this.prevMax) return true;
+		if (sequence >= this.group) return false;
+		return undefined;
+	}
+
+	/** Whether a group belongs to the reneged old epoch and should be dropped. */
+	isStale(sequence: number, timestamp: Time.Micro): boolean {
+		return this.bySequence(sequence) ?? timestamp >= this.timestamp;
+	}
+}
+
+/**
+ * Live state for detecting timeline rewinds and classifying out-of-order groups.
+ *
+ * A publisher reneges its buffered tail by rewinding timestamps while group sequence keeps
+ * climbing (e.g. a voice agent interrupted mid-utterance). We track the live edge to spot the
+ * jump, a {@link Reset} boundary to classify out-of-order groups across it, and a counter that
+ * downstream consumers watch to flush their own queues.
+ */
+class Rewind {
+	/** The live edge of playback: max delivered timestamp and the group that carried it. */
+	liveEdge?: { group: number; timestamp: Time.Micro };
+	/** The active rewind boundary, if any. */
+	boundary?: Reset;
+	/** Increments on every rewind; downstream consumers flush their queues when it changes. */
+	discontinuity = 0;
+}
+
 /** Reads frames from a MoQ track in order, buffering groups and skipping slow ones to meet the latency target. */
 export class Consumer {
 	#track: Moq.TrackSubscriber;
@@ -29,6 +81,7 @@ export class Consumer {
 	#latency: Getter<Time.Milli>;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
+	#rewind = new Rewind(); // live edge + active boundary + discontinuity count
 
 	// Wake up the consumer when a new frame is available.
 	#notify?: () => void;
@@ -67,9 +120,21 @@ export class Consumer {
 				this.#active = consumer.sequence;
 			}
 
-			if (consumer.sequence < this.#active) {
-				console.warn(`skipping old group: ${consumer.sequence} < ${this.#active}`);
-				// Skip old groups.
+			// Normally we drop anything behind the cursor. With an active reset the cursor isn't
+			// a valid floor (a late new-epoch group can sit below it); defer to the boundary and
+			// admit ambiguous groups so #runGroup can rule on them once their timestamps arrive.
+			let drop: boolean;
+			if (this.#rewind.boundary) {
+				const verdict = this.#rewind.boundary.bySequence(consumer.sequence);
+				if (verdict === undefined) drop = false;
+				else if (verdict) drop = true;
+				else drop = consumer.sequence < this.#active;
+			} else {
+				drop = consumer.sequence < this.#active;
+			}
+
+			if (drop) {
+				console.warn(`skipping old group: ${consumer.sequence}`);
 				consumer.close();
 				continue;
 			}
@@ -128,7 +193,10 @@ export class Consumer {
 						this.#notify?.();
 						this.#notify = undefined;
 					} else {
-						// Check for latency violations if this is a newer group.
+						// Newer group: resolve it against an active reset (dropping a reneged
+						// straggler), else detect a new rewind, then check latency.
+						if (this.#classifyStale(group)) return;
+						this.#checkReset(group);
 						this.#checkLatency();
 
 						// A newer group reaching back to where the stalled active group has
@@ -237,12 +305,100 @@ export class Consumer {
 		return true;
 	}
 
+	// Detect a publisher "rewind" and record the reneged boundary. A newer group (sequence
+	// climbs) whose earliest frame lands before the live edge (timestamp goes backwards) can
+	// only be an explicit reneg of the buffered tail; record the boundary, bump the
+	// discontinuity counter, drop the groups it proves stale, and resume from the earliest
+	// survivor. Groups still ambiguous (a late new-epoch group vs. an old straggler) are kept
+	// and resolved by #classifyStale once their timestamps arrive.
+	#checkReset(group: Group) {
+		if (this.#active === undefined) return;
+
+		const live = this.#rewind.liveEdge;
+		if (live === undefined) return;
+
+		// Only a group newer than the active one can rewind the timeline.
+		if (group.consumer.sequence <= this.#active) return;
+
+		const start = group.frames.at(0)?.timestamp;
+		if (start === undefined) return;
+
+		// A rewind is the timestamp going strictly backwards past the live edge. Anything at
+		// or ahead of it is normal forward motion.
+		if (start >= live.timestamp) return;
+
+		const reset = new Reset(live.group, group.consumer.sequence, start);
+		this.#rewind.boundary = reset;
+		this.#rewind.discontinuity++;
+
+		// Drop buffered groups the boundary can already prove stale; keep ambiguous ones.
+		this.#groups = this.#groups.filter((g) => {
+			const verdict = reset.bySequence(g.consumer.sequence);
+			const first = g.frames.at(0);
+			const stale = verdict ?? (first !== undefined && reset.isStale(g.consumer.sequence, first.timestamp));
+			if (stale) {
+				g.consumer.close();
+				g.frames.length = 0;
+			}
+			return !stale;
+		});
+
+		console.warn(`buffer reset: group timestamps rewound (prevMax ${reset.prevMax}, group ${reset.group})`);
+
+		// Resume from the earliest survivor; if none, from the rewound group. Anchor the live
+		// edge at the rewind point (delivered), not group.latest (buffered ahead of playback).
+		this.#active = this.#groups[0]?.consumer.sequence ?? reset.group;
+		this.#rewind.liveEdge = { group: reset.group, timestamp: start };
+		this.#updateBuffered();
+
+		// Wake up any consumer waiting for a new frame.
+		this.#notify?.();
+		this.#notify = undefined;
+	}
+
+	// Drop a group that an active reset resolves as a reneged old straggler (its timestamp
+	// landed at or above the reset point). Returns true if the group was dropped.
+	#classifyStale(group: Group): boolean {
+		const reset = this.#rewind.boundary;
+		if (!reset) return false;
+
+		const first = group.frames.at(0);
+		if (first === undefined) return false;
+		if (!reset.isStale(group.consumer.sequence, first.timestamp)) return false;
+
+		this.#groups = this.#groups.filter((g) => g !== group);
+		group.consumer.close();
+		group.frames.length = 0;
+		this.#updateBuffered();
+		return true;
+	}
+
+	// Re-check buffered newer groups against the current live edge. #checkReset otherwise only
+	// runs when a group receives a frame, so a group that buffered while the live edge was lower
+	// (or undefined) is never reconsidered once delivery advances the edge past it, and the
+	// rewind would be missed. Highest sequence first, mirroring the Rust scan: the first rewound
+	// group becomes the boundary, and #checkReset's own guards make the rest no-ops.
+	#checkBufferedReset(): void {
+		if (this.#active === undefined || this.#rewind.liveEdge === undefined) return;
+		for (const group of [...this.#groups].reverse()) {
+			if (group.consumer.sequence <= this.#active) break;
+			this.#checkReset(group);
+		}
+	}
+
 	/**
-	 * Returns the next frame in order along with its group number, awaiting one if needed.
-	 * A `frame` of undefined signals the end of that group; the overall result is undefined once closed.
+	 * Returns the next frame in order along with its group number and the current
+	 * {@link discontinuity} count, awaiting one if needed. A `frame` of undefined signals the
+	 * end of that group; the overall result is undefined once closed. When `discontinuity`
+	 * jumps relative to the previous call, the publisher rewound the timeline: flush any
+	 * downstream decoder or render buffers before playing this frame.
 	 */
-	async next(): Promise<{ frame: Frame | undefined; group: number } | undefined> {
+	async next(): Promise<{ frame: Frame | undefined; group: number; discontinuity: number } | undefined> {
 		for (;;) {
+			// A group may have buffered a rewind while the live edge was still behind it; catch it
+			// now that delivery has advanced the edge.
+			this.#checkBufferedReset();
+
 			if (
 				this.#groups.length > 0 &&
 				this.#active !== undefined &&
@@ -250,8 +406,15 @@ export class Consumer {
 			) {
 				const frame = this.#groups[0].frames.shift();
 				if (frame) {
+					const seq = this.#groups[0].consumer.sequence;
+					// Track the live edge (max timestamp + its group) so a later backwards jump
+					// is detectable and the old epoch's tail is anchored.
+					const live = this.#rewind.liveEdge;
+					if (live === undefined || frame.timestamp > live.timestamp) {
+						this.#rewind.liveEdge = { group: seq, timestamp: frame.timestamp };
+					}
 					this.#updateBuffered();
-					return { frame, group: this.#groups[0].consumer.sequence };
+					return { frame, group: seq, discontinuity: this.#rewind.discontinuity };
 				}
 
 				// Check if the group is done and then remove it.
@@ -267,7 +430,11 @@ export class Consumer {
 					const group = this.#groups.shift();
 					if (group) {
 						this.#updateBuffered();
-						return { frame: undefined, group: group.consumer.sequence };
+						return {
+							frame: undefined,
+							group: group.consumer.sequence,
+							discontinuity: this.#rewind.discontinuity,
+						};
 					}
 				}
 
@@ -322,6 +489,15 @@ export class Consumer {
 		}
 
 		this.#buffered.set(ranges);
+	}
+
+	/**
+	 * A counter that increments each time the consumer detects a timeline rewind and drops the
+	 * reneged buffer. Also surfaced per-read via {@link next}; downstream consumers flush their
+	 * decoder and render buffers when it changes.
+	 */
+	get discontinuity(): number {
+		return this.#rewind.discontinuity;
 	}
 
 	/** Stop consuming and release the track and all buffered groups. */

@@ -107,7 +107,7 @@ export class Connection implements Established {
 			this.#peerSetup,
 		);
 
-		this.#run();
+		void this.#run();
 	}
 
 	/**

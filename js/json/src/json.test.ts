@@ -139,14 +139,16 @@ test("mutate removes a section", async () => {
 
 test("tight ratio rolls snapshots", async () => {
 	const track = new TrackProducer("test");
-	// A ratio of 1.0 leaves no room for any delta past the snapshot, so every change rolls.
-	const producer = new Producer<Value>(track, { deltaRatio: 1.0 });
-	producer.update({ a: 1 });
-	producer.update({ a: 2 });
-	producer.update({ a: 3 });
+	// A ratio of 1 admits deltas only up to the snapshot size: with equal 7-byte frames that is a
+	// single delta per group, so it rolls every other update.
+	const producer = new Producer<Value>(track, { deltaRatio: 1 });
+	producer.update({ a: 1 }); // snapshot, group 0
+	producer.update({ a: 2 }); // delta, group 0
+	producer.update({ a: 3 }); // exceeds budget, rolls group 1
+	producer.update({ a: 4 }); // delta, group 1
 	producer.finish();
 
-	expect(await structure(track.subscribe())).toEqual([1, 1, 1]);
+	expect(await structure(track.subscribe())).toEqual([2, 2]);
 });
 
 test("array change is a wholesale delta", async () => {

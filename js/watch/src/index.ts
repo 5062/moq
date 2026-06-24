@@ -5,6 +5,7 @@ export * as Signals from "@moq/signals";
 export * as Audio from "./audio";
 export * from "./backend";
 export * from "./broadcast";
+export * from "./buffered";
 export * as Mse from "./mse";
 export * from "./sync";
 export * as Video from "./video";

@@ -223,9 +223,11 @@ impl<E: CatalogExt> Import<E> {
 }
 
 /// Detect the avc1 wire shape from leading bytes: a 3- or 4-byte Annex-B start
-/// code means avc3, otherwise an AVCDecoderConfigurationRecord (avc1).
+/// code means avc3, otherwise an AVCDecoderConfigurationRecord (avc1). An empty
+/// buffer is avc3: there's no avcC to parse, and avc3 self-initializes from the
+/// first keyframe (e.g. moqsink hands an empty init for inline-SPS/PPS streams).
 fn detect_avc1(bytes: &[u8]) -> bool {
-	!(matches!(bytes, [0, 0, 1, ..]) || matches!(bytes, [0, 0, 0, 1, ..]))
+	!(bytes.is_empty() || matches!(bytes, [0, 0, 1, ..]) || matches!(bytes, [0, 0, 0, 1, ..]))
 }
 
 fn is_sps(nal: &[u8]) -> bool {

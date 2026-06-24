@@ -2,20 +2,27 @@ import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import type * as z from "zod/mini";
 
+import { Encoder } from "./compression.ts";
 import { deepEqual, diff } from "./diff.ts";
 
 // Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced. Kept
 // well below the per-group frame cap so a late joiner can always read the snapshot at frame 0.
 const MAX_DELTA_FRAMES = 256;
 
+// Delta ratio used when {@link Config.deltaRatio} is left unset.
+const DEFAULT_DELTA_RATIO = 8;
+
 export interface Config<T> {
-	// Controls whether the producer emits deltas (merge patches) instead of full snapshots.
+	// Controls how aggressively the producer emits deltas (merge patches) instead of full snapshots.
 	//
-	// `undefined` disables deltas: every change is published as a new snapshot group.
+	// `0` disables deltas: every change is published as a new snapshot group.
 	//
-	// A number enables deltas: a delta is appended to the current group as long as the group's
-	// total size stays within `deltaRatio` times the size of a fresh snapshot; otherwise a new
-	// snapshot group is started.
+	// A positive number enables deltas: a delta is appended to the current group as long as the
+	// accumulated deltas (excluding the snapshot frame) stay within `deltaRatio` times the size of a
+	// fresh snapshot; otherwise a new snapshot group is started. So `1` allows deltas totalling up to
+	// one snapshot before rolling.
+	//
+	// Defaults to `8` when unset.
 	deltaRatio?: number;
 
 	// Optional zod schema used to validate each value before publishing.
@@ -24,6 +31,12 @@ export interface Config<T> {
 	// Starting value for {@link Producer.mutate} before anything has been published. Required to
 	// mutate a producer that hasn't published yet (e.g. a fresh catalog); ignored once a value exists.
 	initial?: T;
+
+	// Compress each group as one sync-flushed `deflate-raw` (RFC 1951) stream, so deltas reuse the
+	// snapshot as context and shrink sharply. Interoperable with the Rust `moq-json` producer.
+	// `false`/unset (the default) writes plaintext JSON frames. A {@link Consumer} reading the track
+	// must set the same flag.
+	compression?: boolean;
 }
 
 /** Publishes a JSON value over a track, choosing snapshots and deltas automatically. */
@@ -33,12 +46,22 @@ export class Producer<T> {
 
 	#group?: Moq.Group;
 	#last?: unknown;
-	#groupBytes = 0;
+	// Bytes of deltas accumulated in the current group, excluding the snapshot frame. Always raw
+	// (uncompressed) sizes, even when compressing: the delta-vs-snapshot decision measures raw bytes,
+	// so a compressed producer rolls groups on raw sizes (still valid on the wire, just a touch sooner
+	// than the Rust producer, which measures compressed sizes).
+	#deltaBytes = 0;
 	#groupFrames = 0;
+
+	// Group-scoped `deflate-raw` compression. `#encoder` is the current group's stream, swapped for a
+	// fresh one (cold window) at each snapshot, so a snapshot and its deltas share one DEFLATE stream.
+	#compress = false;
+	#encoder?: Encoder;
 
 	constructor(track: Moq.TrackProducer, config: Config<T> = {}) {
 		this.#track = track;
 		this.#config = config;
+		this.#compress = config.compression ?? false;
 	}
 
 	/** Publish a new value, emitting a snapshot or delta automatically. No-op if unchanged. */
@@ -54,8 +77,8 @@ export class Producer<T> {
 		const snapshot = new TextEncoder().encode(text);
 		const delta = this.#delta(json, snapshot.length);
 		if (delta && this.#group) {
-			this.#group.writeFrame({ data: delta, timestamp: Time.Timestamp.now() });
-			this.#groupBytes += delta.length;
+			this.#writeDelta(this.#group, delta);
+			this.#deltaBytes += delta.length;
 			this.#groupFrames += 1;
 		} else {
 			this.#snapshot(snapshot);
@@ -101,9 +124,14 @@ export class Producer<T> {
 		this.#track.close();
 	}
 
+	// Resolved delta ratio: the configured value, or the default when unset. `0` disables deltas.
+	get #deltaRatio(): number {
+		return this.#config.deltaRatio ?? DEFAULT_DELTA_RATIO;
+	}
+
 	#delta(json: unknown, snapshotLen: number): Uint8Array | undefined {
-		const ratio = this.#config.deltaRatio;
-		if (ratio === undefined) return undefined;
+		const ratio = this.#deltaRatio;
+		if (ratio === 0) return undefined;
 		if (this.#last === undefined) return undefined;
 		if (!this.#group || this.#groupFrames >= MAX_DELTA_FRAMES) return undefined;
 
@@ -112,8 +140,8 @@ export class Producer<T> {
 
 		const delta = new TextEncoder().encode(JSON.stringify(result.patch));
 
-		// Roll a snapshot if appending the delta would bloat the group past the budget.
-		if (this.#groupBytes + delta.length > ratio * snapshotLen) return undefined;
+		// Roll a snapshot once the deltas would outgrow the budget (snapshot frame excluded).
+		if (this.#deltaBytes + delta.length > ratio * snapshotLen) return undefined;
 
 		return delta;
 	}
@@ -123,11 +151,11 @@ export class Producer<T> {
 		this.#group?.close();
 
 		const group = this.#track.appendGroup();
-		group.writeFrame({ data: snapshot, timestamp: Time.Timestamp.now() });
-		this.#groupBytes = snapshot.length;
+		this.#writeSnapshot(group, snapshot);
+		this.#deltaBytes = 0;
 		this.#groupFrames = 1;
 
-		if (this.#config.deltaRatio !== undefined) {
+		if (this.#deltaRatio !== 0) {
 			// Keep the group open so future deltas can be appended.
 			this.#group = group;
 		} else {
@@ -135,5 +163,26 @@ export class Producer<T> {
 			group.close();
 			this.#group = undefined;
 		}
+	}
+
+	// Write a group's snapshot (frame 0). On the compressed path this opens a fresh per-group encoder
+	// (cold window), so the snapshot and its deltas share one DEFLATE stream.
+	#writeSnapshot(group: Moq.Group, frame: Uint8Array): void {
+		let data = frame;
+		if (this.#compress) {
+			this.#encoder = new Encoder();
+			data = this.#encoder.frame(frame);
+		}
+		group.writeFrame({ data, timestamp: Time.Timestamp.now() });
+	}
+
+	// Write a delta frame, compressed against the current group's encoder when compressing.
+	#writeDelta(group: Moq.Group, frame: Uint8Array): void {
+		let data = frame;
+		if (this.#compress) {
+			if (!this.#encoder) throw new Error("compressed delta requires an open group");
+			data = this.#encoder.frame(frame);
+		}
+		group.writeFrame({ data, timestamp: Time.Timestamp.now() });
 	}
 }

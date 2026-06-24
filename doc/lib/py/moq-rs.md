@@ -72,6 +72,26 @@ async for announcement in client.announced("prefix/"):
         ...
 ```
 
+### Catalog extensions
+
+Advertise application-specific metadata (for example a side-channel transcript track) as an untyped catalog section. The value is any JSON string; it rides alongside `video`/`audio` and reaches subscribers as `Catalog.extra`.
+
+```python
+import json
+
+# Publish: attach a custom section.
+broadcast = moq.BroadcastProducer()
+broadcast.set_catalog_section("transcript", json.dumps({"track": "transcript.json"}))
+client.publish("my-stream", broadcast)
+
+# Subscribe: read it back. Sections are unknown to the base catalog, so decode the JSON yourself.
+catalog = await announcement.broadcast.catalog()
+if "transcript" in catalog.extra:
+    info = json.loads(catalog.extra["transcript"])
+```
+
+`"video"` and `"audio"` are reserved names. Remove a section with `broadcast.remove_catalog_section("transcript")`.
+
 ### Raw tracks (no codec)
 
 ```python
@@ -111,6 +131,7 @@ Missing track subscriptions are accepted while the `BroadcastDynamic` object is 
 ```python
 async for announcement in client.announced("live/"):
     print(announcement.path)
+    print(announcement.hops)  # relay origin ids the broadcast traversed, oldest first
     ...
 
 # Or wait for a specific path to be announced:
@@ -120,6 +141,8 @@ broadcast = await client.announced_broadcast("live/cam1")
 # handler if the origin has one, else raises. Does not wait for a future announce.
 broadcast = await client.request_broadcast("live/cam1")
 ```
+
+`announcement.hops` is the chain of relay origin ids (as `list[int]`) the broadcast passed through to reach you, oldest first. It is useful for routing decisions such as preferring a nearby edge or detecting how many relays a broadcast crossed.
 
 ## Examples
 

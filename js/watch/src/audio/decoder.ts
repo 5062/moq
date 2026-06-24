@@ -4,8 +4,8 @@ import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
-import type { BufferedRanges } from "../backend";
 import { base64ToBytes } from "../base64";
+import type { BufferedRanges } from "../buffered";
 import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
@@ -64,6 +64,10 @@ export class Decoder {
 
 	// Audio ring bridging main thread and worklet (shared memory or postMessage transport).
 	#ring: AudioBuffer | undefined;
+
+	// The last discontinuity count seen from the container consumer. A change means the
+	// publisher rewound the timeline (e.g. a voice agent interrupted) and we must flush.
+	#discontinuity = 0;
 
 	// How much buffered audio the container consumer retains before skipping
 	// ahead. This must be the latency CEILING (maxBuffer), not the floor
@@ -266,6 +270,9 @@ export class Decoder {
 				const next = await consumer.next();
 				if (!next) break;
 
+				// Publisher rewound the timeline: flush + re-anchor before decoding the new frame.
+				this.#onDiscontinuity(next.discontinuity);
+
 				const { frame } = next;
 				if (!frame) continue;
 
@@ -342,6 +349,9 @@ export class Decoder {
 			for (;;) {
 				const next = await consumer.next();
 				if (!next) break;
+
+				// Publisher rewound the timeline: flush + re-anchor before decoding the new frame.
+				this.#onDiscontinuity(next.discontinuity);
 
 				const { frame } = next;
 				if (!frame) continue;
@@ -439,6 +449,17 @@ export class Decoder {
 	// Use in buffered mode at an utterance boundary (see Sync.reset).
 	reset(): void {
 		this.#ring?.reset();
+	}
+
+	// React to the container consumer's discontinuity counter. When it changes the publisher
+	// has rewound the timeline, so flush the queued PCM and re-anchor the shared clock before
+	// the first frame of the new utterance is decoded. This makes the wire signal trigger the
+	// same flush as a manual `reset()`, with no app involvement.
+	#onDiscontinuity(count: number): void {
+		if (count === this.#discontinuity) return;
+		this.#discontinuity = count;
+		this.#ring?.reset();
+		this.sync.reset();
 	}
 
 	close() {

@@ -9,7 +9,7 @@ async function main() {
 
 	// Insert the "chat" track up front. A subscriber is served directly from this
 	// track, no requested() round-trip needed. Mirrors the Rust createTrack/insertTrack.
-	publishTrack(broadcast.createTrack("chat"));
+	void publishTrack(broadcast.createTrack("chat"));
 
 	// Publish the broadcast to the connection
 	connection.publish(Moq.Path.from("my-broadcast"), broadcast);

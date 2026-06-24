@@ -50,8 +50,9 @@ impl VideoTransform {
 enum SourceState {
 	/// Waiting for the subscription to resolve (blocks on the publisher's SUBSCRIBE_OK).
 	Subscribing(kio::Pending<moq_net::TrackSubscribe>),
-	/// The resolved consumer, reading frames.
-	Active(Consumer<HangContainer>),
+	/// The resolved consumer, reading frames. Boxed because it's much larger than
+	/// the `Subscribing` variant (clippy `large_enum_variant`).
+	Active(Box<Consumer<HangContainer>>),
 }
 
 /// A per-rendition source that normalizes frame shape (Annex-B →
@@ -183,7 +184,7 @@ impl ExportSource {
 				.media
 				.take()
 				.expect("media present until the subscription resolves");
-			self.state = SourceState::Active(Consumer::new(track, media).with_latency(self.latency));
+			self.state = SourceState::Active(Box::new(Consumer::new(track, media).with_latency(self.latency)));
 		}
 
 		loop {
