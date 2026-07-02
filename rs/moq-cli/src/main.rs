@@ -78,6 +78,9 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
 	// RAII guards keeping our broadcasts announced until the endpoints finish.
 	let mut announce = Vec::new();
+	// The stdin/capture pipeline runs on this task instead of the JoinSet: the
+	// platform capture stream is not Send, so its future cannot be spawned.
+	let mut local: Option<Publish> = None;
 
 	if let ImportSource::Rtc(rtc) = &import.source {
 		if rtc.connect.is_some() {
@@ -107,7 +110,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 				.publish_broadcast(&name, publish.consume())
 				.context("failed to publish broadcast")?,
 		);
-		tasks.spawn(async move { publish.run().await });
+		local = Some(publish);
 	} else {
 		match import.source {
 			ImportSource::Hls(hls) => {
@@ -155,13 +158,19 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 						.publish_broadcast(&name, publish.consume())
 						.context("failed to publish broadcast")?,
 				);
-				tasks.spawn(async move { publish.run().await });
+				local = Some(publish);
 			}
 			_ => unreachable!("container formats are handled by stdin_format above"),
 		}
 	}
 
-	drive(tasks).await
+	match local {
+		Some(publish) => tokio::select! {
+			res = publish.run() => res,
+			res = drive(tasks) => res,
+		},
+		None => drive(tasks).await,
+	}
 }
 
 /// Route the shared Origin OUT to one sink, filling it from the MoQ network.
