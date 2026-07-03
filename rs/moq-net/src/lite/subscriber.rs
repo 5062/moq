@@ -783,6 +783,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// SUBSCRIBE_UPDATE (and thus pause/resume linger) only exists on Lite03+.
 		// Older versions tear the upstream down as soon as the track goes idle.
 		let supports_linger = !matches!(self.subscriber.version, Version::Lite01 | Version::Lite02);
+		let supports_fetch = self.subscriber.version.has_timestamps();
 
 		// Mark the track as fetch-capable up front (before accept), so a consumer's
 		// cache-miss fetch waits to be served rather than failing fast. Held for the
@@ -886,7 +887,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			match event {
 				Event::Fetch(req) => {
 					linger = None;
-					fetches.push(self.clone().serve_fetch(req, timescale).maybe_boxed());
+					if supports_fetch {
+						fetches.push(self.clone().serve_fetch(req, timescale).maybe_boxed());
+					} else {
+						req.reject(Error::Version);
+					}
 				}
 				Event::Subscription(pref) => {
 					linger = None;
@@ -1170,6 +1175,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			Ok(stream) => stream,
 			Err(err) => {
 				tracing::warn!(track = %name, %err, "fetch stream open failed");
+				request.reject(err);
 				return;
 			}
 		};
@@ -1187,6 +1193,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		};
 		if let Err(err) = send.await {
 			stream.writer.abort(&err);
+			request.reject(err);
 			return;
 		}
 
@@ -1194,8 +1201,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// TrackInfo only takes effect if the track isn't accepted yet (a fetch with no
 		// live subscription); otherwise the group inherits the accepted timescale.
 		let group_info = TrackInfo {
-			// FETCH is lite-05+, so `timescale` is `Some`; fall back to the default scale
-			// defensively rather than panicking.
+			// Relay-served FETCH is lite-05+, so `timescale` is `Some`; fall back to the
+			// default scale defensively rather than panicking.
 			timescale: timescale.unwrap_or_default(),
 			..Default::default()
 		};
