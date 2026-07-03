@@ -35,6 +35,7 @@ pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
 /// which returns the publisher's [`TrackInfo`] once the subscription is accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct TrackInfo {
 	/// Units per second for per-frame timestamps on this track.
 	///

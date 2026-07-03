@@ -1,6 +1,8 @@
 #!/usr/bin/env just --justfile
 # Using Just: https://github.com/casey/just?tab=readme-ov-file#installation
 
+set unstable
+
 # Per-language modules. Language-specific recipes live in their own justfiles.
 mod js
 mod rs
@@ -45,7 +47,7 @@ check *args:
     @if command -v shellcheck >/dev/null 2>&1 && command -v shfmt >/dev/null 2>&1; then shfmt --diff $(shfmt -f . | grep -v '\.direnv/') && shellcheck $(shfmt -f . | grep -v '\.direnv/'); fi
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format --check; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
-    @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --unstable --check --justfile "$f"; done
+    @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --check --justfile "$f"; done
     just gh check
 
 # Run per-language CI against BASE, skipping scopes with no relevant diff.
@@ -100,7 +102,7 @@ ci BASE="":
     shellcheck $(shfmt -f . | grep -v '\.direnv/')
     RUST_LOG=error taplo format --check
     nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*')
-    for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --unstable --check --justfile "$f"; done
+    for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --check --justfile "$f"; done
     just gh ci
 
 # Auto-fix linting/formatting issues; optional tools skip if missing locally.
@@ -112,7 +114,7 @@ fix:
     @if command -v shfmt >/dev/null 2>&1; then shfmt --write $(shfmt -f . | grep -v '\.direnv/'); fi
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
-    @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --unstable --justfile "$f"; done
+    @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --justfile "$f"; done
 
 # Build the packages.
 build:
