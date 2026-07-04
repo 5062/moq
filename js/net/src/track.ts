@@ -233,7 +233,7 @@ export class TrackProducer {
 
 		const retained: CachedGroup[] = [];
 		for (const entry of this.#cache) {
-			if (entry.time > cutoff || !entry.group.isClosed) {
+			if (entry.time > cutoff || entry.group.closed.peek() === undefined) {
 				retained.push(entry);
 				continue;
 			}
