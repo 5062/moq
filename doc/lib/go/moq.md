@@ -220,11 +220,30 @@ producer, err := request.Accept()
 if err != nil {
     log.Fatal(err)
 }
-_ = producer.WriteFrame(loadArchivedFrame(request.Sequence()))
+_ = producer.WriteFrame(loadArchivedFrame(request.Sequence()), request.Sequence()*20_000)
 _ = producer.Finish()
 ```
 
 Call `request.Abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
+
+## Raw track timestamps
+
+Raw tracks carry arbitrary byte payloads. `WriteFrame` takes a caller-supplied
+presentation timestamp in microseconds, and raw tracks default to a microsecond
+timescale. `ReadFrame` returns the timestamped raw frame:
+
+```go
+track, _ := broadcast.PublishTrack("events", nil)
+consumer, _ := track.Consume(nil)
+
+_ = track.WriteFrame([]byte("ready"), 20_000)
+
+frame, err := consumer.ReadFrame(ctx)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(string(frame.Payload), frame.TimestampUs)
+```
 
 ## Raw datagrams
 
@@ -294,14 +313,13 @@ for request, err := range dynamic.All(ctx) {
 	if err := request.Accept(broadcast); err != nil {
 		log.Fatal(err)
 	}
-	if err := track.WriteFrame([]byte("ready")); err != nil {
+	if err := track.WriteFrame([]byte("ready"), 0); err != nil {
 		log.Fatal(err)
 	}
 }
 ```
 
 The served broadcast is not announced. It only resolves consumers that call `RequestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `Accept(broadcast)` to serve it, or `Abort(code)` to fail the requester.
-
 ## Local development
 
 The in-tree `go/wrapper/` directory is the source skeleton; CI publishes it to the [moq-dev/moq-go](https://github.com/moq-dev/moq-go) mirror. To exercise it locally:

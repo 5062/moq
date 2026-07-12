@@ -114,7 +114,11 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 	type Error = Error;
 
 	fn try_from(info: &moq_track_info) -> Result<Self, Self::Error> {
-		let mut out = moq_net::track::Info::default().with_priority(info.priority);
+		// Raw tracks default to a microsecond timescale, matching the C ABI's
+		// timestamp_us units. An explicit timescale below overrides it.
+		let mut out = moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MICRO)
+			.with_priority(info.priority);
 		if info.ordered_valid {
 			out = out.with_ordered(info.ordered);
 		}
@@ -948,10 +952,12 @@ pub unsafe extern "C" fn moq_publish_track(
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
-		let info = unsafe { info.as_ref() }
-			.map(moq_net::track::Info::try_from)
-			.transpose()?;
-		State::lock().publish.track(broadcast, name, info)
+		// Default raw tracks to a microsecond timescale even when no info is given.
+		let info = match unsafe { info.as_ref() } {
+			Some(info) => moq_net::track::Info::try_from(info)?,
+			None => moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO),
+		};
+		State::lock().publish.track(broadcast, name, Some(info))
 	})
 }
 
@@ -969,21 +975,28 @@ pub extern "C" fn moq_publish_track_group(track: u32) -> i32 {
 	})
 }
 
-/// Write a single-frame group to a raw track.
+/// Write a single-frame group to a raw track with a timestamp.
 ///
 /// Convenience for the common one-frame-per-group pattern. Equivalent to
 /// appending a group, writing one frame, and finishing it.
+/// The timestamp is in microseconds.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_track_frame(track: u32, payload: *const u8, payload_size: usize) -> i32 {
+pub unsafe extern "C" fn moq_publish_track_frame(
+	track: u32,
+	payload: *const u8,
+	payload_size: usize,
+	timestamp_us: u64,
+) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
-		State::lock().publish.track_frame(track, payload)
+		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
+		State::lock().publish.track_frame(track, timestamp, payload)
 	})
 }
 
@@ -1032,16 +1045,24 @@ pub extern "C" fn moq_publish_track_close(track: u32) -> i32 {
 
 /// Write a frame into a raw group created by [moq_publish_track_group].
 ///
+/// The timestamp is in microseconds.
+///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_group_frame(group: u32, payload: *const u8, payload_size: usize) -> i32 {
+pub unsafe extern "C" fn moq_publish_group_frame(
+	group: u32,
+	payload: *const u8,
+	payload_size: usize,
+	timestamp_us: u64,
+) -> i32 {
 	ffi::enter(move || {
 		let group = ffi::parse_id(group)?;
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
-		State::lock().publish.group_frame(group, payload)
+		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
+		State::lock().publish.group_frame(group, timestamp, payload)
 	})
 }
 
@@ -1405,8 +1426,9 @@ pub unsafe extern "C" fn moq_consume_track_update(track: u32, subscription: *con
 /// Read a raw frame's payload delivered via the [moq_consume_track] callback.
 ///
 /// Fills `dst.payload` / `dst.payload_size`; the pointer is valid until the
-/// frame is released with [moq_consume_frame_close]. `dst.timestamp_us` and
-/// `dst.keyframe` are reported as 0 / false (not meaningful for raw tracks).
+/// frame is released with [moq_consume_frame_close]. `dst.timestamp_us` is the
+/// frame presentation timestamp in microseconds. `dst.keyframe` is reported as
+/// false because raw tracks do not parse codec metadata.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

@@ -190,11 +190,10 @@ impl Publish {
 		self.groups.insert(group)
 	}
 
-	/// Write a single-frame group to a raw track. Convenience for the common
-	/// one-frame-per-group pattern (e.g. status/command tracks).
-	pub fn track_frame(&mut self, track: Id, payload: &[u8]) -> Result<(), Error> {
+	/// Write a single-frame group to a raw track with an explicit timestamp.
+	pub fn track_frame(&mut self, track: Id, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<(), Error> {
 		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		track.write_frame_now(bytes::Bytes::copy_from_slice(payload))?;
+		track.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		Ok(())
 	}
 
@@ -216,10 +215,10 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Write a frame into a raw group.
-	pub fn group_frame(&mut self, group: Id, payload: &[u8]) -> Result<(), Error> {
+	/// Write a frame into a raw group with an explicit timestamp.
+	pub fn group_frame(&mut self, group: Id, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<(), Error> {
 		let group = self.groups.get_mut(group).ok_or(Error::GroupNotFound)?;
-		group.write_frame_now(bytes::Bytes::copy_from_slice(payload))?;
+		group.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		Ok(())
 	}
 

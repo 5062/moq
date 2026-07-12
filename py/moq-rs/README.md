@@ -134,9 +134,9 @@ client = moq.Client(
 - **`MediaProducer`**. Write frames to a track.
   - `.write_frame(payload, timestamp_us)`
   - `.finish()`
-- **`TrackProducer`**. Write raw bytes without codec parsing.
-  - `.write_frame(payload)` writes a one-frame group.
-  - `.append_datagram(timestamp_us, payload) -> sequence` sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
+- **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
+  - `.write_frame(payload, timestamp_us)` writes a payload with a presentation timestamp in microseconds.
+  - `.append_datagram(timestamp_us, payload) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
 
 ### Subscribing
 
@@ -149,8 +149,11 @@ client = moq.Client(
 - **`MediaConsumer`**. Async iterator of `Frame`.
 - **`TrackConsumer`**. Async iterator of groups, plus `.recv_datagram() -> Datagram | None` for best-effort raw track datagrams.
 - **`TrackConsumer`**. Async iterator of raw groups.
+  - `.read_frame() -> Frame | None` returns a timestamped raw frame.
   - `await .info() → TrackInfo`
   - `.update(subscription)`. Change priority, ordering, staleness, or group range after subscribing.
+- **`GroupConsumer`**. Async iterator of timestamped `Frame`s.
+  - `.read_frame() -> Frame | None` returns a timestamped raw frame.
 
 All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`) are async context managers; exiting `async with` cancels the subscription.
 

@@ -24,9 +24,9 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         (try await ffi.recvGroup()).map(GroupConsumer.init)
     }
 
-    /// Read the first frame of the next group. Convenience for one-frame-per-group
-    /// tracks (status/command style). `nil` once the track ends.
-    public func readFrame() async throws -> Data? {
+    /// Read the first timestamped frame of the next group. Convenience for
+    /// one-frame-per-group tracks (status/command style). `nil` once the track ends.
+    public func readFrame() async throws -> Frame? {
         try await ffi.readFrame()
     }
 
@@ -73,9 +73,9 @@ public final class TrackConsumer: AsyncSequence, Sendable {
     }
 }
 
-/// Read side of a single group. Iterating yields raw frame payloads.
+/// Read side of a single group. Iterating yields timestamped raw frames.
 public final class GroupConsumer: AsyncSequence, Sendable {
-    public typealias Element = Data
+    public typealias Element = Frame
 
     let ffi: MoqGroupConsumer
 
@@ -88,8 +88,8 @@ public final class GroupConsumer: AsyncSequence, Sendable {
         ffi.sequence()
     }
 
-    /// The next frame payload, or `nil` once the group ends.
-    public func readFrame() async throws -> Data? {
+    /// The next timestamped frame, or `nil` once the group ends.
+    public func readFrame() async throws -> Frame? {
         try await ffi.readFrame()
     }
 
@@ -98,7 +98,7 @@ public final class GroupConsumer: AsyncSequence, Sendable {
         ffi.cancel()
     }
 
-    public func makeAsyncIterator() -> AsyncThrowingStream<Data, Swift.Error>.Iterator {
+    public func makeAsyncIterator() -> AsyncThrowingStream<Frame, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             try await ffi.readFrame()
         }.makeAsyncIterator()
@@ -144,9 +144,9 @@ public final class TrackProducer: Sendable {
         GroupProducer(try ffi.appendGroup())
     }
 
-    /// Write a single-frame group in one call.
-    public func writeFrame(_ payload: Data) throws {
-        try ffi.writeFrame(payload: payload)
+    /// Write a single-frame group with a timestamp in microseconds.
+    public func writeFrame(_ payload: Data, timestampUs: UInt64) throws {
+        try ffi.writeFrame(payload: payload, timestampUs: timestampUs)
     }
 
     /// Send a best-effort datagram and return its sequence number.
@@ -186,9 +186,9 @@ public final class GroupProducer: Sendable {
         GroupConsumer(try ffi.consume())
     }
 
-    /// Write a frame into this group.
-    public func writeFrame(_ payload: Data) throws {
-        try ffi.writeFrame(payload: payload)
+    /// Write a frame with a timestamp in microseconds.
+    public func writeFrame(_ payload: Data, timestampUs: UInt64) throws {
+        try ffi.writeFrame(payload: payload, timestampUs: timestampUs)
     }
 
     /// Mark the group complete. No more frames can be written.

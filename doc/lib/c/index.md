@@ -117,6 +117,20 @@ A server can reject the connection on auth grounds: unauthorized (HTTP 401) or f
 
 Failed calls are reported only through the return code and `moq_error()`, not logged. To surface libmoq's internal logs (moq-net / QUIC activity), call `moq_log_level("debug")` (or `"trace"`, `"info"`, etc.) to install a tracing subscriber.
 
+## Raw Tracks
+
+Raw tracks carry arbitrary byte payloads without catalog or codec parsing. Use
+`moq_publish_track_frame` / `moq_publish_group_frame` to provide presentation
+timestamps in microseconds.
+libmoq creates raw tracks with a microsecond timescale by default (used when
+`moq_track_info.timescale_valid` is false or no info is given), matching the C
+ABI's timestamp units.
+
+Subscribers receive raw frame handles from `moq_consume_track`; read each one
+with `moq_consume_track_frame`. The returned `moq_frame.timestamp_us` carries
+the timestamp, and `keyframe` is always false because raw tracks do not parse
+codec metadata.
+
 ## Raw Track Options
 
 `moq_publish_track` accepts optional publisher-side track properties:

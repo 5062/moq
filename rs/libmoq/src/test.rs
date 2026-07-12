@@ -506,8 +506,8 @@ fn publish_track_invalid_broadcast() {
 	};
 	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
 	assert!(moq_publish_track_group(9999) < 0);
-	assert!(unsafe { moq_publish_track_frame(9999, name.as_ptr(), name.len()) } < 0);
-	assert!(unsafe { moq_publish_group_frame(9999, name.as_ptr(), name.len()) } < 0);
+	assert!(unsafe { moq_publish_track_frame(9999, name.as_ptr(), name.len(), 0) } < 0);
+	assert!(unsafe { moq_publish_group_frame(9999, name.as_ptr(), name.len(), 0) } < 0);
 	assert!(moq_publish_track_close(9999) < 0);
 	assert!(moq_publish_group_close(9999) < 0);
 
@@ -575,10 +575,11 @@ fn raw_track_publish_consume() {
 		)
 	});
 
-	// One-frame-per-group convenience write.
+	// One-frame-per-group convenience write with an explicit timestamp.
 	let payload = b"hello raw track";
+	let timestamp_us = 12_345;
 	assert_eq!(
-		unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len()) },
+		unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), timestamp_us) },
 		0
 	);
 
@@ -586,25 +587,28 @@ fn raw_track_publish_consume() {
 	let mut frame = moq_frame {
 		payload: std::ptr::null(),
 		payload_size: 0,
-		timestamp_us: 123, // should be overwritten with 0
-		keyframe: true,    // should be overwritten with false
+		timestamp_us: 0,
+		keyframe: true, // should be overwritten with false
 	};
 	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload);
-	assert_eq!(frame.timestamp_us, 0, "raw frames have no timestamp");
+	assert_eq!(frame.timestamp_us, timestamp_us);
 	assert!(!frame.keyframe, "raw frames have no keyframe flag");
 	assert_eq!(moq_consume_track_frame_close(frame_id), 0);
 
 	// Multi-frame group via the explicit group API.
 	let group = id(moq_publish_track_group(track));
-	let parts: [&[u8]; 2] = [b"part-0", b"part-1"];
-	for part in parts {
-		assert_eq!(unsafe { moq_publish_group_frame(group, part.as_ptr(), part.len()) }, 0);
+	let parts: [(&[u8], u64); 2] = [(b"part-0", 20_000), (b"part-1", 30_000)];
+	for (part, timestamp_us) in parts {
+		assert_eq!(
+			unsafe { moq_publish_group_frame(group, part.as_ptr(), part.len(), timestamp_us) },
+			0
+		);
 	}
 	assert_eq!(moq_publish_group_close(group), 0);
 
-	for expected in parts {
+	for (expected, timestamp_us) in parts {
 		let frame_id = id(frame_cb.recv());
 		let mut frame = moq_frame {
 			payload: std::ptr::null(),
@@ -615,6 +619,7 @@ fn raw_track_publish_consume() {
 		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
 		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 		assert_eq!(received, expected);
+		assert_eq!(frame.timestamp_us, timestamp_us);
 		assert_eq!(moq_consume_track_frame_close(frame_id), 0);
 	}
 
@@ -713,9 +718,9 @@ fn raw_track_subscription_options_and_update() {
 		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
 
 	let payloads: [&[u8]; 3] = [b"zero", b"one", b"two"];
-	for payload in payloads {
+	for (i, payload) in payloads.into_iter().enumerate() {
 		assert_eq!(
-			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len()) },
+			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), i as u64 * 20_000) },
 			0
 		);
 	}
@@ -756,6 +761,7 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, b"one");
+	assert_eq!(frame.timestamp_us, 20_000);
 	assert_eq!(moq_consume_track_frame_close(frame_id), 0);
 
 	let update = moq_subscription {
@@ -774,6 +780,7 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, b"two");
+	assert_eq!(frame.timestamp_us, 40_000);
 	assert_eq!(moq_consume_track_frame_close(frame_id), 0);
 
 	assert_eq!(moq_consume_track_close(consumer), 0);
