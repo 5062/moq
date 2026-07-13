@@ -283,6 +283,35 @@ async def test_fetch_group_and_serve_dynamic_miss():
     assert [frame.payload async for frame in fetched] == [b"archive"]
 
 
+async def test_json_snapshot_roundtrip():
+    broadcast = moq.BroadcastProducer()
+    producer = broadcast.publish_json("status", compression=True)
+    consumer = await broadcast.consume().subscribe_json("status", compression=True)
+
+    producer.update({"state": "live", "viewers": 1})
+    value = await asyncio.wait_for(anext(consumer), timeout=5.0)
+    assert value == {"state": "live", "viewers": 1}
+
+    producer.update({"state": "live", "viewers": 2})
+    value = await asyncio.wait_for(anext(consumer), timeout=5.0)
+    assert value == {"state": "live", "viewers": 2}
+
+    producer.finish()
+
+
+async def test_json_stream_roundtrip():
+    broadcast = moq.BroadcastProducer()
+    producer = broadcast.publish_json_stream("events")
+    consumer = await broadcast.consume().subscribe_json_stream("events")
+
+    for n in range(3):
+        producer.append({"n": n})
+        record = await asyncio.wait_for(anext(consumer), timeout=5.0)
+        assert record == {"n": n}
+
+    producer.finish()
+
+
 async def test_dynamic_track_request():
     broadcast = moq.BroadcastProducer()
     dynamic = broadcast.dynamic()

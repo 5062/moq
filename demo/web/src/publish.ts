@@ -386,7 +386,7 @@ const META_TRACK = "meta.json";
 
 // The latest metadata, retained across reconnects so each fresh track is seeded with it.
 let currentMeta: unknown = { title: "My Broadcast", location: "earth", note: "edit me" };
-let activeMeta: Json.Producer<unknown> | undefined;
+let activeMeta: Json.Snapshot.Producer<unknown> | undefined;
 
 const setMeta = (value: unknown) => {
 	currentMeta = value;
@@ -403,7 +403,7 @@ meta.run((effect) => {
 	const track = net.createTrack(META_TRACK, { cache: 86_400_000 });
 	effect.cleanup(() => track.close());
 
-	const producer = new Json.Producer<unknown>(track);
+	const producer = new Json.Snapshot.Producer<unknown>(track);
 	producer.update(currentMeta);
 	activeMeta = producer;
 	effect.cleanup(() => {

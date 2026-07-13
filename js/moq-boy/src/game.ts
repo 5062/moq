@@ -253,7 +253,7 @@ export class Game {
 		effect.cleanup(() => statusTrack.close());
 
 		// Reconstruct each status from snapshots and deltas, validated against the schema.
-		const consumer = new Json.Consumer(statusTrack, { schema: GameStatusSchema });
+		const consumer = new Json.Snapshot.Consumer(statusTrack, { schema: GameStatusSchema });
 
 		// Closing the track on cleanup unblocks a pending next() (it returns undefined), so the loop
 		// ends without racing effect.cancel.
@@ -306,7 +306,7 @@ export class Game {
 				if (req.name === "command") {
 					// accept() commits the track's immutable properties and returns the producer.
 					const track = req.accept();
-					const producer = new Json.Producer<Record<string, unknown>>(track);
+					const producer = new Json.Snapshot.Producer<Record<string, unknown>>(track);
 					effect.cleanup(() => producer.finish());
 					effect.run(this.#runCommandTrack.bind(this, track, producer));
 				}
@@ -316,7 +316,7 @@ export class Game {
 
 	#runCommandTrack(
 		track: Moq.Track.Producer,
-		producer: Json.Producer<Record<string, unknown>>,
+		producer: Json.Snapshot.Producer<Record<string, unknown>>,
 		effect: Moq.Signals.Effect,
 	) {
 		if (effect.get(track.closedSignal)) return;

@@ -161,6 +161,11 @@ impl Web {
 	/// state-erased [`Router`] an embedder can extend (`merge`/`nest` extra
 	/// routes) before handing it to [`serve`](Self::serve).
 	///
+	/// This is the public-facing router (customer media routes plus a liveness
+	/// probe). `/metrics` is deliberately NOT here: node traffic counters ride
+	/// the separate internal listener ([`Internal`](crate::Internal)) so they're
+	/// never exposed on the public listener.
+	///
 	/// Includes the WebSocket polyfill catch-all (`/{*path}`, when
 	/// `config.ws`) and CORS scoped to its own GET routes, but NOT the
 	/// landing-page fallback (that is global, so [`serve`](Self::serve) sets it

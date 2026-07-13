@@ -40,8 +40,8 @@ struct Reservations {
 /// group (deltas disabled). This routes catalog publishing through the JSON merge-patch helper
 /// so deltas can be enabled later without changing the wire format used today.
 pub struct Producer<E: CatalogExt = ()> {
-	hang: moq_json::Producer<Catalog<E>>,
-	hangz: moq_json::Producer<Catalog<E>>,
+	hang: moq_json::snapshot::Producer<Catalog<E>>,
+	hangz: moq_json::snapshot::Producer<Catalog<E>>,
 	msf_track: moq_net::track::Producer,
 
 	current: Arc<Mutex<Catalog<E>>>,
@@ -103,14 +103,14 @@ impl<E: CatalogExt> Producer<E> {
 		let msf_track = broadcast.create_track(moq_msf::DEFAULT_NAME, None)?;
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
-		let mut json_config = moq_json::ProducerConfig::default();
+		let mut json_config = moq_json::snapshot::ProducerConfig::default();
 		json_config.delta_ratio = 0;
-		let hang = moq_json::Producer::new(hang_track, json_config.clone());
+		let hang = moq_json::snapshot::Producer::new(hang_track, json_config.clone());
 
 		// The `.z` track carries the same catalog, DEFLATE-compressed. Deltas stay off for parity
 		// with the plaintext track; only the per-group compression differs.
 		json_config.compression = true;
-		let hangz = moq_json::Producer::new(hangz_track, json_config);
+		let hangz = moq_json::snapshot::Producer::new(hangz_track, json_config);
 
 		Ok(Self {
 			hang,
@@ -266,8 +266,8 @@ impl<E: CatalogExt> Producer<E> {
 /// On drop, the hang, compressed-hang, and MSF catalog tracks are updated if the catalog was mutated.
 pub struct Guard<'a, E: CatalogExt = ()> {
 	catalog: MutexGuard<'a, Catalog<E>>,
-	hang: &'a mut moq_json::Producer<Catalog<E>>,
-	hangz: &'a mut moq_json::Producer<Catalog<E>>,
+	hang: &'a mut moq_json::snapshot::Producer<Catalog<E>>,
+	hangz: &'a mut moq_json::snapshot::Producer<Catalog<E>>,
 	msf_track: &'a mut moq_net::track::Producer,
 	reservations: &'a Mutex<Reservations>,
 	updated: bool,
@@ -335,8 +335,8 @@ impl<E: CatalogExt> Drop for Guard<'_, E> {
 /// Emit the catalog to all tracks: hang (`catalog.json`), its DEFLATE-compressed `.z` sibling, and
 /// the MSF catalog (`catalog`) derived from the base media sections.
 fn emit<E: CatalogExt>(
-	hang: &mut moq_json::Producer<Catalog<E>>,
-	hangz: &mut moq_json::Producer<Catalog<E>>,
+	hang: &mut moq_json::snapshot::Producer<Catalog<E>>,
+	hangz: &mut moq_json::snapshot::Producer<Catalog<E>>,
 	msf_track: &mut moq_net::track::Producer,
 	catalog: &Catalog<E>,
 ) {

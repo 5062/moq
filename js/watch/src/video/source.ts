@@ -9,6 +9,9 @@ import type { Broadcast } from "../broadcast";
  */
 export type Supported = (config: Catalog.VideoConfig) => Promise<boolean>;
 
+/** A video source error that prevents choosing a usable rendition. */
+export type SourceError = "unsupported";
+
 export type Target = {
 	// Optional manual override for the selected rendition name.
 	name?: string;
@@ -38,6 +41,9 @@ type SourceInput = {
 type SourceOutput = {
 	catalog: Signal<Catalog.Video | undefined>;
 	available: Signal<Record<string, Catalog.VideoConfig>>;
+
+	// The current source error, or undefined while healthy or still probing.
+	error: Signal<SourceError | undefined>;
 
 	// The name of the active rendition.
 	track: Signal<string | undefined>;
@@ -209,6 +215,7 @@ export class Source {
 	readonly #output: SourceOutput = {
 		catalog: new Signal<Catalog.Video | undefined>(undefined),
 		available: new Signal<Record<string, Catalog.VideoConfig>>({}),
+		error: new Signal<SourceError | undefined>(undefined),
 		track: new Signal<string | undefined>(undefined),
 		config: new Signal<Catalog.VideoConfig | undefined>(undefined),
 		jitter: new Signal<Moq.Time.Milli | undefined>(undefined),
@@ -241,22 +248,37 @@ export class Source {
 
 	#runSupported(effect: Effect): void {
 		const supported = effect.get(this.input.supported);
-		if (!supported) return;
+		if (!supported) {
+			this.#output.error.set(undefined);
+			return;
+		}
 
 		const renditions = effect.get(this.#output.catalog)?.renditions ?? {};
+		this.#output.error.set(undefined);
 
 		effect.spawn(async () => {
 			const available: Record<string, Catalog.VideoConfig> = {};
 
 			for (const [name, config] of Object.entries(renditions)) {
-				const isSupported = await supported(config);
+				let isSupported = false;
+				try {
+					isSupported = await supported(config);
+				} catch (err) {
+					console.warn(
+						`[Source] video rendition ${name} (${config.codec}) support probe failed; treating as unsupported`,
+						err,
+					);
+				}
 				if (isSupported) available[name] = config;
 			}
 
-			if (Object.keys(available).length === 0 && Object.keys(renditions).length > 0) {
+			const error =
+				Object.keys(available).length === 0 && Object.keys(renditions).length > 0 ? "unsupported" : undefined;
+			if (error === "unsupported") {
 				console.warn("[Source] No supported video renditions found:", renditions);
 			}
 
+			this.#output.error.set(error);
 			this.#output.available.set(available);
 		});
 	}

@@ -150,6 +150,19 @@ pub enum Error {
 	/// Invalid JSON passed for a catalog section.
 	#[error("json error: {0}")]
 	Json(Arc<serde_json::Error>),
+
+	/// Error from the moq-json snapshot/stream layer.
+	#[error("json track error: {0}")]
+	JsonTrack(Arc<moq_json::Error>),
+}
+
+impl From<moq_json::Error> for Error {
+	fn from(err: moq_json::Error) -> Self {
+		match err {
+			moq_json::Error::Net(e) => Error::Moq(e),
+			e => Error::JsonTrack(Arc::new(e)),
+		}
+	}
 }
 
 impl From<serde_json::Error> for Error {
@@ -217,6 +230,7 @@ impl ffi::ReturnCode for Error {
 			Error::Forbidden => -35,
 			Error::Video(_) => -36,
 			Error::Json(_) => -37,
+			Error::JsonTrack(_) => -38,
 		}
 	}
 }

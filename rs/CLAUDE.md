@@ -1,6 +1,6 @@
 # rs/CLAUDE.md
 
-Reference for the `/rs` Cargo workspace. Universal rules (writing style, no em dashes, Branch Targeting, Cross-Package Sync, Public API Scrutiny, Refactor As You Go, AI Attribution) live in the root `/CLAUDE.md` and are not repeated here.
+Reference for the `/rs` Cargo workspace. Universal rules (writing style, no em dashes, Root Cause First, Cross-Package Sync, Public API Scrutiny, Refactor As You Go) live in the root `/CLAUDE.md`; PR/commit/release mechanics live in `/CONTRIBUTING.md`. Neither is repeated here.
 
 Workspace members live in the root `Cargo.toml` (`[workspace]`). `rust-version = "1.85"`, edition 2024. Shared versions/paths are pinned under `[workspace.dependencies]`; new crates should add their dep there and reference it via `{ workspace = true }`.
 
@@ -19,7 +19,7 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 - `hang` (lib): media layer on `moq-net`. `catalog/` is the JSON manifest (`Catalog`, root.rs); `container/` is the frame format (timestamp + codec payload, `container::Frame`).
 - `moq-loc` (lib): LOC (Low Overhead Container) wire frame codec. Top-level `encode`/`decode` + `Frame`. QUIC varints, property KVPs.
 - `moq-msf` (lib): IETF MSF/CMSF catalog types (`Catalog`, `Track`, `Packaging`, `Role`). serde JSON. Alternative to hang's catalog.
-- `moq-json` (lib): generic snapshot/delta value publishing over a track using RFC 7396 JSON Merge Patch. `Producer<T>`/`Consumer<T>`, `Guard<T>` (RAII edit). Late joiners reconstruct from snapshot + deltas. DEFLATE via `moq-flate`.
+- `moq-json` (lib): generic JSON publishing over a track, in two modules. `snapshot` is lossy latest-value (RFC 7396 merge-patch deltas; consumers only get the most recent value; `Producer<T>`/`Consumer<T>`, `Guard<T>` RAII edit); `stream` is a lossless append-log (every record preserved in order). DEFLATE via `moq-flate`.
 - `moq-flate` (lib): group-scoped DEFLATE primitive (no moq deps). `Encoder`/`Decoder` turn a stream of payloads into self-delimited sync-flushed frames sharing one window (RFC 7692 marker trick), so similar frames compress against the earlier ones. Used by `moq-json`; reusable by any framed stream.
 
 **Media bridge / codecs**
@@ -81,6 +81,11 @@ match version {
 ```
 
 Negotiation: `version::NEGOTIATED` lists SETUP-negotiated versions in preference order; newer drafts negotiate via dedicated ALPNs (`version::ALPNS`). The version-to-behavior dispatch lives in `setup.rs:73` (`SetupVersion::from_version`).
+
+## Invariants and footguns
+
+- **No cascading abort**: Broadcast/Track/Group/Frame closes stay independent so handles can be shared. Closing or aborting one layer must not tear down its parent or siblings.
+- **`moq_net::Timestamp` scales**: the inherent `max`/`checked_add`/`checked_sub` panic or error on mismatched scales (`Ord::cmp` is safe), and `ZERO` is second-scale. Don't seed a `.max()` accumulator with `ZERO`; use an `Option` instead. A panic in a spawned task can hang a `finished().await` forever, so this once cost a 60-minute CI hang.
 
 ## Rust conventions
 

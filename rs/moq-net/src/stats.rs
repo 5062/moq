@@ -284,6 +284,14 @@ impl Tier {
 			format!("{}/{}", self.0.as_str(), name)
 		}
 	}
+
+	/// The tier label as used in metrics: empty (`""`) for the default/external
+	/// (customer) tier, otherwise the label (e.g. `"internal"`). Mirrors the
+	/// `.stats` wire convention, where the default tier is unprefixed and named
+	/// tiers are `<label>/`-prefixed.
+	pub fn as_str(&self) -> &str {
+		self.0.as_str()
+	}
 }
 
 impl fmt::Display for Tier {
@@ -295,6 +303,120 @@ impl fmt::Display for Tier {
 		} else {
 			fmt::Display::fmt(&self.0, f)
 		}
+	}
+}
+
+/// Publisher (egress) vs subscriber (ingress) side of a broadcast, used as a
+/// label on a [`StatsSnapshot`] traffic row. The internal bump paths track the
+/// side statically, so this only surfaces on the aggregate read side.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Role {
+	Publisher,
+	Subscriber,
+}
+
+impl Role {
+	fn idx(self) -> usize {
+		match self {
+			Role::Publisher => 0,
+			Role::Subscriber => 1,
+		}
+	}
+
+	/// Lowercase label for this role (`"publisher"` / `"subscriber"`).
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Role::Publisher => "publisher",
+			Role::Subscriber => "subscriber",
+		}
+	}
+}
+
+/// Summed traffic counters for one `(tier, role)` slice, aggregated across
+/// every broadcast this node is currently tracking. The host-level rollup of
+/// [`Counters`]: per-broadcast detail is collapsed away (it lives on the
+/// published `.stats` broadcast, not here). Every counter is cumulative, so a
+/// rate is `delta / delta_t` and a live count is `open - closed`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CounterTotals {
+	pub announced: u64,
+	pub announced_closed: u64,
+	pub announced_bytes: u64,
+	pub subscriptions: u64,
+	pub subscriptions_closed: u64,
+	pub broadcasts: u64,
+	pub broadcasts_closed: u64,
+	pub bytes: u64,
+	pub frames: u64,
+	pub groups: u64,
+}
+
+impl CounterTotals {
+	/// Fold one broadcast slot's raw readout into the running total.
+	fn add(&mut self, raw: RawCounts) {
+		self.announced += raw.announced;
+		self.announced_closed += raw.announced_closed;
+		self.announced_bytes += raw.announced_bytes;
+		self.subscriptions += raw.subscriptions;
+		self.subscriptions_closed += raw.subscriptions_closed;
+		self.broadcasts += raw.broadcasts;
+		self.broadcasts_closed += raw.broadcasts_closed;
+		self.bytes += raw.bytes;
+		self.frames += raw.frames;
+		self.groups += raw.groups;
+	}
+}
+
+/// Connected-session presence for one tier: cumulative connects and
+/// disconnects summed over every auth root. `sessions - sessions_closed` is the
+/// current live session count.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionTotals {
+	pub sessions: u64,
+	pub sessions_closed: u64,
+}
+
+/// A point-in-time, host-level rollup of this node's stats counters, returned
+/// by [`Stats::snapshot`].
+///
+/// Every counter is summed across all broadcasts the node is tracking and split
+/// by tier and role, plus per-tier connected-session presence. One entry per
+/// tier that recorded any traffic or session, keyed by the tier's label (so an
+/// idle tier is simply absent). Intended for a scrape / `/metrics`-style
+/// endpoint where per-broadcast cardinality is unwanted; the per-broadcast
+/// breakdown lives on the published `.stats` broadcast instead. A no-op
+/// aggregator (stats disabled) yields no rows.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StatsSnapshot {
+	/// Traffic totals per tier, indexed by [`Role`] within each tier; read via
+	/// [`Self::traffic`].
+	traffic: HashMap<Tier, [CounterTotals; 2]>,
+	/// Session presence per tier; read via [`Self::sessions`].
+	sessions: HashMap<Tier, SessionTotals>,
+}
+
+impl StatsSnapshot {
+	/// The `(tier, role, totals)` traffic rows, one publisher and one subscriber
+	/// row per tier present. Sorted by tier label then role for stable output.
+	pub fn traffic(&self) -> Vec<(Tier, Role, CounterTotals)> {
+		let mut rows = Vec::with_capacity(self.traffic.len() * 2);
+		for (tier, roles) in &self.traffic {
+			rows.push((tier.clone(), Role::Publisher, roles[Role::Publisher.idx()]));
+			rows.push((tier.clone(), Role::Subscriber, roles[Role::Subscriber.idx()]));
+		}
+		rows.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()).then(a.1.idx().cmp(&b.1.idx())));
+		rows
+	}
+
+	/// The `(tier, sessions)` presence rows, one per tier present, sorted by tier
+	/// label.
+	pub fn sessions(&self) -> Vec<(Tier, SessionTotals)> {
+		let mut rows: Vec<_> = self.sessions.iter().map(|(tier, s)| (tier.clone(), *s)).collect();
+		rows.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+		rows
 	}
 }
 
@@ -569,6 +691,43 @@ impl Stats {
 				.or_default()
 				.clone(),
 		)
+	}
+
+	/// Take a host-level [`StatsSnapshot`]: every counter summed across all
+	/// tracked broadcasts, split by tier and role, plus per-tier session
+	/// presence. Briefly takes the entry then the session locks. Returns an
+	/// all-zero snapshot for a no-op aggregator (stats disabled).
+	///
+	/// Unlike the published `.stats` broadcast, this collapses per-broadcast
+	/// detail into node totals, which is what a `/metrics`-style scrape wants.
+	pub fn snapshot(&self) -> StatsSnapshot {
+		let mut snap = StatsSnapshot::default();
+		let Some(shared) = self.shared.as_ref() else {
+			return snap;
+		};
+		{
+			let entries = shared.entries.lock();
+			for entry in entries.values() {
+				let tiers = entry.tiers.lock().expect("stats tiers poisoned");
+				for (tier, counters) in tiers.iter() {
+					let totals = snap.traffic.entry(tier.clone()).or_default();
+					totals[Role::Publisher.idx()].add(counters.publisher.snapshot());
+					totals[Role::Subscriber.idx()].add(counters.subscriber.snapshot());
+				}
+			}
+		}
+		{
+			let sessions = shared.sessions.lock();
+			for (tier, roots) in sessions.iter() {
+				let totals = snap.sessions.entry(tier.clone()).or_default();
+				for counters in roots.values() {
+					let (open, closed) = counters.snapshot();
+					totals.sessions += open;
+					totals.sessions_closed += closed;
+				}
+			}
+		}
+		snap
 	}
 }
 
@@ -1612,6 +1771,61 @@ mod tests {
 		assert_eq!(ext_c.subscriber.bytes.load(Relaxed), 0);
 		assert_eq!(int_c.publisher.bytes.load(Relaxed), 0);
 		assert_eq!(int_c.subscriber.bytes.load(Relaxed), 7);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn snapshot_rolls_up_by_tier_role_and_sessions() {
+		let (stats, _origin) = test_stats(Some("sjc"));
+		let ext = stats.tier(Tier::default());
+		let int = stats.tier(Tier::new("internal"));
+
+		// External egress across two broadcasts; the snapshot sums them.
+		let pub_a = ext.broadcast("demo/aaa").publisher().track("video");
+		pub_a.bytes(100);
+		pub_a.frame();
+		pub_a.group();
+		let pub_b = ext.broadcast("demo/bbb").publisher().track("video");
+		pub_b.bytes(50);
+		// Internal ingress on a different tier/role stays isolated.
+		let sub_a = int.broadcast("demo/aaa").subscriber().track("audio");
+		sub_a.bytes(7);
+
+		// Hold session guards so `sessions_closed` stays zero.
+		let _s1 = ext.session("acme");
+		let _s2 = ext.session("acme");
+		let _s3 = int.session("peer");
+
+		let snap = stats.snapshot();
+
+		let slot = |tier, role| {
+			snap.traffic()
+				.into_iter()
+				.find(|(t, r, _)| *t == tier && *r == role)
+				.map(|(_, _, c)| c)
+				.expect("row present")
+		};
+
+		let ext_pub = slot(Tier::default(), Role::Publisher);
+		assert_eq!(ext_pub.bytes, 150, "external egress bytes sum across broadcasts");
+		assert_eq!(ext_pub.frames, 1);
+		assert_eq!(ext_pub.groups, 1);
+
+		let int_sub = slot(Tier::new("internal"), Role::Subscriber);
+		assert_eq!(int_sub.bytes, 7, "internal ingress isolated by tier/role");
+		assert_eq!(slot(Tier::default(), Role::Subscriber).bytes, 0);
+		assert_eq!(slot(Tier::new("internal"), Role::Publisher).bytes, 0);
+
+		let sessions = |tier| {
+			snap.sessions()
+				.into_iter()
+				.find(|(t, _)| *t == tier)
+				.map(|(_, s)| s)
+				.expect("tier present")
+		};
+		let ext_sessions = sessions(Tier::default());
+		assert_eq!(ext_sessions.sessions, 2, "two external sessions under one root");
+		assert_eq!(ext_sessions.sessions_closed, 0, "guards still held");
+		assert_eq!(sessions(Tier::new("internal")).sessions, 1);
 	}
 
 	#[tokio::test(start_paused = true)]

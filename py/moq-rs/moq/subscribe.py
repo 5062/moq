@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from moq_ffi import (
     MoqAudioConsumer,
     MoqBroadcastConsumer,
     MoqCatalogConsumer,
     MoqGroupConsumer,
+    MoqJsonConfig,
+    MoqJsonConsumer,
+    MoqJsonStreamConfig,
+    MoqJsonStreamConsumer,
     MoqMediaConsumer,
     MoqTrackConsumer,
 )
@@ -191,6 +198,53 @@ class AudioConsumer:
         self._inner.cancel()
 
 
+class JsonConsumer:
+    """Async iterator over a JSON snapshot track, yielding the latest value (lossy).
+
+    Built via :meth:`BroadcastConsumer.subscribe_json`. Each item is a parsed Python object.
+    A consumer that has fallen behind collapses the backlog and yields only the latest value.
+    """
+
+    def __init__(self, inner: MoqJsonConsumer) -> None:
+        self._inner = inner
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> Any:
+        value = await self._inner.next()
+        if value is None:
+            raise StopAsyncIteration
+        return json.loads(value)
+
+    def cancel(self) -> None:
+        """Cancel all current and future next() calls."""
+        self._inner.cancel()
+
+
+class JsonStreamConsumer:
+    """Async iterator over a JSON stream track, yielding every record in order (lossless).
+
+    Built via :meth:`BroadcastConsumer.subscribe_json_stream`. Each item is a parsed Python object.
+    """
+
+    def __init__(self, inner: MoqJsonStreamConsumer) -> None:
+        self._inner = inner
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> Any:
+        value = await self._inner.next()
+        if value is None:
+            raise StopAsyncIteration
+        return json.loads(value)
+
+    def cancel(self) -> None:
+        """Cancel all current and future next() calls."""
+        self._inner.cancel()
+
+
 class CatalogConsumer:
     """Wraps MoqCatalogConsumer as an async iterator of Catalog."""
 
@@ -231,6 +285,22 @@ class BroadcastConsumer:
         ``subscription`` tunes delivery (priority, ordering, group range); omit for defaults.
         """
         return TrackConsumer(await self._inner.subscribe_track(name, subscription))
+
+    async def subscribe_json(self, name: str, *, compression: bool = False) -> JsonConsumer:
+        """Subscribe to a JSON snapshot track (lossy latest-value).
+
+        Yields parsed Python objects. Pass the same ``compression`` the producer used.
+        """
+        config = MoqJsonConfig(delta_ratio=0, compression=compression)
+        return JsonConsumer(await self._inner.subscribe_json(name, config))
+
+    async def subscribe_json_stream(self, name: str, *, compression: bool = False) -> JsonStreamConsumer:
+        """Subscribe to a JSON stream track (lossless append-log).
+
+        Yields parsed Python objects in order. Pass the same ``compression`` the producer used.
+        """
+        config = MoqJsonStreamConfig(compression=compression)
+        return JsonStreamConsumer(await self._inner.subscribe_json_stream(name, config))
 
     async def fetch_group(
         self,

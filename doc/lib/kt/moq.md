@@ -195,6 +195,32 @@ dynamic.requestedBroadcasts().collect { request ->
 
 The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast)` to serve it, or `abort(code)` to fail the requester.
 
+### JSON tracks
+
+For JSON payloads, publish and subscribe with the framing handled for you, in one of two modes. Snapshot (lossy) carries one value updated over time; a subscriber only sees the latest. Stream (lossless) is an ordered append-log where every record is preserved. Values cross as JSON strings; serialize with your JSON library of choice.
+
+```kotlin
+import dev.moq.*
+import uniffi.moq.MoqBroadcastProducer
+import uniffi.moq.MoqJsonConfig
+import uniffi.moq.MoqJsonStreamConfig
+
+// Snapshot: each update supersedes the last.
+val config = MoqJsonConfig(deltaRatio = 8u, compression = true)
+val status = broadcast.publishJson("status", config)
+status.update("""{"state":"live"}""")
+
+val broadcastConsumer = broadcast.consume()
+val consumer = broadcastConsumer.subscribeJson("status", config)
+consumer.values().collect { value -> println(value) }
+
+// Stream: every record is delivered in order.
+val events = broadcast.publishJsonStream("events", MoqJsonStreamConfig(compression = false))
+events.append("""{"event":"started"}""")
+```
+
+`compression` must match on the producer and subscriber. In snapshot mode, `deltaRatio` of `0` disables merge-patch deltas (every change is a fresh snapshot).
+
 ## Cancellation
 
 The wrapper exposes consumers as Kotlin `Flow`s. Cancelling the collector's coroutine scope calls `cancel()` on the native side via the wrapper's `onCompletion` hook, releasing resources promptly:
