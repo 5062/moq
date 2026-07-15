@@ -25,7 +25,7 @@ The project contains multiple layers of protocols:
 
 1. **quic** - Does all the networking.
 2. **web-transport** - A small layer on top of QUIC/HTTP3 for browser support. Provided by the browser or the `web-transport` crates.
-3. **moq-net** - The networking layer on top of `web-transport`, implemented by CDNs. At session setup it negotiates one of two wire protocols: the simplified `moq-lite` protocol (the layer name) or the full IETF `moq-transport` protocol. Content splits into:
+3. **moq-net** - The networking layer on top of `web-transport`, implemented by CDNs. At session setup it negotiates one of two wire protocols: the simplified `moq-lite` protocol or the full IETF `moq-transport` protocol. Content splits into:
    - broadcast: a collection of tracks produced by a publisher
    - track: a live stream of groups within a broadcast.
    - group: a live stream of frames within a track, each delivered independently over a QUIC stream.
@@ -34,10 +34,9 @@ The project contains multiple layers of protocols:
    - catalog: a JSON track containing a description of other tracks and their properties (for WebCodecs).
    - container: each frame consists of a timestamp and codec bitstream
    - watch/publish: dedicated packages for subscribing/publishing with optional UI overlays
-5. **moq-audio** - Native Opus encode/decode for raw PCM (more codecs to come). Used by `moq-ffi`/`libmoq` so native callers don't have to bring their own codec.
-6. **application** - Users building on top of `moq-net` or `hang`
+5. **application** - Users building on top of `moq-net` or `hang`
 
-Key architectural rule: The CDN/relay does not know anything about media. Anything in the `moq` layer should be generic, using rules on the wire on how to deliver content.
+Key architectural rule: The CDN/relay does not know anything about media. Anything in the `moq-net` layer should be generic, using rules on the wire on how to deliver content.
 
 ## Project Structure
 
@@ -48,6 +47,7 @@ Top-level layout only. Per-crate and per-package detail lives in the nested guid
 - `/py/`, `/swift/`, `/kt/`, `/go/` - language wrappers over `rs/moq-ffi` (see [Language Bindings](#language-bindings)). `/py/` has `py/CLAUDE.md`; the others defer to their `README.md`.
 - `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. See `doc/bin/obs.md`.
 - `/demo/` - demos and test media: relay configs, the web demo, MoQ Boy, media hosting, and a network throttle script.
+- `/test/` - cross-language interop smoke tests (`test/smoke/`), run via `just test smoke[-full]`.
 - `/doc/` - documentation site (VitePress, deployed via Cloudflare).
 - `/drafts/` - IETF Internet-Drafts (kramdown-rfc) for the MoQ protocols implemented here. Built and published to the datatracker via `just drafts`. See `drafts/CLAUDE.md`.
 
@@ -65,19 +65,12 @@ Language-specific conventions, crate/package maps, and patterns live in nested `
 
 The `swift/`, `kt/`, and `go/` directories are thin wrappers over `rs/moq-ffi`; see each directory's `README.md` rather than a dedicated guide.
 
-This root file holds only cross-cutting rules that apply everywhere (writing style, root-cause and maintainability rules, cross-package sync, public-API scrutiny, comment/doc conventions). The mechanics of landing a change (branch targeting, commit messages, PR descriptions, reviews, releases) live in [CONTRIBUTING.md](CONTRIBUTING.md).
+This root file holds only cross-cutting rules that apply everywhere (writing style, root-cause and maintainability rules, cross-package sync, public-API scrutiny, comment/doc conventions). When editing any of these guides, reference code by file path and symbol name, never by line number; line numbers rot with every edit. The mechanics of landing a change (branch targeting, commit messages, PR descriptions, reviews, releases) live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Dependencies
 
 - When adding new dependencies, always use the **newest stable version** available.
 - **Prefer a maintained third-party crate over hand-rolling non-core functionality** (standard container/codec parsers, compression, serialization, etc.). Reserve bespoke code for the wire/protocol layers where we need full control or no suitable crate exists.
-
-## Development Tips
-
-1. The project uses `just` as the task runner - check `justfile` for all available commands
-2. For Rust development, the workspace is configured in the root `Cargo.toml`
-3. For JS/TS development, bun workspaces are used with configuration in the root `package.json`
-4. Consult `doc/` for documentation and the [IETF datatracker](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) for specification drafts when working on protocol-level code
 
 ## Writing Style
 

@@ -246,7 +246,7 @@ To build and run the JVM tests locally:
 just kt check
 ```
 
-This builds `moq-ffi` for the host arch, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the `:moq-ffi` JNA resource layout, and runs `gradle :moq-ffi:jvmTest :moq:jvmTest`. The wrapper resolves `:moq-ffi` from the sibling project, so it builds against the freshly generated bindings.
+This builds `moq-ffi` for the host arch, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the `:moq-ffi` JNA resource layout, and runs `gradle :moq-ffi:jvmTest :moq:jvmTest`. The wrapper resolves `:moq-ffi` from the sibling project, so it builds against the freshly generated bindings. It needs `cargo`, a JDK, and Gradle, all provided by the `nix develop` shell. To regenerate the checked-in bindings without compiling or testing, use `just kt generate`.
 
 Android targets are opt-in via `-Pandroid.enabled=true`. Local builds without the Android SDK still produce a working JVM variant.
 

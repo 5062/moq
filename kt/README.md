@@ -57,9 +57,11 @@ The `dev.moq` package is intentionally thin: Kotlin has extension functions, so 
 
 ## Local development
 
-`kt/scripts/check.sh` builds `moq-ffi` for the host, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the `:moq-ffi` JNA-resource layout, and runs `gradle :moq-ffi:jvmTest :moq:jvmTest`. Run via `just kt check`. Skips cleanly without a JDK or `cargo`.
+`just kt check` builds `moq-ffi` for the host, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the `:moq-ffi` JNA-resource layout, and runs `gradle :moq-ffi:jvmTest :moq:jvmTest`. It needs `cargo`, a JDK, and Gradle, all provided by the `nix develop` shell. A missing toolchain is an error so Kotlin wrapper drift cannot slip past a green check.
 
 The wrapper resolves `moq-ffi` from the sibling project (a Gradle `dependencySubstitution` in `kt/moq/build.gradle.kts`), so tests run against freshly-built bindings; the published metadata still carries the floating range.
+
+`just kt generate` runs only the generation half (build `moq-ffi`, install the host native library, and regenerate the checked-in bindings). Use it in environments that intentionally lack Gradle; it needs only `cargo`.
 
 The Android target is opt-in via `-Pandroid.enabled=true`. Without the flag the JVM variant builds without an Android SDK, though Gradle still resolves the AGP plugin marker against `google()` at sync time. CI sets the flag automatically when packaging.
 
