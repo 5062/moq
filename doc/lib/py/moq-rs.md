@@ -242,7 +242,7 @@ The served broadcast is not announced. It only resolves consumers that call `req
 ```python
 async for announcement in client.announced("live/"):
     print(announcement.path)
-    print(announcement.hops)  # relay origin ids the broadcast traversed, oldest first
+    print(announcement.broadcast.route.hops)  # relay origin ids, oldest first
     ...
 
 # Or wait for a specific path to be announced:
@@ -253,7 +253,7 @@ broadcast = await client.announced_broadcast("live/cam1")
 broadcast = await client.request_broadcast("live/cam1")
 ```
 
-`announcement.hops` is the chain of relay origin ids (as `list[int]`) the broadcast passed through to reach you, oldest first. It is useful for routing decisions such as preferring a nearby edge or detecting how many relays a broadcast crossed.
+Each broadcast carries a `Route`: `route.hops` is the chain of relay origin ids (as `list[int]`) the broadcast passed through to reach you, oldest first, and `route.cost` is the publisher's advertised preference (lower wins). The route is dynamic; `await broadcast.route_changed()` returns the current route first, then blocks for each change (e.g. an upstream failover), and returns `None` once the broadcast ends. A publisher advertises its own route with `producer.set_route(moq.Route(hops=[], cost=10))`, for example a standby transcoder that lowers its cost to 0 once it is warm.
 
 ## Examples
 

@@ -29,6 +29,7 @@ from .types import (
     FetchGroupOptions,
     Frame,
     MediaFrame,
+    Route,
     Subscription,
     TrackInfo,
     Video,
@@ -292,6 +293,27 @@ class BroadcastConsumer:
 
     def __init__(self, inner: MoqBroadcastConsumer) -> None:
         self._inner = inner
+        self._route_watch = None
+
+    @property
+    def route(self) -> Route:
+        """The route the broadcast currently takes to reach this origin.
+
+        ``route.hops`` is the chain of relay origin ids (oldest first) and
+        ``route.cost`` the publisher's advertised preference (lower wins).
+        """
+        return self._inner.route()
+
+    async def route_changed(self) -> Route | None:
+        """Wait for the broadcast's route to change.
+
+        The first call returns the current route immediately; each later call
+        blocks until it changes again (e.g. an upstream failover). Returns
+        ``None`` once the broadcast ends.
+        """
+        if self._route_watch is None:
+            self._route_watch = self._inner.route_updates()
+        return await self._route_watch.next()
 
     async def subscribe_catalog(self) -> CatalogConsumer:
         return CatalogConsumer(await self._inner.subscribe_catalog())

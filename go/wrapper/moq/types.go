@@ -21,6 +21,7 @@ type (
 	MediaFrame         = ffi.MoqMediaFrame
 	FetchGroupOptions  = ffi.MoqFetchGroupOptions
 	OriginOptions      = ffi.MoqOriginOptions
+	Route              = ffi.MoqRoute
 	Subscription       = ffi.MoqSubscription
 	TrackInfo          = ffi.MoqTrackInfo
 	Video              = ffi.MoqVideo

@@ -13,6 +13,45 @@ pub struct MoqOriginOptions {
 	pub cache_capacity_bytes: Option<u64>,
 }
 
+/// The path a broadcast takes to reach this origin, and how preferable it is.
+///
+/// Dynamic: it changes when the serving route fails over or the publisher
+/// re-advertises itself. Publish changes with `MoqBroadcastProducer::set_route`
+/// and observe them with `MoqBroadcastConsumer::route_updates`.
+#[derive(Clone, Default, uniffi::Record)]
+pub struct MoqRoute {
+	/// Origin ids of the relay hops the broadcast traversed, oldest first.
+	#[uniffi(default = [])]
+	pub hops: Vec<u64>,
+	/// Preference among routes serving the same broadcast: lower wins.
+	#[uniffi(default = 0)]
+	pub cost: u64,
+}
+
+impl From<moq_net::broadcast::Route> for MoqRoute {
+	fn from(route: moq_net::broadcast::Route) -> Self {
+		Self {
+			hops: route.hops.iter().map(|origin| origin.id()).collect(),
+			cost: route.cost,
+		}
+	}
+}
+
+impl TryFrom<MoqRoute> for moq_net::broadcast::Route {
+	type Error = MoqError;
+
+	fn try_from(route: MoqRoute) -> Result<Self, MoqError> {
+		let mut out = moq_net::broadcast::Route::new().with_cost(route.cost);
+		for id in route.hops {
+			let origin = moq_net::Origin::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
+			out = out
+				.with_hop(origin)
+				.map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
+		}
+		Ok(out)
+	}
+}
+
 #[derive(uniffi::Object)]
 pub struct MoqOriginProducer {
 	inner: moq_net::origin::Producer,
@@ -64,10 +103,8 @@ impl Announced {
 					let Some(broadcast) = broadcast else {
 						continue;
 					};
-					let hops = broadcast.info().hops.iter().map(|origin| origin.id()).collect();
 					return Ok(Some(Arc::new(MoqAnnouncement {
 						path: path.to_string(),
-						hops,
 						broadcast: Arc::new(MoqBroadcastConsumer::new(broadcast)),
 					})));
 				}
@@ -94,7 +131,6 @@ impl Announced {
 #[derive(uniffi::Object)]
 pub struct MoqAnnouncement {
 	path: String,
-	hops: Vec<u64>,
 	broadcast: Arc<MoqBroadcastConsumer>,
 }
 
@@ -346,11 +382,6 @@ impl MoqAnnouncement {
 	/// The path of the announced broadcast.
 	pub fn path(&self) -> String {
 		self.path.clone()
-	}
-
-	/// The origin ids of the relay hops this broadcast traversed, oldest first.
-	pub fn hops(&self) -> Vec<u64> {
-		self.hops.clone()
 	}
 
 	/// The broadcast consumer.

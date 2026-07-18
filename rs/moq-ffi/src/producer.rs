@@ -6,6 +6,7 @@ use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, M
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::{MoqFrame, MoqInit};
+use crate::origin::MoqRoute;
 
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
@@ -257,6 +258,17 @@ impl MoqBroadcastProducer {
 		Ok(Arc::new(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
 		}))
+	}
+
+	/// Update the broadcast's route: the hop chain and cost it advertises.
+	///
+	/// Use this as conditions shift (e.g. a standby transcoder lowering its cost
+	/// once it is warm); consumers observe the change via
+	/// `MoqBroadcastConsumer::route_updates` and sessions forward it downstream.
+	pub fn set_route(&self, route: MoqRoute) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let route = route.try_into()?;
+		self.with_state(|state| Ok(state.broadcast.set_route(route)?))
 	}
 
 	/// Set (or replace) a top-level application catalog section by name.

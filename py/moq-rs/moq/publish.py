@@ -23,7 +23,7 @@ from moq_ffi import (
     MoqTrackRequest,
 )
 
-from .types import AudioEncoderInput, AudioEncoderOutput, AudioFrame, Frame, Subscription, TrackInfo, VideoHint
+from .types import AudioEncoderInput, AudioEncoderOutput, AudioFrame, Frame, Route, Subscription, TrackInfo, VideoHint
 
 if TYPE_CHECKING:
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer
@@ -343,6 +343,15 @@ class BroadcastProducer:
     def dynamic(self) -> BroadcastDynamic:
         """Accept subscriptions to tracks that are not published yet."""
         return BroadcastDynamic(self._inner.dynamic())
+
+    def set_route(self, route: Route) -> None:
+        """Update the broadcast's route: the hop chain and cost it advertises.
+
+        Use this as conditions shift (e.g. a standby transcoder lowering its
+        ``cost`` once warm); consumers observe the change via
+        :meth:`BroadcastConsumer.route_changed`.
+        """
+        self._inner.set_route(route)
 
     def publish_media(
         self,

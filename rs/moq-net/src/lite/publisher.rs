@@ -17,6 +17,15 @@ use crate::{
 
 use super::Version;
 
+/// Publisher-side bookkeeping for one announced path, so upstream route changes
+/// forward as a restart. `sent` is the hop chain last written to the peer, or
+/// `None` while the announce is filtered (reflected or excluded).
+struct WatchedRoute {
+	consumer: crate::broadcast::Consumer,
+	path: crate::PathOwned,
+	sent: Option<OriginList>,
+}
+
 pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	pub session: S,
 	/// The origin we read local broadcasts from.
@@ -230,6 +239,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut next_announce_id: u64 = 0;
 		let mut announce_ids: std::collections::HashMap<crate::PathOwned, u64> = std::collections::HashMap::new();
 
+		// Lite05+: watch every announced broadcast's route and forward changes as a
+		// restart, so an upstream failover re-advertises downstream instead of the
+		// peer keeping a stale hop chain. Keyed by suffix; filtered announces are
+		// watched too, since an update can cross the forwarding filter either way.
+		let mut watched: std::collections::HashMap<crate::PathOwned, WatchedRoute> = std::collections::HashMap::new();
+
 		match version {
 			Version::Lite01 | Version::Lite02 => {
 				let mut init = Vec::new();
@@ -284,8 +299,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					match broadcast {
 						Some(broadcast) => {
-							let info = broadcast.info();
-							let hops = &info.hops;
+							let hops = broadcast.route().hops;
+							// Watch even the announces we filter below: a later route update
+							// can cross the forwarding filter in either direction.
+							watched.insert(
+								suffix.clone(),
+								WatchedRoute {
+									consumer: broadcast.clone(),
+									path: path.clone(),
+									sent: None,
+								},
+							);
 							// Apply the same exclude_hop and reflected-announce skips as the live
 							// loop so the count matches exactly what we send (minus the self push).
 							if exclude_hop != 0 && hops.iter().any(|h| h.id() == exclude_hop) {
@@ -298,12 +322,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							let guard = stats.broadcast(&absolute).publisher();
 							stats_guards.entry(absolute.clone()).or_insert(guard);
 							initial.retain(|(s, _)| s != &suffix);
-							initial.push((suffix, hops.clone()));
+							initial.push((suffix, hops));
 						}
 						None => {
 							// A potential race: a just-announced path already unannounced.
 							tracing::debug!(broadcast = %absolute, "unannounce");
 							stats_guards.remove(&absolute);
+							watched.remove(&suffix);
 							initial.retain(|(s, _)| s != &suffix);
 						}
 					}
@@ -321,6 +346,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					if version.has_announce_id() {
 						announce_ids.insert(suffix.clone(), next_announce_id);
 						next_announce_id += 1;
+					}
+					if let Some(entry) = watched.get_mut(suffix) {
+						entry.sent = Some(hops.clone());
 					}
 					lite::AnnounceBroadcast::Active {
 						suffix: suffix.as_path(),
@@ -344,85 +372,218 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		}
 
+		// One announce-loop turn: either an (un)announce from the origin or a route
+		// change on an already-announced broadcast. Resolved outside the select so
+		// the handlers below can freely mutate the maps its futures borrow.
+		enum Op {
+			Announce(Option<crate::announce::Update>),
+			Route(crate::PathOwned, Result<crate::broadcast::Route, Error>),
+		}
+
 		// Send updates as they arrive. Closure wins the race so a dead peer can't
 		// stall on a busy announce feed.
 		loop {
-			let next = {
+			let op = {
 				let mut closed = std::pin::pin!(stream.reader.closed());
 				kio::wait(|waiter| {
 					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
 						return Poll::Ready(Err(res));
 					}
-					announced.poll_next(waiter).map(Ok)
+					if let Poll::Ready(next) = announced.poll_next(waiter) {
+						return Poll::Ready(Ok(Op::Announce(next)));
+					}
+					// Poll every watched broadcast for a route change; each wake
+					// rescans the map, which announce-control rates make fine.
+					for (suffix, entry) in watched.iter_mut() {
+						if let Poll::Ready(res) = entry.consumer.poll_route_changed(waiter) {
+							return Poll::Ready(Ok(Op::Route(suffix.clone(), res)));
+						}
+					}
+					Poll::Pending
 				})
 				.await
 			};
-			let next = match next {
-				Ok(next) => next,
+			let op = match op {
+				Ok(op) => op,
 				Err(res) => return res,
 			};
-			let Some(crate::announce::Update { path, broadcast }) = next else {
-				stream.writer.finish()?;
-				return stream.writer.closed().await;
-			};
 
-			let suffix = path
-				.strip_prefix(&prefix)
-				.expect("origin returned invalid path")
-				.to_owned();
-			let absolute = origin.absolute(&path).to_owned();
+			match op {
+				Op::Announce(None) => {
+					stream.writer.finish()?;
+					return stream.writer.closed().await;
+				}
+				Op::Announce(Some(crate::announce::Update { path, broadcast })) => {
+					let suffix = path
+						.strip_prefix(&prefix)
+						.expect("origin returned invalid path")
+						.to_owned();
+					let absolute = origin.absolute(&path).to_owned();
 
-			match broadcast {
-				Some(active) => {
-					let info = active.info();
-					let Some(hops) =
-						Self::prepare_active_hops(&info.hops, self_origin, exclude_hop, version, &absolute)
-					else {
+					match broadcast {
+						Some(active) => {
+							let route = active.route();
+							if lite::restart_supported(version) {
+								// Watch even if filtered below: a route update can cross
+								// the forwarding filter in either direction.
+								watched.insert(
+									suffix.clone(),
+									WatchedRoute {
+										consumer: active.clone(),
+										path: path.clone(),
+										sent: None,
+									},
+								);
+							}
+							let Some(hops) =
+								Self::prepare_active_hops(&route.hops, self_origin, exclude_hop, version, &absolute)
+							else {
+								continue;
+							};
+							tracing::debug!(broadcast = %absolute, "announce");
+							let bs = stats.broadcast(&absolute);
+							// Count the broadcast name length, not the encoded message size, so
+							// stats don't penalize the broadcast for hop/framing overhead.
+							bs.publisher_announced_bytes(absolute.as_str().len() as u64);
+							let prev = stats_guards.insert(absolute.clone(), bs.publisher());
+							debug_assert!(prev.is_none(), "origin announced a path that was already active");
+							if version.has_announce_id() {
+								let prev = announce_ids.insert(suffix.clone(), next_announce_id);
+								debug_assert!(prev.is_none(), "announce id still assigned for a new announce");
+								next_announce_id += 1;
+							}
+							if let Some(entry) = watched.get_mut(&suffix) {
+								entry.sent = Some(hops.clone());
+							}
+							stream
+								.writer
+								.encode(&lite::AnnounceBroadcast::Active { suffix, hops })
+								.await?;
+						}
+						None => {
+							tracing::debug!(broadcast = %absolute, "unannounce");
+							// A watched entry with `sent: None` means the peer holds no live
+							// advertisement (a route-filter retract already sent its Ended);
+							// repeating the Ended would be a spurious wire message. Pre-watch
+							// versions never populate `watched`, so they keep sending the
+							// Ended even for announces filtered above.
+							let retracted = watched.remove(&suffix).is_some_and(|entry| entry.sent.is_none());
+							stats_guards.remove(&absolute);
+							if version.has_announce_id() {
+								// Retract by id; nothing to send if the announce was filtered and
+								// the peer never saw it (an unknown id is a protocol violation).
+								if let Some(id) = announce_ids.remove(&suffix) {
+									stats
+										.broadcast(&absolute)
+										.publisher_announced_bytes(absolute.as_str().len() as u64);
+									stream.writer.encode(&lite::AnnounceBroadcast::EndedId { id }).await?;
+								}
+							} else if !retracted {
+								stats
+									.broadcast(&absolute)
+									.publisher_announced_bytes(absolute.as_str().len() as u64);
+								// An ended announce doesn't need hops; the receiver matches on path only.
+								stream
+									.writer
+									.encode(&lite::AnnounceBroadcast::Ended {
+										suffix,
+										hops: OriginList::new(),
+									})
+									.await?;
+							}
+						}
+					}
+				}
+				Op::Route(suffix, res) => {
+					let Ok(route) = res else {
+						// The broadcast is gone; the origin delivers the Ended itself.
+						watched.remove(&suffix);
 						continue;
 					};
-					tracing::debug!(broadcast = %absolute, "announce");
-					let bs = stats.broadcast(&absolute);
-					// Count the broadcast name length, not the encoded message size, so
-					// stats don't penalize the broadcast for hop/framing overhead.
-					bs.publisher_announced_bytes(absolute.as_str().len() as u64);
-					let prev = stats_guards.insert(absolute.clone(), bs.publisher());
-					debug_assert!(prev.is_none(), "origin announced a path that was already active");
-					if version.has_announce_id() {
-						let prev = announce_ids.insert(suffix.clone(), next_announce_id);
-						debug_assert!(prev.is_none(), "announce id still assigned for a new announce");
-						next_announce_id += 1;
-					}
-					stream
-						.writer
-						.encode(&lite::AnnounceBroadcast::Active { suffix, hops })
-						.await?;
-				}
-				None => {
-					tracing::debug!(broadcast = %absolute, "unannounce");
-					stats_guards.remove(&absolute);
-					if version.has_announce_id() {
-						// Retract by id; nothing to send if the announce was filtered and
-						// the peer never saw it (an unknown id is a protocol violation).
-						if let Some(id) = announce_ids.remove(&suffix) {
+					let Some(entry) = watched.get_mut(&suffix) else {
+						continue;
+					};
+					let absolute = origin.absolute(&entry.path).to_owned();
+					let hops = Self::prepare_active_hops(&route.hops, self_origin, exclude_hop, version, &absolute);
+					let sent = entry.sent.clone();
+					match (hops, sent) {
+						// The forwarded chain is unchanged (e.g. only the cost moved,
+						// which doesn't ride the wire yet): nothing to send.
+						(Some(hops), Some(sent)) if hops == sent => {}
+						// The chain changed (an upstream failover): restart, so the
+						// peer updates its route in place instead of re-resolving.
+						(Some(hops), Some(_)) => {
+							tracing::debug!(broadcast = %absolute, "reannounce");
+							if version.has_announce_id() {
+								// The id exists for every live advertisement; a panic here would
+								// silently kill the announce loop (the peer keeps stale routes),
+								// so a bookkeeping bug degrades to a skipped restart instead.
+								let Some(id) = announce_ids.get(&suffix).copied() else {
+									debug_assert!(false, "announced path without an announce id");
+									tracing::warn!(broadcast = %absolute, "restart without an announce id; skipping");
+									continue;
+								};
+								stats
+									.broadcast(&absolute)
+									.publisher_announced_bytes(absolute.as_str().len() as u64);
+								entry.sent = Some(hops.clone());
+								stream
+									.writer
+									.encode(&lite::AnnounceBroadcast::Restart { id, hops })
+									.await?;
+							} else {
+								// Lite05: a duplicate ANNOUNCE for a live path is the restart.
+								stats
+									.broadcast(&absolute)
+									.publisher_announced_bytes(absolute.as_str().len() as u64);
+								entry.sent = Some(hops.clone());
+								stream
+									.writer
+									.encode(&lite::AnnounceBroadcast::Active { suffix, hops })
+									.await?;
+							}
+						}
+						// Previously filtered, now forwardable: a fresh announce.
+						(Some(hops), None) => {
+							tracing::debug!(broadcast = %absolute, "announce");
+							let bs = stats.broadcast(&absolute);
+							bs.publisher_announced_bytes(absolute.as_str().len() as u64);
+							stats_guards.insert(absolute.clone(), bs.publisher());
+							if version.has_announce_id() {
+								announce_ids.insert(suffix.clone(), next_announce_id);
+								next_announce_id += 1;
+							}
+							entry.sent = Some(hops.clone());
+							stream
+								.writer
+								.encode(&lite::AnnounceBroadcast::Active { suffix, hops })
+								.await?;
+						}
+						// The new chain must not be forwarded (it now loops through the
+						// peer, or the peer excluded it): retract.
+						(None, Some(_)) => {
+							tracing::debug!(broadcast = %absolute, "unannounce (filtered route)");
+							entry.sent = None;
+							stats_guards.remove(&absolute);
 							stats
 								.broadcast(&absolute)
 								.publisher_announced_bytes(absolute.as_str().len() as u64);
-							stream.writer.encode(&lite::AnnounceBroadcast::EndedId { id }).await?;
+							if version.has_announce_id() {
+								if let Some(id) = announce_ids.remove(&suffix) {
+									stream.writer.encode(&lite::AnnounceBroadcast::EndedId { id }).await?;
+								}
+							} else {
+								stream
+									.writer
+									.encode(&lite::AnnounceBroadcast::Ended {
+										suffix,
+										hops: OriginList::new(),
+									})
+									.await?;
+							}
 						}
-					} else {
-						// Count the name length whether or not a guard is held: the Ended
-						// message is sent even for announces we filtered out above.
-						stats
-							.broadcast(&absolute)
-							.publisher_announced_bytes(absolute.as_str().len() as u64);
-						// An ended announce doesn't need hops; the receiver matches on path only.
-						stream
-							.writer
-							.encode(&lite::AnnounceBroadcast::Ended {
-								suffix,
-								hops: OriginList::new(),
-							})
-							.await?;
+						// Still filtered: keep watching.
+						(None, None) => {}
 					}
 				}
 			}

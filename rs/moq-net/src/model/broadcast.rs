@@ -1,5 +1,6 @@
 use crate::track;
 use std::{
+	collections::{HashMap, VecDeque},
 	sync::Arc,
 	task::{Poll, ready},
 };
@@ -11,14 +12,11 @@ use super::{OriginList, Requests, WeakCache};
 /// A collection of media tracks that can be published and subscribed to.
 ///
 /// Create via [`Info::produce`] to obtain both [`Producer`] and [`Consumer`] pair.
-#[derive(Clone, Debug)]
+/// This is the broadcast's static identity, fixed for its lifetime; the path it
+/// takes to get here is the dynamic [`Route`], observed via [`Consumer::route`].
+#[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Info {
-	/// The chain of origins the broadcast has traversed. Each relay appends its own
-	/// [`crate::Origin`] when forwarding, so the list is used for loop detection and
-	/// shortest-path preference.
-	pub hops: OriginList,
-
 	/// The origin this broadcast belongs to (its identity, and the cache pool its
 	/// tracks and groups inherit). A track reaches its pool by walking up this link,
 	/// so the pool has a single home on the origin rather than being copied per
@@ -27,28 +25,69 @@ pub struct Info {
 	pub origin: super::origin::Info,
 }
 
-impl Default for Info {
-	fn default() -> Self {
-		Self {
-			hops: OriginList::new(),
-			origin: super::origin::Info::default(),
-		}
-	}
-}
-
 impl Info {
-	/// Create a new broadcast with an empty hop chain.
+	/// Create a new broadcast with default metadata.
 	pub fn new() -> Self {
 		Self::default()
 	}
 
-	/// Consume this [Info] to create a producer that carries its metadata
-	/// (including the hop chain).
+	/// Consume this [Info] to create a producer that carries its metadata.
 	///
 	/// Keep the returned [`Producer`] alive for as long as the broadcast should stay
 	/// available, and end it with [`Producer::finish`]. See the note on [`Producer`].
 	pub fn produce(self) -> Producer {
 		Producer::new(self)
+	}
+}
+
+/// The path a broadcast takes to reach this origin, and how preferable it is.
+///
+/// Unlike [`Info`], the route is dynamic: it changes when the serving session fails
+/// over, the upstream topology shifts, or the publisher re-advertises itself.
+/// Publish a change with [`Producer::set_route`] and observe one with
+/// [`Consumer::route_changed`]; downstream sessions forward updates as a restart
+/// on the wire, so route churn never looks like a new broadcast.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Route {
+	/// The chain of origins the broadcast has traversed, oldest first. Each relay
+	/// appends its own [`crate::Origin`] when forwarding; used for loop detection
+	/// and as the selection tie-break.
+	pub hops: OriginList,
+
+	/// Preference among routes serving the same broadcast: lower wins, with ties
+	/// broken by hop length and then a deterministic hash. Lets a publisher
+	/// advertise how expensive it is to serve (e.g. a standby transcoder), and
+	/// change its mind as capacity shifts. Local for now: the wire only carries
+	/// hops, so a received route always has the default cost.
+	pub cost: u64,
+}
+
+impl Route {
+	/// A direct route: no hops, best cost.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Append a hop to the chain, oldest first.
+	///
+	/// Fails with [`crate::TooManyOrigins`] once the chain is full, the same limit
+	/// the wire enforces.
+	pub fn with_hop(mut self, origin: super::Origin) -> Result<Self, super::TooManyOrigins> {
+		self.hops.push(origin)?;
+		Ok(self)
+	}
+
+	/// Replace the hop chain.
+	pub fn with_hops(mut self, hops: OriginList) -> Self {
+		self.hops = hops;
+		self
+	}
+
+	/// Set the cost: lower wins among routes serving the same broadcast.
+	pub fn with_cost(mut self, cost: u64) -> Self {
+		self.cost = cost;
+		self
 	}
 }
 
@@ -66,9 +105,30 @@ struct BroadcastState {
 	// coalescing onto it there).
 	requests: Requests<Arc<str>, track::Request>,
 
+	// Route-fed mode (a relay/origin "front"): tracks are spliced logical tracks
+	// joined across per-session tracks. `None` for an ordinary broadcast.
+	spliced: Option<SplicedState>,
+
+	// The path the broadcast currently takes to reach us, bumping `route_epoch`
+	// on every change so consumers can watch for updates.
+	route: Route,
+	route_epoch: u64,
+
 	// Set by an explicit `Producer::finish()` so `Drop` can tell a deliberate
 	// shutdown apart from a producer that was dropped by accident.
 	closed: bool,
+}
+
+/// The spliced (route-fed) half of a broadcast: logical tracks that outlive any
+/// single session, plus the queue of tracks awaiting a serving route.
+#[derive(Default)]
+struct SplicedState {
+	// Logical tracks by name, owned strongly: they live as long as the broadcast
+	// (the origin's front), not as long as any consumer.
+	tracks: HashMap<Arc<str>, super::resume::Producer>,
+
+	// Names awaiting assignment to a route, in request order.
+	pending: VecDeque<Arc<str>>,
 }
 
 impl BroadcastState {
@@ -127,8 +187,28 @@ impl Producer {
 		}
 	}
 
+	/// Create a route-fed (spliced) broadcast: consumer track lookups mint logical
+	/// tracks that are spliced across per-session tracks, queued for a route to
+	/// serve. Used by the origin for broadcasts reached over the network.
+	pub(crate) fn new_spliced(info: Info) -> Self {
+		Self {
+			info: Arc::new(info),
+			alive: Default::default(),
+			state: kio::Shared::new(BroadcastState {
+				spliced: Some(SplicedState::default()),
+				..Default::default()
+			}),
+		}
+	}
+
 	pub fn info(&self) -> &Info {
 		&self.info
+	}
+
+	/// The shared metadata handle, threaded into session-local tracks so their
+	/// groups reach this broadcast's cache pool.
+	pub(crate) fn info_arc(&self) -> Arc<Info> {
+		self.info.clone()
 	}
 
 	/// Remove a track from the lookup.
@@ -196,12 +276,71 @@ impl Producer {
 		Dynamic::new(self.info.clone(), self.alive.clone(), self.state.clone())
 	}
 
+	/// Set the broadcast's [`Route`]: the hop chain and cost it advertises.
+	///
+	/// Call this when the path to the content changes (an upstream failover) or the
+	/// publisher's preference changes (e.g. a transcoder warming up lowers its
+	/// cost). Consumers observe the change via [`Consumer::route_changed`] and
+	/// sessions forward it downstream as a restart, never as a new broadcast.
+	/// Setting the current route again is a no-op.
+	pub fn set_route(&mut self, route: Route) -> Result<(), Error> {
+		let mut state = self.state.lock();
+		if state.route == route {
+			return Ok(());
+		}
+		state.route = route;
+		state.route_epoch += 1;
+		Ok(())
+	}
+
+	/// Poll for the next spliced track awaiting a serving route, returning its name
+	/// and logical producer. Route-fed broadcasts only.
+	pub(crate) fn poll_spliced_assigned(&self, waiter: &kio::Waiter) -> Poll<(Arc<str>, super::resume::Producer)> {
+		let mut state = ready!(self.state.poll(waiter, |state| {
+			match &state.spliced {
+				Some(spliced) if !spliced.pending.is_empty() => Poll::Ready(()),
+				_ => Poll::Pending,
+			}
+		}));
+
+		let spliced = state.spliced.as_mut().expect("predicate guaranteed spliced");
+		let name = spliced.pending.pop_front().expect("predicate guaranteed a request");
+		let producer = spliced.tracks.get(&name).expect("pending name without a track").clone();
+		Poll::Ready((name, producer))
+	}
+
+	/// Re-queue a spliced track for a (new) serving route, e.g. after its previous
+	/// route died. Coalesces with an already-queued entry; a no-op if the track no
+	/// longer exists.
+	pub(crate) fn requeue_spliced(&self, name: &Arc<str>) {
+		let mut state = self.state.lock();
+		if let Some(spliced) = state.spliced.as_mut()
+			&& spliced.tracks.contains_key(name)
+			&& !spliced.pending.contains(name)
+		{
+			spliced.pending.push_back(name.clone());
+		}
+	}
+
+	/// Abort every spliced track, releasing their subscribers with `err`. Called
+	/// when the broadcast closes for good.
+	pub(crate) fn abort_spliced(&self, err: Error) {
+		let mut state = self.state.lock();
+		if let Some(spliced) = state.spliced.as_mut() {
+			spliced.pending.clear();
+			for producer in spliced.tracks.values_mut() {
+				let _ = producer.abort(err.clone());
+			}
+		}
+	}
+
 	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			info: self.info.clone(),
 			alive: self.alive.consume(),
 			state: self.state.clone(),
+			route_seen: None,
 		}
 	}
 
@@ -322,6 +461,7 @@ impl Dynamic {
 			info: self.info.clone(),
 			alive: self.alive.consume(),
 			state: self.state.clone(),
+			route_seen: None,
 		}
 	}
 
@@ -375,18 +515,65 @@ impl Dynamic {
 }
 
 /// Subscribe to arbitrary broadcast/tracks.
-#[derive(Clone)]
 pub struct Consumer {
 	info: Arc<Info>,
 	// Broadcast liveness (read-only): watched for close.
 	alive: kio::Consumer<()>,
 	// Track registry plus request queue; `track()` reads the registry and enqueues requests.
 	state: kio::Shared<BroadcastState>,
+	// The route epoch last yielded by `route_changed`, so each consumer clone
+	// observes the current route first and every change after it exactly once.
+	route_seen: Option<u64>,
+}
+
+impl Clone for Consumer {
+	fn clone(&self) -> Self {
+		Self {
+			info: self.info.clone(),
+			alive: self.alive.clone(),
+			state: self.state.clone(),
+			// Reset the cursor so the clone observes the current route first,
+			// even if the original already drained `route_changed`.
+			route_seen: None,
+		}
+	}
 }
 
 impl Consumer {
 	pub fn info(&self) -> &Info {
 		&self.info
+	}
+
+	/// The [`Route`] the broadcast currently takes to reach this origin.
+	pub fn route(&self) -> Route {
+		self.state.read().route.clone()
+	}
+
+	/// Poll for a route change. See [`Self::route_changed`].
+	pub fn poll_route_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Route, Error>> {
+		let seen = self.route_seen;
+		if let Poll::Ready(state) = self.state.poll(waiter, |state| {
+			if seen != Some(state.route_epoch) {
+				Poll::Ready(())
+			} else {
+				Poll::Pending
+			}
+		}) {
+			self.route_seen = Some(state.route_epoch);
+			return Poll::Ready(Ok(state.route.clone()));
+		}
+		// No pending change: surface the broadcast's end instead of parking forever.
+		ready!(self.alive.poll_closed(waiter));
+		Poll::Ready(Err(Error::Dropped))
+	}
+
+	/// Wait for the broadcast's [`Route`] to change.
+	///
+	/// The first call returns the current route immediately; each later call blocks
+	/// until it changes again, so a loop observes the initial value followed by
+	/// every update. Returns [`Error::Dropped`] once every producer is gone.
+	pub async fn route_changed(&mut self) -> Result<Route, Error> {
+		kio::wait(|waiter| self.poll_route_changed(waiter)).await
 	}
 
 	/// Get a handle to a track on this broadcast.
@@ -397,6 +584,20 @@ impl Consumer {
 		}
 
 		let mut state = self.state.lock();
+
+		// A route-fed broadcast mints spliced logical tracks: they outlive any
+		// session, and a route is asked (via the pending queue) to start serving.
+		if let Some(spliced) = state.spliced.as_mut() {
+			if let Some(producer) = spliced.tracks.get(name) {
+				return Ok(track::Consumer::spliced(name.into(), producer.consume()));
+			}
+			let name: Arc<str> = name.into();
+			let producer = super::resume::Producer::new();
+			let consumer = producer.consume();
+			spliced.tracks.insert(name.clone(), producer);
+			spliced.pending.push_back(name.clone());
+			return Ok(track::Consumer::spliced(name, consumer));
+		}
 
 		// Reuse a live producer if one is already publishing the track. `get` drops a
 		// closed entry and returns `None`, so we fall through to a fresh request.
@@ -486,6 +687,7 @@ impl WeakConsumer {
 			info: self.info.clone(),
 			alive: self.alive.consume(),
 			state: self.state.clone(),
+			route_seen: None,
 		}
 	}
 }
@@ -702,6 +904,33 @@ mod test {
 			producer2.unused().now_or_never().is_some(),
 			"new track producer should be unused after its consumer is dropped"
 		);
+	}
+
+	// Cloning a `Consumer` resets its route cursor: a clone that inherited the
+	// original's `route_seen` would skip the initial-value delivery that
+	// `route_changed` promises.
+	#[tokio::test]
+	async fn route_clone_observes_current_route() {
+		let mut producer = Info::new().produce();
+		let mut consumer = producer.consume();
+
+		// Drain the initial route, then a change.
+		consumer.route_changed().await.unwrap();
+		let route = Route::new().with_cost(7);
+		producer.set_route(route.clone()).unwrap();
+		assert_eq!(consumer.route_changed().await.unwrap(), route);
+
+		// The original is fully drained: no update pending.
+		assert!(consumer.route_changed().now_or_never().is_none());
+
+		// A clone starts fresh, yielding the current route immediately.
+		let mut clone = consumer.clone();
+		let seen = clone
+			.route_changed()
+			.now_or_never()
+			.expect("clone should observe the current route immediately")
+			.unwrap();
+		assert_eq!(seen, route);
 	}
 
 	// Cloning a `Dynamic` and dropping the clone must not flip the handler

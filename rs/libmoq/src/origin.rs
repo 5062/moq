@@ -90,6 +90,7 @@ impl Origin {
 			};
 
 			// Hold the lock only to buffer the announcement; release it before the callback.
+			// Only Active carries a broadcast; Ended does not.
 			let announced_id = State::lock()
 				.origin
 				.announced
