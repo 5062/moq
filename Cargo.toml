@@ -30,6 +30,7 @@ members = [
     "rs/moq-video",
     "rs/moq-wasm",
 ]
+exclude = ["rs/moq-trace/vendor/quinn/quinn", "rs/moq-trace/vendor/quinn/quinn-proto"]
 default-members = [
     "rs/kio",
     "rs/hang",
@@ -134,3 +135,7 @@ opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+[patch.crates-io]
+quinn = { path = "rs/moq-trace/vendor/quinn/quinn" }
+quinn-proto = { path = "rs/moq-trace/vendor/quinn/quinn-proto" }
