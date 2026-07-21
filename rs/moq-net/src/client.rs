@@ -3,7 +3,7 @@ use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
 	ALPN_LITE_06_WIP, Consume, Driver, Error, NEGOTIATED, Session, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
-	ietf, lite, setup, stats,
+	ietf, lite, setup, stats, trace,
 };
 
 /// A MoQ client session builder.
@@ -12,6 +12,7 @@ pub struct Client {
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
 	stats: stats::Handle,
+	trace: trace::Handle,
 	versions: Versions,
 	setup_path: Option<String>,
 }
@@ -42,6 +43,12 @@ impl Client {
 	/// Pass [`stats::Handle::default`] (a no-op handle) to opt out.
 	pub fn with_stats(mut self, stats: stats::Handle) -> Self {
 		self.stats = stats;
+		self
+	}
+
+	/// Attach a trace handle for raw relay object events.
+	pub fn with_trace(mut self, trace: trace::Handle) -> Self {
+		self.trace = trace;
 		self
 	}
 
@@ -100,6 +107,7 @@ impl Client {
 					self.publish.clone(),
 					self.subscribe.clone(),
 					self.stats.clone(),
+					self.trace.clone(),
 					ietf::Version::Draft19,
 					self.setup_path.clone(),
 					None,
@@ -124,6 +132,7 @@ impl Client {
 					self.publish.clone(),
 					self.subscribe.clone(),
 					self.stats.clone(),
+					self.trace.clone(),
 					ietf::Version::Draft18,
 					self.setup_path.clone(),
 					None,
@@ -148,6 +157,7 @@ impl Client {
 					self.publish.clone(),
 					self.subscribe.clone(),
 					self.stats.clone(),
+					self.trace.clone(),
 					ietf::Version::Draft17,
 					self.setup_path.clone(),
 					None,
@@ -339,6 +349,7 @@ impl Client {
 					self.publish.clone(),
 					self.subscribe.clone(),
 					self.stats.clone(),
+					self.trace.clone(),
 					v,
 					None,
 					None,

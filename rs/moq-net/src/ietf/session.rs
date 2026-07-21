@@ -21,6 +21,8 @@ pub fn start<S: web_transport_trait::Session>(
 	subscribe: Option<origin::Producer>,
 	// Tier-scoped stats handle. Pass [`crate::stats::Handle::default`] to opt out.
 	stats: crate::stats::Handle,
+	// Trace handle. Pass [`crate::trace::Handle::default`] to opt out.
+	trace: crate::trace::Handle,
 	version: Version,
 	// The request path we advertise in our SETUP (draft-17+ clients on URL-less
 	// transports). A server passes `None`.
@@ -46,9 +48,16 @@ pub fn start<S: web_transport_trait::Session>(
 				let control = Control::new(request_id_max, client);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
-				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), stats.clone(), version);
+				let publisher = Publisher::new(
+					adapter.clone(),
+					publish,
+					control.clone(),
+					stats.clone(),
+					trace.clone(),
+					version,
+				);
 				let (tasks, mut task_set) = TaskSet::new();
-				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, stats, version, tasks);
+				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, stats, trace, version, tasks);
 
 				let dispatch_session = adapter.clone();
 				let mut sub_ns = subscriber.clone();
@@ -119,9 +128,16 @@ pub fn start<S: web_transport_trait::Session>(
 				};
 
 				let control = Control::new(None, client);
-				let publisher = Publisher::new(session.clone(), publish, control.clone(), stats.clone(), version);
+				let publisher = Publisher::new(
+					session.clone(),
+					publish,
+					control.clone(),
+					stats.clone(),
+					trace.clone(),
+					version,
+				);
 				let (tasks, mut task_set) = TaskSet::new();
-				let subscriber = Subscriber::new(session.clone(), subscribe, control, stats, version, tasks);
+				let subscriber = Subscriber::new(session.clone(), subscribe, control, stats, trace, version, tasks);
 
 				let sub_ns_session = session.clone();
 				let mut sub_ns = subscriber.clone();

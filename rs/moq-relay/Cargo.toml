@@ -44,6 +44,7 @@ moq-native = { workspace = true, default-features = false, features = ["aws-lc-r
 moq-net = { workspace = true }
 moq-stats = { workspace = true }
 moq-token = { workspace = true, features = ["tokio"] }
+moq-trace = { workspace = true }
 qmux = { workspace = true, features = ["ws"], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 reqwest-middleware = "0.5"

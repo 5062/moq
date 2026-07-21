@@ -3,7 +3,7 @@ use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
 	ALPN_LITE_06_WIP, Consume, Driver, Error, NEGOTIATED, Role, Session, Version, Versions,
 	coding::{Decode, Encode, Reader, Stream},
-	ietf, lite, setup, stats,
+	ietf, lite, setup, stats, trace,
 };
 
 /// A MoQ server session builder.
@@ -12,6 +12,7 @@ pub struct Server {
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
 	stats: stats::Handle,
+	trace: trace::Handle,
 	versions: Versions,
 }
 
@@ -42,6 +43,12 @@ impl Server {
 	/// Pass [`stats::Handle::default`] (a no-op handle) to opt out.
 	pub fn with_stats(mut self, stats: stats::Handle) -> Self {
 		self.stats = stats;
+		self
+	}
+
+	/// Attach a trace handle for raw relay object events.
+	pub fn with_trace(mut self, trace: trace::Handle) -> Self {
+		self.trace = trace;
 		self
 	}
 
@@ -343,6 +350,12 @@ impl<S: web_transport_trait::Session> Request<S> {
 		self
 	}
 
+	/// Set the trace handle. Overrides any value from the [`Server`] builder.
+	pub fn with_trace(mut self, trace: trace::Handle) -> Self {
+		self.inner_mut().server.trace = trace;
+		self
+	}
+
 	fn inner_mut(&mut self) -> &mut RequestInner<S> {
 		self.inner.as_mut().expect("request already responded")
 	}
@@ -368,6 +381,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					server.publish,
 					server.subscribe,
 					server.stats,
+					server.trace,
 					version,
 					None,
 					Some(peer_setup),
@@ -473,6 +487,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					server.publish,
 					server.subscribe,
 					server.stats,
+					server.trace,
 					v,
 					None,
 					None,

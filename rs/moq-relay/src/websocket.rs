@@ -12,7 +12,7 @@ use axum::{
 	response::Response,
 };
 use moq_net::origin;
-use moq_net::stats::Handle;
+use moq_net::{stats::Handle, trace};
 
 use crate::{Auth, AuthParams, web::MtlsPeer, web::WebState, web::landing_response};
 
@@ -51,6 +51,7 @@ pub(crate) async fn serve_ws(
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
 	let stats = state.cluster.stats.tier(token.tier.clone());
+	let trace = state.cluster.trace.clone();
 
 	if publish.is_none() && subscribe.is_none() {
 		// Bad token, we can't publish or subscribe.
@@ -67,7 +68,7 @@ pub(crate) async fn serve_ws(
 		// Unfortunately, we need to convert from Axum to Tungstenite.
 		// Axum uses Tungstenite internally, but it's not exposed to avoid semvar issues.
 		let socket = WebSocketAdapter::new(socket);
-		let _ = handle_socket(id, socket, alpn, publish, subscribe, stats).await;
+		let _ = handle_socket(id, socket, alpn, publish, subscribe, stats, trace).await;
 	}))
 }
 
@@ -86,6 +87,7 @@ async fn handle_socket<T>(
 	publish: Option<origin::Producer>,
 	subscribe: Option<origin::Producer>,
 	stats: Handle,
+	trace: trace::Handle,
 ) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
@@ -106,7 +108,7 @@ where
 	// Only set the side the token actually grants. moq-net defaults the
 	// unset side to a fresh no-op origin, which is fine for a
 	// publish-only or subscribe-only token.
-	let mut server = moq_net::Server::new().with_stats(stats);
+	let mut server = moq_net::Server::new().with_stats(stats).with_trace(trace);
 	if let Some(subscribe) = subscribe {
 		server = server.with_publisher(&subscribe);
 	}

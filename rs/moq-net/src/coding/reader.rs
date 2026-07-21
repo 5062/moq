@@ -9,6 +9,7 @@ pub struct Reader<S: web_transport_trait::RecvStream, V> {
 	stream: S,
 	buffer: BytesMut,
 	version: V,
+	offset: u64,
 }
 
 impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
@@ -17,7 +18,13 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 			stream,
 			buffer: Default::default(),
 			version,
+			offset: 0,
 		}
+	}
+
+	/// Return the number of application stream bytes consumed by this reader.
+	pub fn offset(&self) -> u64 {
+		self.offset
 	}
 
 	/// Decode the next message from the stream.
@@ -29,7 +36,9 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 			let mut cursor = io::Cursor::new(&self.buffer);
 			match T::decode(&mut cursor, self.version.clone()) {
 				Ok(msg) => {
-					self.buffer.advance(cursor.position() as usize);
+					let consumed = cursor.position();
+					self.buffer.advance(consumed as usize);
+					self.offset += consumed;
 					return Ok(msg);
 				}
 				Err(DecodeError::Short) => {
@@ -90,15 +99,21 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	pub async fn read_chunk(&mut self, max: usize) -> Result<Option<Bytes>, Error> {
 		if !self.buffer.is_empty() {
 			let n = cmp::min(self.buffer.len(), max);
+			self.offset += n as u64;
 			return Ok(Some(self.buffer.split_to(n).freeze()));
 		}
-		self.stream.read_chunk(max).await.map_err(Error::from_transport)
+		let chunk = self.stream.read_chunk(max).await.map_err(Error::from_transport)?;
+		if let Some(chunk) = &chunk {
+			self.offset += chunk.len() as u64;
+		}
+		Ok(chunk)
 	}
 
 	/// Read exactly the given number of bytes from the stream.
 	pub async fn read_exact(&mut self, size: usize) -> Result<Bytes, Error> {
 		// An optimization to avoid a copy if we have enough data in the buffer
 		if self.buffer.len() >= size {
+			self.offset += size as u64;
 			return Ok(self.buffer.split_to(size).freeze());
 		}
 
@@ -107,11 +122,14 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 
 		let size = cmp::min(buf.remaining_mut(), self.buffer.len());
 		let data = self.buffer.split_to(size);
+		self.offset += size as u64;
 		buf.put(data);
 
 		while buf.has_remaining_mut() {
 			match self.stream.read_buf(&mut buf).await {
-				Ok(Some(_)) => {}
+				Ok(Some(n)) => {
+					self.offset += n as u64;
+				}
 				Ok(None) => return Err(DecodeError::Short.into()),
 				Err(e) => return Err(Error::from_transport(e)),
 			}
@@ -158,6 +176,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 			stream: self.stream,
 			buffer: self.buffer,
 			version,
+			offset: self.offset,
 		}
 	}
 }

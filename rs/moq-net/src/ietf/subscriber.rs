@@ -10,7 +10,7 @@ use crate::{
 	coding::{Reader, Stream},
 	frame, group,
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
-	origin, stats, track,
+	origin, stats, trace, track,
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
@@ -86,6 +86,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	origin: origin::Producer,
 	control: Control,
 	stats: stats::Handle,
+	trace: trace::Handle,
 	/// Per-session ingress broadcast-subscription tracker. Each upstream
 	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
 	/// distinct upstream sessions feeding each broadcast.
@@ -125,6 +126,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		origin: origin::Producer,
 		control: Control,
 		stats: stats::Handle,
+		trace: trace::Handle,
 		version: Version,
 		tasks: Tasks,
 	) -> Self {
@@ -134,6 +136,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			origin,
 			control,
 			stats,
+			trace,
 			broadcasts,
 			session_origin: crate::Origin::random(),
 			state: Default::default(),
@@ -951,7 +954,31 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		mut producer: group::Producer,
 		track_stats: Arc<stats::SubscriberTrack>,
 	) -> Result<(), Error> {
-		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
+		let mut object_id = 0;
+
+		loop {
+			let object_start = stream.offset();
+			let Some(id_delta) = stream.decode_maybe::<u64>().await? else {
+				break;
+			};
+			let object_id_current = object_id;
+			object_id += 1;
+			let mut object_event = trace::ObjectEvent {
+				at_ns: trace::now_ns(),
+				session_id: None,
+				direction: trace::Direction::Inbound,
+				protocol: trace::Protocol::MoqTransport,
+				track_alias: group.track_alias,
+				group_id: group.group_id,
+				object_id: object_id_current,
+				stream_id: None,
+				stream_offset_start: Some(object_start),
+				stream_offset_end: None,
+				payload_bytes: 0,
+				sample_rate: 0,
+			};
+			self.trace.emit(trace::Event::MoqObjectStart(object_event.clone()));
+
 			if id_delta != 0 {
 				tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
 				return Err(Error::Unsupported);
@@ -968,6 +995,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			};
 
 			let size: u64 = stream.decode().await?;
+			object_event.payload_bytes = size;
 			if size == 0 {
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
@@ -975,6 +1003,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let frame = producer.create_frame(frame::Info { size: 0, timestamp })?;
 					track_stats.frame();
 					frame.finish()?;
+					object_event.at_ns = trace::now_ns();
+					object_event.stream_offset_end = Some(stream.offset());
+					self.trace.emit(trace::Event::MoqObjectEnd(object_event));
 				} else if status == 3 && !group.flags.has_end {
 					break;
 				} else {
@@ -993,6 +1024,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				}
 
 				frame.finish()?;
+				object_event.at_ns = trace::now_ns();
+				object_event.stream_offset_end = Some(stream.offset());
+				self.trace.emit(trace::Event::MoqObjectEnd(object_event));
 			}
 		}
 

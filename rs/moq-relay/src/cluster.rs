@@ -352,6 +352,9 @@ pub struct Cluster {
 	/// returns) so traffic classes land in separate counter sets. Defaults
 	/// to a disabled (no-op) registry until [`with_stats`](Self::with_stats) is called.
 	pub stats: moq_net::stats::Registry,
+
+	/// Trace handle shared by accepted sessions and cluster dials.
+	pub trace: moq_net::trace::Handle,
 }
 
 impl Cluster {
@@ -380,6 +383,7 @@ impl Cluster {
 			client_tls: None,
 			origin,
 			stats: moq_net::stats::Registry::disabled(),
+			trace: moq_net::trace::Handle::disabled(),
 		})
 	}
 
@@ -423,6 +427,12 @@ impl Cluster {
 	/// long as the cluster runs.
 	pub fn with_stats(mut self, stats: moq_net::stats::Registry) -> Self {
 		self.stats = stats;
+		self
+	}
+
+	/// Attach a trace handle. Replaces the default disabled handle.
+	pub fn with_trace(mut self, trace: moq_net::trace::Handle) -> Self {
+		self.trace = trace;
 		self
 	}
 
@@ -883,6 +893,7 @@ impl Cluster {
 			.with_publisher(&self.origin)
 			.with_subscriber(self.origin.clone())
 			.with_stats(self.stats.tier(self.cluster_tier()))
+			.with_trace(self.trace.clone())
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;
