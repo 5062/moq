@@ -2777,6 +2777,7 @@ impl Connection {
                 }
                 Frame::Stream(frame) => {
                     // MoQ trace hook: measure STREAM frame processing after decrypt.
+                    #[cfg(feature = "moq-trace")]
                     let trace_event = moq_trace::PacketEvent {
                         at_ns: moq_trace::now_ns(),
                         session_id: None,
@@ -2789,13 +2790,17 @@ impl Connection {
                         stream_offset_end: Some(frame.offset + frame.data.len() as u64),
                         sample_rate: 0,
                     };
-                    moq_trace::global().emit(moq_trace::Event::PacketStart(trace_event.clone()));
+                    #[cfg(feature = "moq-trace")]
+                    moq_trace::global().emit_packet(moq_trace::Event::PacketStart(trace_event.clone()));
                     if self.streams.received(frame, payload_len)?.should_transmit() {
                         self.spaces[SpaceId::Data].pending.max_data = true;
                     }
-                    let mut trace_event = trace_event;
-                    trace_event.at_ns = moq_trace::now_ns();
-                    moq_trace::global().emit(moq_trace::Event::PacketEnd(trace_event));
+                    #[cfg(feature = "moq-trace")]
+                    {
+                        let mut trace_event = trace_event;
+                        trace_event.at_ns = moq_trace::now_ns();
+                        moq_trace::global().emit_packet(moq_trace::Event::PacketEnd(trace_event));
+                    }
                 }
                 Frame::Ack(ack) => {
                     self.on_ack_received(now, SpaceId::Data, ack)?;

@@ -15,11 +15,14 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [package.metadata.cargo-shear]
 ignored = ["getrandom"]
 
+[features]
+trace = ["dep:moq-trace"]
+
 [dependencies]
 bytes = "1"
 futures = "0.3"
 kio = { workspace = true }
-moq-trace = { workspace = true }
+moq-trace = { workspace = true, optional = true }
 num_enum = "0.7"
 rand = "0.10.1"
 serde = { workspace = true }

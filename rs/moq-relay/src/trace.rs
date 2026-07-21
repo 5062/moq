@@ -33,9 +33,10 @@ pub struct TraceConfig {
 
 impl TraceConfig {
 	/// Build the raw trace handle for this relay.
-	pub fn build(&self) -> anyhow::Result<moq_trace::Handle> {
+	#[cfg(feature = "trace")]
+	pub fn build(&self) -> anyhow::Result<moq_net::trace::Handle> {
 		let Some(path) = self.path.clone() else {
-			let handle = moq_trace::Handle::disabled();
+			let handle = moq_net::trace::Handle::disabled();
 			moq_trace::set_global(handle.clone());
 			return Ok(handle);
 		};
@@ -46,9 +47,42 @@ impl TraceConfig {
 			packet_sample: self.packet_sample.unwrap_or(1).max(1),
 			queue_capacity: self.queue_capacity.unwrap_or(4096).max(1),
 		};
-		let handle = moq_trace::Handle::new(config)?;
+		let handle = moq_net::trace::Handle::new(config)?;
 		moq_trace::set_global(handle.clone());
 		tracing::info!(path = %path.display(), object_sample = self.object_sample.unwrap_or(1).max(1), packet_sample = self.packet_sample.unwrap_or(1).max(1), "raw trace enabled");
 		Ok(handle)
+	}
+
+	/// Build a disabled trace handle when the relay is compiled without tracing.
+	#[cfg(not(feature = "trace"))]
+	pub fn build(&self) -> anyhow::Result<moq_net::trace::Handle> {
+		anyhow::ensure!(
+			self.path.is_none()
+				&& self.object_sample.is_none()
+				&& self.packet_sample.is_none()
+				&& self.queue_capacity.is_none(),
+			"relay tracing requires building moq-relay with --features trace"
+		);
+		Ok(moq_net::trace::Handle::disabled())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	#[cfg(not(feature = "trace"))]
+	use super::*;
+
+	#[cfg(not(feature = "trace"))]
+	#[test]
+	fn configured_trace_requires_feature() {
+		let config = TraceConfig {
+			path: Some(PathBuf::from("/tmp/moq-trace.jsonl")),
+			..Default::default()
+		};
+
+		let Err(err) = config.build() else {
+			panic!("trace config should require the trace feature");
+		};
+		assert!(err.to_string().contains("--features trace"));
 	}
 }

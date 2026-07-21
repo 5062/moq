@@ -24,6 +24,7 @@ jemalloc = ["moq-native/jemalloc"]
 noq = ["moq-native/noq"]
 quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
+trace = ["dep:moq-trace", "moq-native/trace", "moq-net/trace"]
 websocket = ["moq-native/websocket", "dep:qmux", "axum/ws"]
 # Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
 # default set; drop via --no-default-features on platforms without Unix sockets.
@@ -44,7 +45,7 @@ moq-native = { workspace = true, default-features = false, features = ["aws-lc-r
 moq-net = { workspace = true }
 moq-stats = { workspace = true }
 moq-token = { workspace = true, features = ["tokio"] }
-moq-trace = { workspace = true }
+moq-trace = { workspace = true, optional = true }
 qmux = { workspace = true, features = ["ws"], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 reqwest-middleware = "0.5"

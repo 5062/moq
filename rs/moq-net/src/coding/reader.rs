@@ -23,6 +23,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	}
 
 	/// Return the number of application stream bytes consumed by this reader.
+	#[cfg(feature = "trace")]
 	pub fn offset(&self) -> u64 {
 		self.offset
 	}

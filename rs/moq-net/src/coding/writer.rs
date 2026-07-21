@@ -22,6 +22,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 	}
 
 	/// Return the number of application stream bytes written by this writer.
+	#[cfg(feature = "trace")]
 	pub fn offset(&self) -> u64 {
 		self.offset
 	}

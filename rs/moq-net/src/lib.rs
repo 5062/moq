@@ -85,7 +85,23 @@ mod util;
 mod version;
 
 pub mod stats;
+#[cfg(feature = "trace")]
 pub use moq_trace as trace;
+
+#[cfg(not(feature = "trace"))]
+/// No-op tracing types used when the `trace` feature is disabled.
+pub mod trace {
+	/// No-op trace handle used when the `trace` feature is disabled.
+	#[derive(Clone, Default)]
+	pub struct Handle;
+
+	impl Handle {
+		/// Return a disabled trace handle.
+		pub fn disabled() -> Self {
+			Self
+		}
+	}
+}
 
 pub use client::*;
 pub use coding::{BoundsExceeded, DecodeError, EncodeError, VarInt};

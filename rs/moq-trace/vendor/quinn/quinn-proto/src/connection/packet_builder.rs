@@ -200,8 +200,9 @@ impl PacketBuilder {
         };
 
         // MoQ trace hook: mark STREAM frame packet-build entry before encrypting.
+        #[cfg(feature = "moq-trace")]
         for frame in sent.stream_frames.iter() {
-            moq_trace::global().emit(moq_trace::Event::PacketStart(moq_trace::PacketEvent {
+            moq_trace::global().emit_packet(moq_trace::Event::PacketStart(moq_trace::PacketEvent {
                 at_ns: moq_trace::now_ns(),
                 session_id: None,
                 direction: moq_trace::Direction::Outbound,
@@ -227,8 +228,9 @@ impl PacketBuilder {
         };
 
         // MoQ trace hook: mark transmit queued after packet build and encryption.
+        #[cfg(feature = "moq-trace")]
         for frame in sent.stream_frames.iter() {
-            moq_trace::global().emit(moq_trace::Event::PacketEnd(moq_trace::PacketEvent {
+            moq_trace::global().emit_packet(moq_trace::Event::PacketEnd(moq_trace::PacketEvent {
                 at_ns: moq_trace::now_ns(),
                 session_id: None,
                 direction: moq_trace::Direction::Outbound,

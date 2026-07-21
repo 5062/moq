@@ -57,6 +57,7 @@ default = [
     "bloom",
 ]
 log = ["tracing/log"]
+moq-trace = ["dep:moq-trace"]
 platform-verifier = ["dep:rustls-platform-verifier"]
 qlog = ["dep:qlog"]
 ring = ["dep:ring"]
@@ -196,5 +197,6 @@ check-cfg = ["cfg(fuzzing)"]
 
 [dependencies.moq-trace]
 path = "../../.."
+optional = true
 
 [workspace]

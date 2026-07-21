@@ -1,4 +1,6 @@
-use crate::{group, origin, stats, trace, track};
+use crate::{group, origin, stats, track};
+#[cfg(feature = "trace")]
+use crate::trace;
 use std::{collections::HashMap, task::Poll};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
@@ -20,6 +22,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	origin: origin::Consumer,
 	control: Control,
 	stats: stats::Handle,
+	#[cfg(feature = "trace")]
 	trace: trace::Handle,
 	/// Per-session egress broadcast-subscription tracker. Each downstream
 	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts
@@ -34,7 +37,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		origin: origin::Consumer,
 		control: Control,
 		stats: stats::Handle,
-		trace: trace::Handle,
+		#[cfg(feature = "trace")] trace: trace::Handle,
 		version: Version,
 	) -> Self {
 		let broadcasts = stats.publisher_broadcasts();
@@ -43,6 +46,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			origin,
 			control,
 			stats,
+			#[cfg(feature = "trace")]
 			trace,
 			broadcasts,
 			version,
@@ -331,6 +335,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					priority,
 					group,
 					track_stats.clone(),
+					#[cfg(feature = "trace")]
 					self.trace.clone(),
 					self.version,
 				)
@@ -345,7 +350,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		priority: u8,
 		mut group: group::Consumer,
 		track_stats: std::sync::Arc<stats::PublisherTrack>,
-		trace: trace::Handle,
+		#[cfg(feature = "trace")] trace: trace::Handle,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
@@ -355,6 +360,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		stream.encode(&msg).await?;
 		track_stats.group();
+		#[cfg(feature = "trace")]
 		let mut object_id = 0;
 
 		loop {
@@ -375,9 +381,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				None => break,
 			};
 
-			let object_id_current = object_id;
-			object_id += 1;
+			#[cfg(feature = "trace")]
+			let object_id_current = {
+				let current = object_id;
+				object_id += 1;
+				current
+			};
+			#[cfg(feature = "trace")]
 			let object_start = stream.offset();
+			#[cfg(feature = "trace")]
 			let mut object_event = trace::ObjectEvent {
 				at_ns: trace::now_ns(),
 				session_id: None,
@@ -392,7 +404,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				payload_bytes: frame.size,
 				sample_rate: 0,
 			};
-			trace.emit(trace::Event::MoqObjectStart(object_event.clone()));
+			#[cfg(feature = "trace")]
+			trace.emit_object(trace::Event::MoqObjectStart(object_event.clone()));
 
 			// object id delta is always 0.
 			stream.encode(&0u64).await?;
@@ -437,9 +450,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				}
 			}
 
-			object_event.at_ns = trace::now_ns();
-			object_event.stream_offset_end = Some(stream.offset());
-			trace.emit(trace::Event::MoqObjectEnd(object_event));
+			#[cfg(feature = "trace")]
+			{
+				object_event.at_ns = trace::now_ns();
+				object_event.stream_offset_end = Some(stream.offset());
+				trace.emit_object(trace::Event::MoqObjectEnd(object_event));
+			}
 		}
 
 		stream.finish()?;

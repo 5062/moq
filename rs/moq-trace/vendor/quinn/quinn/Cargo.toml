@@ -64,6 +64,7 @@ log = [
     "proto/log",
     "udp/log",
 ]
+moq-trace = ["proto/moq-trace"]
 platform-verifier = ["proto/platform-verifier"]
 qlog = ["proto/qlog"]
 ring = ["proto/ring"]
