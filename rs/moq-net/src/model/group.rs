@@ -561,20 +561,6 @@ impl std::ops::Deref for Consumer {
 	}
 }
 
-#[cfg(feature = "trace")]
-fn emit_object_phase(
-	handle: &crate::trace::Handle,
-	point: crate::trace::ObjectTracePoint,
-	object: &crate::trace::ObjectEvent,
-) {
-	let mut object = object.clone();
-	object.at_ns = crate::trace::now_ns();
-	handle.emit_object(crate::trace::Event::MoqObjectPhase(crate::trace::ObjectPhaseEvent {
-		point,
-		object,
-	}));
-}
-
 impl Consumer {
 	/// The parent track's timescale.
 	pub fn timescale(&self) -> Timescale {
@@ -638,9 +624,9 @@ impl Consumer {
 			let source = frame::Source::Complete(frame.payload);
 			let mut object = object.clone();
 			object.payload_bytes = info.size;
-			emit_object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloneStart, &object);
+			crate::trace::object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloneStart, &object);
 			let frame = frame::Consumer::new(self.state.clone(), info, source);
-			emit_object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloned, &object);
+			crate::trace::object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloned, &object);
 			return Poll::Ready(Ok(Some(frame)));
 		}
 
@@ -652,9 +638,9 @@ impl Consumer {
 		self.index += 1;
 		let mut object = object.clone();
 		object.payload_bytes = info.size;
-		emit_object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloneStart, &object);
+		crate::trace::object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloneStart, &object);
 		let frame = frame::Consumer::new(self.state.clone(), info, source);
-		emit_object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloned, &object);
+		crate::trace::object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloned, &object);
 		Poll::Ready(Ok(Some(frame)))
 	}
 

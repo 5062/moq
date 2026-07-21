@@ -106,13 +106,6 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	version: Version,
 }
 
-#[cfg(feature = "trace")]
-fn emit_object_phase(trace: &trace::Handle, point: trace::ObjectTracePoint, object: &trace::ObjectEvent) {
-	let mut object = object.clone();
-	object.at_ns = trace::now_ns();
-	trace.emit_object(trace::Event::MoqObjectPhase(trace::ObjectPhaseEvent { point, object }));
-}
-
 async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, alias: u64) -> Result<RequestId, Error> {
 	let mut timeout = std::pin::pin!(web_async::time::sleep(TRACK_ALIAS_TIMEOUT));
 	kio::wait(|waiter| {
@@ -998,9 +991,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			};
 			#[cfg(feature = "trace")]
 			{
-				self.trace
-					.emit_object(trace::Event::MoqObjectStart(object_event.clone()));
-				emit_object_phase(
+				trace::object_interval_start(&self.trace, &object_event);
+				trace::object_phase(
 					&self.trace,
 					trace::ObjectTracePoint::RxObjectHeaderParseStart,
 					&object_event,
@@ -1032,7 +1024,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				#[cfg(feature = "trace")]
 				{
 					object_event.stream_offset_end = Some(stream.offset());
-					emit_object_phase(
+					trace::object_phase(
 						&self.trace,
 						trace::ObjectTracePoint::RxObjectHeaderParsed,
 						&object_event,
@@ -1042,22 +1034,21 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
 					#[cfg(feature = "trace")]
 					{
-						emit_object_phase(&self.trace, trace::ObjectTracePoint::RxLookupStart, &object_event);
-						emit_object_phase(&self.trace, trace::ObjectTracePoint::RxObjectCreateStart, &object_event);
+						trace::object_phase(&self.trace, trace::ObjectTracePoint::RxLookupStart, &object_event);
+						trace::object_phase(&self.trace, trace::ObjectTracePoint::RxObjectCreateStart, &object_event);
 					}
 					let frame = producer.create_frame(frame::Info { size: 0, timestamp })?;
 					#[cfg(feature = "trace")]
 					{
-						emit_object_phase(&self.trace, trace::ObjectTracePoint::RxObjectCreated, &object_event);
-						emit_object_phase(&self.trace, trace::ObjectTracePoint::RxLookupDone, &object_event);
+						trace::object_phase(&self.trace, trace::ObjectTracePoint::RxObjectCreated, &object_event);
+						trace::object_phase(&self.trace, trace::ObjectTracePoint::RxLookupDone, &object_event);
 					}
 					track_stats.frame();
 					frame.finish()?;
 					#[cfg(feature = "trace")]
 					{
-						object_event.at_ns = trace::now_ns();
 						object_event.stream_offset_end = Some(stream.offset());
-						self.trace.emit_object(trace::Event::MoqObjectEnd(object_event));
+						trace::object_interval_end(&self.trace, &object_event);
 					}
 				} else if status == 3 && !group.flags.has_end {
 					break;
@@ -1068,7 +1059,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				#[cfg(feature = "trace")]
 				{
 					object_event.stream_offset_end = Some(stream.offset());
-					emit_object_phase(
+					trace::object_phase(
 						&self.trace,
 						trace::ObjectTracePoint::RxObjectHeaderParsed,
 						&object_event,
@@ -1079,14 +1070,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
 				#[cfg(feature = "trace")]
 				{
-					emit_object_phase(&self.trace, trace::ObjectTracePoint::RxLookupStart, &object_event);
-					emit_object_phase(&self.trace, trace::ObjectTracePoint::RxObjectCreateStart, &object_event);
+					trace::object_phase(&self.trace, trace::ObjectTracePoint::RxLookupStart, &object_event);
+					trace::object_phase(&self.trace, trace::ObjectTracePoint::RxObjectCreateStart, &object_event);
 				}
 				let mut frame = producer.create_frame(frame::Info { size, timestamp })?;
 				#[cfg(feature = "trace")]
 				{
-					emit_object_phase(&self.trace, trace::ObjectTracePoint::RxObjectCreated, &object_event);
-					emit_object_phase(&self.trace, trace::ObjectTracePoint::RxLookupDone, &object_event);
+					trace::object_phase(&self.trace, trace::ObjectTracePoint::RxObjectCreated, &object_event);
+					trace::object_phase(&self.trace, trace::ObjectTracePoint::RxLookupDone, &object_event);
 				}
 				track_stats.frame();
 
@@ -1107,9 +1098,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				frame.finish()?;
 				#[cfg(feature = "trace")]
 				{
-					object_event.at_ns = trace::now_ns();
 					object_event.stream_offset_end = Some(stream.offset());
-					self.trace.emit_object(trace::Event::MoqObjectEnd(object_event));
+					trace::object_interval_end(&self.trace, &object_event);
 				}
 			}
 		}
@@ -1126,7 +1116,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	) -> Result<(), Error> {
 		while frame.remaining() > 0 {
 			#[cfg(feature = "trace")]
-			emit_object_phase(&self.trace, trace::ObjectTracePoint::RxPayloadReadStart, object);
+			trace::object_phase(&self.trace, trace::ObjectTracePoint::RxPayloadReadStart, object);
 			match stream.read_chunk(frame.remaining()).await? {
 				Some(chunk) if !chunk.is_empty() => {
 					track_stats.bytes(chunk.len() as u64);
@@ -1135,7 +1125,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					{
 						let mut object = object.clone();
 						object.stream_offset_end = Some(stream.offset());
-						emit_object_phase(&self.trace, trace::ObjectTracePoint::RxPayloadReadDone, &object);
+						trace::object_phase(&self.trace, trace::ObjectTracePoint::RxPayloadReadDone, &object);
 					}
 				}
 				_ => return Err(Error::WrongSize),

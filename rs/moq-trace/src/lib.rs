@@ -295,6 +295,27 @@ impl Event {
 	}
 }
 
+/// Emit the canonical moq-transport object interval start event.
+pub fn object_interval_start(handle: &Handle, object: &ObjectEvent) -> bool {
+	let mut object = object.clone();
+	object.at_ns = now_ns();
+	handle.emit_object(Event::MoqObjectStart(object))
+}
+
+/// Emit the canonical moq-transport object interval end event.
+pub fn object_interval_end(handle: &Handle, object: &ObjectEvent) -> bool {
+	let mut object = object.clone();
+	object.at_ns = now_ns();
+	handle.emit_object(Event::MoqObjectEnd(object))
+}
+
+/// Emit a moq-transport object phase event.
+pub fn object_phase(handle: &Handle, point: ObjectTracePoint, object: &ObjectEvent) -> bool {
+	let mut object = object.clone();
+	object.at_ns = now_ns();
+	handle.emit_object(Event::MoqObjectPhase(ObjectPhaseEvent { point, object }))
+}
+
 /// A cheap cloneable handle used by instrumentation sites to emit trace events.
 #[derive(Clone, Default)]
 pub struct Handle {
@@ -599,6 +620,43 @@ mod tests {
 		let json = serde_json::to_string(&event).unwrap();
 		assert!(json.contains(r#""point":"tx_packet_encode_start""#));
 		assert!(!json.contains(r#""udp_len""#));
+	}
+
+	#[test]
+	fn object_helpers_stamp_and_emit_events() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			..Config::disabled()
+		})
+		.unwrap();
+		let object = ObjectEvent {
+			at_ns: u128::MAX,
+			session_id: Some(7),
+			direction: Direction::Outbound,
+			protocol: Protocol::MoqTransport,
+			track_alias: 11,
+			group_id: 12,
+			object_id: 13,
+			stream_id: Some(16),
+			stream_offset_start: Some(100),
+			stream_offset_end: Some(144),
+			payload_bytes: 44,
+			sample_rate: 0,
+		};
+
+		object_interval_start(&handle, &object);
+		object_phase(&handle, ObjectTracePoint::TxObjectHeaderEncoded, &object);
+		object_interval_end(&handle, &object);
+		drop(handle);
+
+		let contents = std::fs::read_to_string(path).unwrap();
+		assert!(contents.contains(r#""type":"moq_object_start""#));
+		assert!(contents.contains(r#""type":"moq_object_phase""#));
+		assert!(contents.contains(r#""point":"tx_object_header_encoded""#));
+		assert!(contents.contains(r#""type":"moq_object_end""#));
+		assert!(!contents.contains(&u128::MAX.to_string()));
 	}
 
 	#[test]

@@ -16,13 +16,6 @@ use crate::{
 
 use super::{Message, Version};
 
-#[cfg(feature = "trace")]
-fn emit_object_phase(trace: &trace::Handle, point: trace::ObjectTracePoint, object: &trace::ObjectEvent) {
-	let mut object = object.clone();
-	object.at_ns = trace::now_ns();
-	trace.emit_object(trace::Event::MoqObjectPhase(trace::ObjectPhaseEvent { point, object }));
-}
-
 #[derive(Clone)]
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
@@ -420,8 +413,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 			#[cfg(feature = "trace")]
 			{
-				trace.emit_object(trace::Event::MoqObjectStart(object_event.clone()));
-				emit_object_phase(
+				trace::object_interval_start(&trace, &object_event);
+				trace::object_phase(
 					&trace,
 					trace::ObjectTracePoint::TxObjectHeaderEncodeStart,
 					&object_event,
@@ -449,13 +442,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				#[cfg(feature = "trace")]
 				{
 					object_event.stream_offset_end = Some(stream.offset());
-					emit_object_phase(&trace, trace::ObjectTracePoint::TxObjectHeaderEncoded, &object_event);
+					trace::object_phase(&trace, trace::ObjectTracePoint::TxObjectHeaderEncoded, &object_event);
 				}
 			} else {
 				#[cfg(feature = "trace")]
 				{
 					object_event.stream_offset_end = Some(stream.offset());
-					emit_object_phase(&trace, trace::ObjectTracePoint::TxObjectHeaderEncoded, &object_event);
+					trace::object_phase(&trace, trace::ObjectTracePoint::TxObjectHeaderEncoded, &object_event);
 				}
 				// Stream each chunk of the frame.
 				loop {
@@ -474,12 +467,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						Some(chunk) => {
 							let n = chunk.len() as u64;
 							#[cfg(feature = "trace")]
-							emit_object_phase(&trace, trace::ObjectTracePoint::TxPayloadWriteStart, &object_event);
+							trace::object_phase(&trace, trace::ObjectTracePoint::TxPayloadWriteStart, &object_event);
 							stream.write_chunk(chunk).await?;
 							#[cfg(feature = "trace")]
 							{
 								object_event.stream_offset_end = Some(stream.offset());
-								emit_object_phase(&trace, trace::ObjectTracePoint::TxPayloadWriteDone, &object_event);
+								trace::object_phase(&trace, trace::ObjectTracePoint::TxPayloadWriteDone, &object_event);
 							}
 							track_stats.bytes(n);
 						}
@@ -490,9 +483,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 			#[cfg(feature = "trace")]
 			{
-				object_event.at_ns = trace::now_ns();
 				object_event.stream_offset_end = Some(stream.offset());
-				trace.emit_object(trace::Event::MoqObjectEnd(object_event));
+				trace::object_interval_end(&trace, &object_event);
 			}
 		}
 
