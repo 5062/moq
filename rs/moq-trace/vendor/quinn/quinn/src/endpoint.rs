@@ -791,13 +791,68 @@ impl RecvState {
             std::array::from_fn(|_| bufs.next().expect("BATCH_SIZE elements"))
         };
         loop {
+            #[cfg(feature = "moq-trace")]
+            let handle = moq_trace::global();
+            #[cfg(feature = "moq-trace")]
+            handle.emit_packet(moq_trace::Event::PacketPhase(moq_trace::PacketPhaseEvent {
+                point: moq_trace::PacketTracePoint::RxSocketIoStart,
+                packet: moq_trace::PacketEvent {
+                    at_ns: moq_trace::now_ns(),
+                    session_id: None,
+                    direction: moq_trace::Direction::Inbound,
+                    packet_number: None,
+                    packet_space: None,
+                    udp_len: None,
+                    stream_id: None,
+                    stream_offset_start: None,
+                    stream_offset_end: None,
+                    sample_rate: 0,
+                },
+            }));
             match socket.poll_recv(cx, &mut iovs, &mut metas) {
                 Poll::Ready(Ok(msgs)) => {
+                    #[cfg(feature = "moq-trace")]
+                    {
+                        let udp_len = metas.iter().take(msgs).map(|meta| meta.len).sum();
+                        handle.emit_packet(moq_trace::Event::PacketPhase(moq_trace::PacketPhaseEvent {
+                            point: moq_trace::PacketTracePoint::RxSocketIoDone,
+                            packet: moq_trace::PacketEvent {
+                                at_ns: moq_trace::now_ns(),
+                                session_id: None,
+                                direction: moq_trace::Direction::Inbound,
+                                packet_number: None,
+                                packet_space: None,
+                                udp_len: Some(udp_len),
+                                stream_id: None,
+                                stream_offset_start: None,
+                                stream_offset_end: None,
+                                sample_rate: 0,
+                            },
+                        }));
+                    }
                     self.recv_limiter.record_work(msgs);
                     for (meta, buf) in metas.iter().zip(iovs.iter()).take(msgs) {
                         let mut data: BytesMut = buf[0..meta.len].into();
                         while !data.is_empty() {
                             let buf = data.split_to(meta.stride.min(data.len()));
+                            #[cfg(feature = "moq-trace")]
+                            moq_trace::global().emit_packet(moq_trace::Event::PacketPhase(
+                                moq_trace::PacketPhaseEvent {
+                                    point: moq_trace::PacketTracePoint::RxDatagramReceived,
+                                    packet: moq_trace::PacketEvent {
+                                        at_ns: moq_trace::now_ns(),
+                                        session_id: None,
+                                        direction: moq_trace::Direction::Inbound,
+                                        packet_number: None,
+                                        packet_space: None,
+                                        udp_len: Some(buf.len()),
+                                        stream_id: None,
+                                        stream_offset_start: None,
+                                        stream_offset_end: None,
+                                        sample_rate: 0,
+                                    },
+                                },
+                            ));
                             let mut response_buffer = Vec::new();
                             match endpoint.handle(
                                 now,
@@ -835,6 +890,22 @@ impl RecvState {
                     }
                 }
                 Poll::Pending => {
+                    #[cfg(feature = "moq-trace")]
+                    handle.emit_packet(moq_trace::Event::PacketPhase(moq_trace::PacketPhaseEvent {
+                        point: moq_trace::PacketTracePoint::RxSocketIoDone,
+                        packet: moq_trace::PacketEvent {
+                            at_ns: moq_trace::now_ns(),
+                            session_id: None,
+                            direction: moq_trace::Direction::Inbound,
+                            packet_number: None,
+                            packet_space: None,
+                            udp_len: None,
+                            stream_id: None,
+                            stream_offset_start: None,
+                            stream_offset_end: None,
+                            sample_rate: 0,
+                        },
+                    }));
                     return Ok(PollProgress {
                         received_connection_packet,
                         keep_going: false,
@@ -843,9 +914,41 @@ impl RecvState {
                 // Ignore ECONNRESET as it's undefined in QUIC and may be injected by an
                 // attacker
                 Poll::Ready(Err(ref e)) if e.kind() == io::ErrorKind::ConnectionReset => {
+                    #[cfg(feature = "moq-trace")]
+                    handle.emit_packet(moq_trace::Event::PacketPhase(moq_trace::PacketPhaseEvent {
+                        point: moq_trace::PacketTracePoint::RxSocketIoDone,
+                        packet: moq_trace::PacketEvent {
+                            at_ns: moq_trace::now_ns(),
+                            session_id: None,
+                            direction: moq_trace::Direction::Inbound,
+                            packet_number: None,
+                            packet_space: None,
+                            udp_len: None,
+                            stream_id: None,
+                            stream_offset_start: None,
+                            stream_offset_end: None,
+                            sample_rate: 0,
+                        },
+                    }));
                     continue;
                 }
                 Poll::Ready(Err(e)) => {
+                    #[cfg(feature = "moq-trace")]
+                    handle.emit_packet(moq_trace::Event::PacketPhase(moq_trace::PacketPhaseEvent {
+                        point: moq_trace::PacketTracePoint::RxSocketIoDone,
+                        packet: moq_trace::PacketEvent {
+                            at_ns: moq_trace::now_ns(),
+                            session_id: None,
+                            direction: moq_trace::Direction::Inbound,
+                            packet_number: None,
+                            packet_space: None,
+                            udp_len: None,
+                            stream_id: None,
+                            stream_offset_start: None,
+                            stream_offset_end: None,
+                            sample_rate: 0,
+                        },
+                    }));
                     return Err(e);
                 }
             }

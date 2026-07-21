@@ -6448,6 +6448,7 @@ version = "0.11.11"
 dependencies = [
  "bytes",
  "cfg_aliases",
+ "moq-trace",
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",

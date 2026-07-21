@@ -138,6 +138,45 @@ pub struct ObjectEvent {
 	pub sample_rate: u64,
 }
 
+/// A named QUIC packet trace point.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum PacketTracePoint {
+	/// Entry to an inbound UDP socket read.
+	RxSocketIoStart,
+	/// Completion of an inbound UDP socket read.
+	RxSocketIoDone,
+	/// An inbound UDP datagram was received.
+	RxDatagramReceived,
+	/// Entry to inbound QUIC packet header parsing.
+	RxPacketHeaderParseStart,
+	/// Inbound QUIC packet header parsing completed.
+	RxPacketHeaderParsed,
+	/// Entry to inbound QUIC packet decryption.
+	RxPacketDecryptStart,
+	/// Inbound QUIC packet decryption completed.
+	RxPacketDecrypted,
+	/// Entry to inbound QUIC STREAM frame processing.
+	RxStreamFrameProcessStart,
+	/// Inbound QUIC STREAM frame processing completed.
+	RxStreamFrameProcessed,
+	/// Entry to outbound QUIC packet encoding.
+	TxPacketEncodeStart,
+	/// Outbound QUIC packet encoding completed.
+	TxPacketEncoded,
+	/// Entry to outbound QUIC packet encryption.
+	TxPacketEncryptStart,
+	/// Outbound QUIC packet encryption completed.
+	TxPacketEncrypted,
+	/// Entry to an outbound UDP socket write.
+	TxSocketIoStart,
+	/// An outbound UDP datagram was sent.
+	TxDatagramSent,
+	/// Completion of an outbound UDP socket write.
+	TxSocketIoDone,
+}
+
 /// QUIC packet trace fields common to packet start and end events.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PacketEvent {
@@ -151,10 +190,12 @@ pub struct PacketEvent {
 	/// QUIC packet number, when known at this hook.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub packet_number: Option<u64>,
-	/// QUIC packet number space.
-	pub packet_space: PacketSpace,
-	/// UDP datagram length in bytes.
-	pub udp_len: usize,
+	/// QUIC packet number space, when the trace point is tied to one.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub packet_space: Option<PacketSpace>,
+	/// UDP datagram length in bytes, when known at this hook.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub udp_len: Option<usize>,
 	/// QUIC stream ID for a STREAM frame carried by this packet, when present.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub stream_id: Option<u64>,
@@ -166,6 +207,16 @@ pub struct PacketEvent {
 	pub stream_offset_end: Option<u64>,
 	/// Sampling rate active for this event.
 	pub sample_rate: u64,
+}
+
+/// QUIC packet trace point fields.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PacketPhaseEvent {
+	/// Packet trace point observed by the instrumentation hook.
+	pub point: PacketTracePoint,
+	/// Packet metadata associated with the trace point.
+	#[serde(flatten)]
+	pub packet: PacketEvent,
 }
 
 /// One JSONL trace record.
@@ -184,6 +235,9 @@ pub enum Event {
 	/// QUIC packet processing completed.
 	#[serde(rename = "quic_packet_end")]
 	PacketEnd(PacketEvent),
+	/// QUIC packet processing phase boundary.
+	#[serde(rename = "quic_packet_phase")]
+	PacketPhase(PacketPhaseEvent),
 }
 
 impl Event {
@@ -191,6 +245,7 @@ impl Event {
 		match self {
 			Self::MoqObjectStart(event) | Self::MoqObjectEnd(event) => event.sample_rate = sample_rate,
 			Self::PacketStart(event) | Self::PacketEnd(event) => event.sample_rate = sample_rate,
+			Self::PacketPhase(event) => event.packet.sample_rate = sample_rate,
 		}
 	}
 }
@@ -403,6 +458,77 @@ mod tests {
 	}
 
 	#[test]
+	fn serializes_packet_phase_event() {
+		let event = Event::PacketPhase(PacketPhaseEvent {
+			point: PacketTracePoint::RxPacketDecrypted,
+			packet: PacketEvent {
+				at_ns: 42,
+				session_id: Some(7),
+				direction: Direction::Inbound,
+				packet_number: Some(2),
+				packet_space: Some(PacketSpace::Data),
+				udp_len: Some(1200),
+				stream_id: None,
+				stream_offset_start: None,
+				stream_offset_end: None,
+				sample_rate: 1,
+			},
+		});
+
+		let json = serde_json::to_string(&event).unwrap();
+		assert!(json.contains(r#""type":"quic_packet_phase""#));
+		assert!(json.contains(r#""point":"rx_packet_decrypted""#));
+		assert!(!json.contains(r#""phase""#));
+		assert!(!json.contains(r#""edge""#));
+	}
+
+	#[test]
+	fn omits_packet_space_when_trace_point_is_datagram_scoped() {
+		let event = Event::PacketPhase(PacketPhaseEvent {
+			point: PacketTracePoint::RxDatagramReceived,
+			packet: PacketEvent {
+				at_ns: 42,
+				session_id: Some(7),
+				direction: Direction::Inbound,
+				packet_number: None,
+				packet_space: None,
+				udp_len: Some(1200),
+				stream_id: None,
+				stream_offset_start: None,
+				stream_offset_end: None,
+				sample_rate: 1,
+			},
+		});
+
+		let json = serde_json::to_string(&event).unwrap();
+		assert!(json.contains(r#""point":"rx_datagram_received""#));
+		assert!(!json.contains(r#""packet_space""#));
+	}
+
+	#[test]
+	fn omits_udp_len_when_trace_point_has_not_measured_it_yet() {
+		let event = Event::PacketPhase(PacketPhaseEvent {
+			point: PacketTracePoint::TxPacketEncodeStart,
+			packet: PacketEvent {
+				at_ns: 42,
+				session_id: Some(7),
+				direction: Direction::Outbound,
+				packet_number: Some(2),
+				packet_space: Some(PacketSpace::Data),
+				udp_len: None,
+				stream_id: None,
+				stream_offset_start: None,
+				stream_offset_end: None,
+				sample_rate: 1,
+			},
+		});
+
+		let json = serde_json::to_string(&event).unwrap();
+		assert!(json.contains(r#""point":"tx_packet_encode_start""#));
+		assert!(!json.contains(r#""udp_len""#));
+	}
+
+	#[test]
 	fn samples_every_n_events_and_records_rate() {
 		let handle = Handle::new(Config {
 			object_sample: 3,
@@ -435,8 +561,8 @@ mod tests {
 				session_id: Some(1),
 				direction: Direction::Outbound,
 				packet_number: Some(2),
-				packet_space: PacketSpace::Data,
-				udp_len: 1200,
+				packet_space: Some(PacketSpace::Data),
+				udp_len: Some(1200),
 				stream_id: Some(0),
 				stream_offset_start: Some(0),
 				stream_offset_end: Some(10),

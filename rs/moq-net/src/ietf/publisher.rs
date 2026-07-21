@@ -1,6 +1,6 @@
-use crate::{group, origin, stats, track};
 #[cfg(feature = "trace")]
 use crate::trace;
+use crate::{group, origin, stats, track};
 use std::{collections::HashMap, task::Poll};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};

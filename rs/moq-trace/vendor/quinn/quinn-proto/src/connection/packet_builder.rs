@@ -207,12 +207,8 @@ impl PacketBuilder {
                 session_id: None,
                 direction: moq_trace::Direction::Outbound,
                 packet_number: Some(exact_number),
-                packet_space: match space_id {
-                    SpaceId::Initial => moq_trace::PacketSpace::Initial,
-                    SpaceId::Handshake => moq_trace::PacketSpace::Handshake,
-                    SpaceId::Data => moq_trace::PacketSpace::Data,
-                },
-                udp_len: 0,
+                packet_space: Some(super::moq_trace_packet_space(space_id)),
+                udp_len: Some(0),
                 stream_id: Some(frame.id.0),
                 stream_offset_start: Some(frame.offsets.start),
                 stream_offset_end: Some(frame.offsets.end),
@@ -235,12 +231,8 @@ impl PacketBuilder {
                 session_id: None,
                 direction: moq_trace::Direction::Outbound,
                 packet_number: Some(exact_number),
-                packet_space: match space_id {
-                    SpaceId::Initial => moq_trace::PacketSpace::Initial,
-                    SpaceId::Handshake => moq_trace::PacketSpace::Handshake,
-                    SpaceId::Data => moq_trace::PacketSpace::Data,
-                },
-                udp_len: size as usize,
+                packet_space: Some(super::moq_trace_packet_space(space_id)),
+                udp_len: Some(size as usize),
                 stream_id: Some(frame.id.0),
                 stream_offset_start: Some(frame.offsets.start),
                 stream_offset_end: Some(frame.offsets.end),
@@ -306,6 +298,19 @@ impl PacketBuilder {
 
         buffer.resize(buffer.len() + packet_crypto.tag_len(), 0);
         let encode_start = self.partial_encode.start;
+        let len = buffer.len() - encode_start;
+        #[cfg(feature = "moq-trace")]
+        super::moq_trace_emit_point(
+            moq_trace::PacketTracePoint::TxPacketEncryptStart,
+            moq_trace::now_ns(),
+            moq_trace::Direction::Outbound,
+            Some(self.exact_number),
+            Some(self.space),
+            Some(len),
+            None,
+            None,
+            None,
+        );
         let packet_buf = &mut buffer[encode_start..];
         self.partial_encode.finish(
             packet_buf,
@@ -313,7 +318,20 @@ impl PacketBuilder {
             Some((self.exact_number, packet_crypto)),
         );
 
-        let len = buffer.len() - encode_start;
+        #[cfg(feature = "moq-trace")]
+        {
+            super::moq_trace_emit_point(
+                moq_trace::PacketTracePoint::TxPacketEncrypted,
+                moq_trace::now_ns(),
+                moq_trace::Direction::Outbound,
+                Some(self.exact_number),
+                Some(self.space),
+                Some(len),
+                None,
+                None,
+                None,
+            );
+        }
         conn.config.qlog_sink.emit_packet_sent(
             self.exact_number,
             len,

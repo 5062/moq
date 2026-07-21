@@ -64,7 +64,7 @@ log = [
     "proto/log",
     "udp/log",
 ]
-moq-trace = ["proto/moq-trace"]
+moq-trace = ["proto/moq-trace", "dep:moq-trace"]
 platform-verifier = ["proto/platform-verifier"]
 qlog = ["proto/qlog"]
 ring = ["proto/ring"]
@@ -159,6 +159,10 @@ version = "1"
 
 [dependencies.futures-io]
 version = "0.3.19"
+optional = true
+
+[dependencies.moq-trace]
+path = "../../.."
 optional = true
 
 [dependencies.pin-project-lite]

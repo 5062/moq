@@ -1035,10 +1035,72 @@ impl State {
             }
 
             let len = t.size;
-            let retry = match self
+            #[cfg(feature = "moq-trace")]
+            let handle = moq_trace::global();
+            #[cfg(feature = "moq-trace")]
+            handle.emit_packet(moq_trace::Event::PacketPhase(moq_trace::PacketPhaseEvent {
+                point: moq_trace::PacketTracePoint::TxSocketIoStart,
+                packet: moq_trace::PacketEvent {
+                    at_ns: moq_trace::now_ns(),
+                    session_id: None,
+                    direction: moq_trace::Direction::Outbound,
+                    packet_number: None,
+                    packet_space: None,
+                    udp_len: Some(len),
+                    stream_id: None,
+                    stream_offset_start: None,
+                    stream_offset_end: None,
+                    sample_rate: 0,
+                },
+            }));
+            let send_result = self
                 .socket
-                .try_send(&udp_transmit(&t, &self.send_buffer[..len]))
+                .try_send(&udp_transmit(&t, &self.send_buffer[..len]));
+            #[cfg(feature = "moq-trace")]
             {
+                let socket_done = moq_trace::now_ns();
+                handle.emit_packet(moq_trace::Event::PacketPhase(moq_trace::PacketPhaseEvent {
+                    point: moq_trace::PacketTracePoint::TxSocketIoDone,
+                    packet: moq_trace::PacketEvent {
+                        at_ns: socket_done,
+                        session_id: None,
+                        direction: moq_trace::Direction::Outbound,
+                        packet_number: None,
+                        packet_space: None,
+                        udp_len: Some(len),
+                        stream_id: None,
+                        stream_offset_start: None,
+                        stream_offset_end: None,
+                        sample_rate: 0,
+                    },
+                }));
+                if send_result.is_ok() {
+                    let segment_size = t.segment_size.unwrap_or(len).max(1);
+                    let mut sent = 0;
+                    while sent < len {
+                        let udp_len = segment_size.min(len - sent);
+                        handle.emit_packet(moq_trace::Event::PacketPhase(
+                            moq_trace::PacketPhaseEvent {
+                                point: moq_trace::PacketTracePoint::TxDatagramSent,
+                                packet: moq_trace::PacketEvent {
+                                    at_ns: socket_done,
+                                    session_id: None,
+                                    direction: moq_trace::Direction::Outbound,
+                                    packet_number: None,
+                                    packet_space: None,
+                                    udp_len: Some(udp_len),
+                                    stream_id: None,
+                                    stream_offset_start: None,
+                                    stream_offset_end: None,
+                                    sample_rate: 0,
+                                },
+                            },
+                        ));
+                        sent += udp_len;
+                    }
+                }
+            }
+            let retry = match send_result {
                 Ok(()) => false,
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => true,
                 Err(e) => return Err(e),
