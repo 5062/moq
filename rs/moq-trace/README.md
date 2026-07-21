@@ -39,6 +39,7 @@ field:
 
 - `moq_object_start`
 - `moq_object_end`
+- `moq_object_phase`
 - `quic_packet_start`
 - `quic_packet_end`
 - `quic_packet_phase`
@@ -51,6 +52,12 @@ Example object event:
 
 ```json
 {"type":"moq_object_end","at_ns":123456789,"direction":"outbound","protocol":"moq_transport","track_alias":7,"group_id":42,"object_id":3,"stream_offset_start":120,"stream_offset_end":520,"payload_bytes":400,"sample_rate":1}
+```
+
+Example object trace point event:
+
+```json
+{"type":"moq_object_phase","point":"tx_object_header_encoded","at_ns":123456900,"direction":"outbound","protocol":"moq_transport","track_alias":7,"group_id":42,"object_id":3,"stream_offset_start":120,"stream_offset_end":144,"payload_bytes":400,"sample_rate":1}
 ```
 
 Example packet event:
@@ -69,6 +76,29 @@ Example packet trace point event:
 
 MoQ object latency is measured from the first object header byte observed to the
 final object payload byte read or written.
+
+`moq_object_phase` records narrower moq-transport object trace points in a
+`point` field. Rust variants are PascalCase, like
+`ObjectTracePoint::RxObjectHeaderParsed`, and JSON values are snake case, like
+`rx_object_header_parsed`. Inbound points are:
+
+- `rx_object_header_parse_start`: entry to object header parsing after an object is present.
+- `rx_object_header_parsed`: object header parsing completed.
+- `rx_lookup_start`: entry to model lookup for the inbound object slot.
+- `rx_lookup_done`: model lookup for the inbound object slot completed.
+- `rx_object_create_start`: entry to inbound object creation.
+- `rx_object_created`: inbound object creation completed.
+- `rx_payload_read_start`: entry to an object payload chunk read.
+- `rx_payload_read_done`: object payload chunk read completed.
+
+Outbound points are:
+
+- `tx_object_clone_start`: entry to outbound object selection or consumer creation.
+- `tx_object_cloned`: outbound object selection or consumer creation completed.
+- `tx_object_header_encode_start`: entry to object header encoding.
+- `tx_object_header_encoded`: object header encoding completed.
+- `tx_payload_write_start`: entry to an object payload chunk write.
+- `tx_payload_write_done`: object payload chunk write completed.
 
 QUIC packet latency is measured around packet handling in `quinn-proto`:
 

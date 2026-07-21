@@ -16,6 +16,13 @@ use crate::{
 
 use super::{Message, Version};
 
+#[cfg(feature = "trace")]
+fn emit_object_phase(trace: &trace::Handle, point: trace::ObjectTracePoint, object: &trace::ObjectEvent) {
+	let mut object = object.clone();
+	object.at_ns = trace::now_ns();
+	trace.emit_object(trace::Event::MoqObjectPhase(trace::ObjectPhaseEvent { point, object }));
+}
+
 #[derive(Clone)]
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
@@ -364,6 +371,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut object_id = 0;
 
 		loop {
+			#[cfg(feature = "trace")]
+			let object_template = trace::ObjectEvent {
+				at_ns: trace::now_ns(),
+				session_id: None,
+				direction: trace::Direction::Outbound,
+				protocol: trace::Protocol::MoqTransport,
+				track_alias: msg.track_alias,
+				group_id: msg.group_id,
+				object_id,
+				stream_id: None,
+				stream_offset_start: Some(stream.offset()),
+				stream_offset_end: None,
+				payload_bytes: 0,
+				sample_rate: 0,
+			};
 			// Wait for the next frame, bailing if the peer closes the stream first.
 			let frame = {
 				let mut closed = std::pin::pin!(stream.closed());
@@ -371,6 +393,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					if waiter.poll_future(closed.as_mut()).is_ready() {
 						return Poll::Ready(Err(Error::Cancel));
 					}
+					#[cfg(feature = "trace")]
+					{
+						group.poll_next_frame_traced(waiter, &trace, &object_template)
+					}
+					#[cfg(not(feature = "trace"))]
 					group.poll_next_frame(waiter)
 				})
 				.await
@@ -382,30 +409,24 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			#[cfg(feature = "trace")]
-			let object_id_current = {
-				let current = object_id;
+			let mut object_event = {
+				let mut object = object_template;
+				object.payload_bytes = frame.size;
+				object
+			};
+			#[cfg(feature = "trace")]
+			{
 				object_id += 1;
-				current
-			};
+			}
 			#[cfg(feature = "trace")]
-			let object_start = stream.offset();
-			#[cfg(feature = "trace")]
-			let mut object_event = trace::ObjectEvent {
-				at_ns: trace::now_ns(),
-				session_id: None,
-				direction: trace::Direction::Outbound,
-				protocol: trace::Protocol::MoqTransport,
-				track_alias: msg.track_alias,
-				group_id: msg.group_id,
-				object_id: object_id_current,
-				stream_id: None,
-				stream_offset_start: Some(object_start),
-				stream_offset_end: None,
-				payload_bytes: frame.size,
-				sample_rate: 0,
-			};
-			#[cfg(feature = "trace")]
-			trace.emit_object(trace::Event::MoqObjectStart(object_event.clone()));
+			{
+				trace.emit_object(trace::Event::MoqObjectStart(object_event.clone()));
+				emit_object_phase(
+					&trace,
+					trace::ObjectTracePoint::TxObjectHeaderEncodeStart,
+					&object_event,
+				);
+			}
 
 			// object id delta is always 0.
 			stream.encode(&0u64).await?;
@@ -425,7 +446,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			if frame.size == 0 {
 				// Have to write the object status too.
 				stream.encode(&0u8).await?;
+				#[cfg(feature = "trace")]
+				{
+					object_event.stream_offset_end = Some(stream.offset());
+					emit_object_phase(&trace, trace::ObjectTracePoint::TxObjectHeaderEncoded, &object_event);
+				}
 			} else {
+				#[cfg(feature = "trace")]
+				{
+					object_event.stream_offset_end = Some(stream.offset());
+					emit_object_phase(&trace, trace::ObjectTracePoint::TxObjectHeaderEncoded, &object_event);
+				}
 				// Stream each chunk of the frame.
 				loop {
 					let chunk = {
@@ -442,7 +473,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					match chunk? {
 						Some(chunk) => {
 							let n = chunk.len() as u64;
+							#[cfg(feature = "trace")]
+							emit_object_phase(&trace, trace::ObjectTracePoint::TxPayloadWriteStart, &object_event);
 							stream.write_chunk(chunk).await?;
+							#[cfg(feature = "trace")]
+							{
+								object_event.stream_offset_end = Some(stream.offset());
+								emit_object_phase(&trace, trace::ObjectTracePoint::TxPayloadWriteDone, &object_event);
+							}
 							track_stats.bytes(n);
 						}
 						None => break,

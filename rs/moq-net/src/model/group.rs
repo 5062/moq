@@ -561,6 +561,20 @@ impl std::ops::Deref for Consumer {
 	}
 }
 
+#[cfg(feature = "trace")]
+fn emit_object_phase(
+	handle: &crate::trace::Handle,
+	point: crate::trace::ObjectTracePoint,
+	object: &crate::trace::ObjectEvent,
+) {
+	let mut object = object.clone();
+	object.at_ns = crate::trace::now_ns();
+	handle.emit_object(crate::trace::Event::MoqObjectPhase(crate::trace::ObjectPhaseEvent {
+		point,
+		object,
+	}));
+}
+
 impl Consumer {
 	/// The parent track's timescale.
 	pub fn timescale(&self) -> Timescale {
@@ -606,6 +620,42 @@ impl Consumer {
 
 		self.index += 1;
 		Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))))
+	}
+
+	#[cfg(feature = "trace")]
+	pub(crate) fn poll_next_frame_traced(
+		&mut self,
+		waiter: &kio::Waiter,
+		trace: &crate::trace::Handle,
+		object: &crate::trace::ObjectEvent,
+	) -> Poll<Result<Option<frame::Consumer>>> {
+		if let Some(frame) = self.prefetch.pop() {
+			self.index += 1;
+			let info = frame::Info {
+				size: frame.payload.len() as u64,
+				timestamp: frame.timestamp,
+			};
+			let source = frame::Source::Complete(frame.payload);
+			let mut object = object.clone();
+			object.payload_bytes = info.size;
+			emit_object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloneStart, &object);
+			let frame = frame::Consumer::new(self.state.clone(), info, source);
+			emit_object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloned, &object);
+			return Poll::Ready(Ok(Some(frame)));
+		}
+
+		let index = self.index;
+		let Some((info, source)) = ready!(self.poll(waiter, |state| state.poll_frame_source(index))?) else {
+			return Poll::Ready(Ok(None));
+		};
+
+		self.index += 1;
+		let mut object = object.clone();
+		object.payload_bytes = info.size;
+		emit_object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloneStart, &object);
+		let frame = frame::Consumer::new(self.state.clone(), info, source);
+		emit_object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloned, &object);
+		Poll::Ready(Ok(Some(frame)))
 	}
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.

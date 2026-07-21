@@ -138,6 +138,51 @@ pub struct ObjectEvent {
 	pub sample_rate: u64,
 }
 
+/// A named moq-transport object trace point.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectTracePoint {
+	/// Inbound object header parsing started.
+	RxObjectHeaderParseStart,
+	/// Inbound object header parsing completed.
+	RxObjectHeaderParsed,
+	/// Inbound object model lookup started.
+	RxLookupStart,
+	/// Inbound object model lookup completed.
+	RxLookupDone,
+	/// Inbound object creation started.
+	RxObjectCreateStart,
+	/// Inbound object creation completed.
+	RxObjectCreated,
+	/// Inbound object payload read started.
+	RxPayloadReadStart,
+	/// Inbound object payload read completed.
+	RxPayloadReadDone,
+	/// Outbound object clone or selection started.
+	TxObjectCloneStart,
+	/// Outbound object clone or selection completed.
+	TxObjectCloned,
+	/// Outbound object header encoding started.
+	TxObjectHeaderEncodeStart,
+	/// Outbound object header encoding completed.
+	TxObjectHeaderEncoded,
+	/// Outbound object payload write started.
+	TxPayloadWriteStart,
+	/// Outbound object payload write completed.
+	TxPayloadWriteDone,
+}
+
+/// moq-transport object trace point fields.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ObjectPhaseEvent {
+	/// Object trace point observed by the instrumentation hook.
+	pub point: ObjectTracePoint,
+	/// Object metadata associated with the trace point.
+	#[serde(flatten)]
+	pub object: ObjectEvent,
+}
+
 /// A named QUIC packet trace point.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -225,6 +270,9 @@ pub enum Event {
 	/// Final byte of a moq-transport object was observed.
 	#[serde(rename = "moq_object_end")]
 	MoqObjectEnd(ObjectEvent),
+	/// moq-transport object processing phase boundary.
+	#[serde(rename = "moq_object_phase")]
+	MoqObjectPhase(ObjectPhaseEvent),
 	/// QUIC packet processing started.
 	#[serde(rename = "quic_packet_start")]
 	PacketStart(PacketEvent),
@@ -240,6 +288,7 @@ impl Event {
 	fn set_sample_rate(&mut self, sample_rate: u64) {
 		match self {
 			Self::MoqObjectStart(event) | Self::MoqObjectEnd(event) => event.sample_rate = sample_rate,
+			Self::MoqObjectPhase(event) => event.object.sample_rate = sample_rate,
 			Self::PacketStart(event) | Self::PacketEnd(event) => event.sample_rate = sample_rate,
 			Self::PacketPhase(event) => event.packet.sample_rate = sample_rate,
 		}
@@ -451,6 +500,34 @@ mod tests {
 		assert!(json.contains(r#""type":"moq_object_end""#));
 		assert!(json.contains(r#""session_id":7"#));
 		assert!(json.contains(r#""protocol":"moq_transport""#));
+	}
+
+	#[test]
+	fn serializes_object_phase_event() {
+		let event = Event::MoqObjectPhase(ObjectPhaseEvent {
+			point: ObjectTracePoint::RxObjectCreated,
+			object: ObjectEvent {
+				at_ns: 42,
+				session_id: Some(7),
+				direction: Direction::Inbound,
+				protocol: Protocol::MoqTransport,
+				track_alias: 11,
+				group_id: 12,
+				object_id: 13,
+				stream_id: Some(16),
+				stream_offset_start: Some(100),
+				stream_offset_end: Some(144),
+				payload_bytes: 44,
+				sample_rate: 1,
+			},
+		});
+
+		let json = serde_json::to_string(&event).unwrap();
+		assert!(json.contains(r#""type":"moq_object_phase""#));
+		assert!(json.contains(r#""point":"rx_object_created""#));
+		assert!(!json.contains("frame"));
+		assert!(!json.contains(r#""phase""#));
+		assert!(!json.contains(r#""edge""#));
 	}
 
 	#[test]
