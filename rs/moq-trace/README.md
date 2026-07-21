@@ -86,7 +86,6 @@ Inbound points are:
 
 - `rx_socket_io_start`: entry to UDP socket receive.
 - `rx_socket_io_done`: UDP socket receive returned.
-- `rx_datagram_received`: one UDP datagram segment was received.
 - `rx_packet_header_parse_start`: entry to QUIC packet header parsing.
 - `rx_packet_header_parsed`: QUIC packet header parsing completed.
 - `rx_packet_decrypt_start`: entry to QUIC header unprotect or packet body decrypt.
@@ -101,11 +100,10 @@ Outbound points are:
 - `tx_packet_encrypt_start`: entry to QUIC packet body encryption and header protection.
 - `tx_packet_encrypted`: QUIC packet body encryption and header protection completed.
 - `tx_socket_io_start`: entry to UDP socket send.
-- `tx_datagram_sent`: one UDP datagram segment was successfully handed to the socket.
 - `tx_socket_io_done`: UDP socket send returned.
 
-Socket and datagram scoped points omit `packet_space` because UDP reads and
-writes are not tied to one packet number space. True start points may omit
+Socket scoped points omit `packet_space` because UDP reads and writes are not tied
+to one packet number space. True start points may omit
 `udp_len` when the final datagram or packet length is not known yet. Packet
 numbers, stream IDs, and stream byte ranges are included when the hook has that
 metadata.

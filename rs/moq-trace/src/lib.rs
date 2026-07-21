@@ -147,8 +147,6 @@ pub enum PacketTracePoint {
 	RxSocketIoStart,
 	/// Completion of an inbound UDP socket read.
 	RxSocketIoDone,
-	/// An inbound UDP datagram was received.
-	RxDatagramReceived,
 	/// Entry to inbound QUIC packet header parsing.
 	RxPacketHeaderParseStart,
 	/// Inbound QUIC packet header parsing completed.
@@ -171,8 +169,6 @@ pub enum PacketTracePoint {
 	TxPacketEncrypted,
 	/// Entry to an outbound UDP socket write.
 	TxSocketIoStart,
-	/// An outbound UDP datagram was sent.
-	TxDatagramSent,
 	/// Completion of an outbound UDP socket write.
 	TxSocketIoDone,
 }
@@ -483,9 +479,9 @@ mod tests {
 	}
 
 	#[test]
-	fn omits_packet_space_when_trace_point_is_datagram_scoped() {
+	fn omits_packet_space_when_trace_point_is_socket_scoped() {
 		let event = Event::PacketPhase(PacketPhaseEvent {
-			point: PacketTracePoint::RxDatagramReceived,
+			point: PacketTracePoint::RxSocketIoDone,
 			packet: PacketEvent {
 				at_ns: 42,
 				session_id: Some(7),
@@ -501,7 +497,7 @@ mod tests {
 		});
 
 		let json = serde_json::to_string(&event).unwrap();
-		assert!(json.contains(r#""point":"rx_datagram_received""#));
+		assert!(json.contains(r#""point":"rx_socket_io_done""#));
 		assert!(!json.contains(r#""packet_space""#));
 	}
 

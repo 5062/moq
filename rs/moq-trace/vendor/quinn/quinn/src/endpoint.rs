@@ -835,24 +835,6 @@ impl RecvState {
                         let mut data: BytesMut = buf[0..meta.len].into();
                         while !data.is_empty() {
                             let buf = data.split_to(meta.stride.min(data.len()));
-                            #[cfg(feature = "moq-trace")]
-                            moq_trace::global().emit_packet(moq_trace::Event::PacketPhase(
-                                moq_trace::PacketPhaseEvent {
-                                    point: moq_trace::PacketTracePoint::RxDatagramReceived,
-                                    packet: moq_trace::PacketEvent {
-                                        at_ns: moq_trace::now_ns(),
-                                        session_id: None,
-                                        direction: moq_trace::Direction::Inbound,
-                                        packet_number: None,
-                                        packet_space: None,
-                                        udp_len: Some(buf.len()),
-                                        stream_id: None,
-                                        stream_offset_start: None,
-                                        stream_offset_end: None,
-                                        sample_rate: 0,
-                                    },
-                                },
-                            ));
                             let mut response_buffer = Vec::new();
                             match endpoint.handle(
                                 now,
