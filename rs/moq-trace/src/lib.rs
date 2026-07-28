@@ -24,19 +24,15 @@ pub use socket::{SocketEndEvent, SocketEvent, SocketOutcome, SocketStats, Socket
 #[non_exhaustive]
 pub struct Config {
 	/// File path for newline-delimited JSON events. `None` keeps tracing in no-op mode.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[serde(skip_serializing_if = "Option::is_none")]
 	pub path: Option<PathBuf>,
 	/// Emit all events for every Nth MoQ object ID. Values below 1 are treated as 1.
-	#[serde(default = "default_sample")]
 	pub object_sample: u64,
 	/// Emit all events for every Nth QUIC packet number. Values below 1 are treated as 1.
-	#[serde(default = "default_sample")]
 	pub packet_sample: u64,
 	/// Emit every Nth UDP socket operation. Values below 1 are treated as 1.
-	#[serde(default = "default_sample")]
 	pub socket_sample: u64,
 	/// Maximum queued events before new events are dropped.
-	#[serde(default = "default_queue_capacity")]
 	pub queue_capacity: usize,
 }
 
@@ -67,17 +63,9 @@ impl Default for Config {
 			object_sample: 1,
 			packet_sample: 1,
 			socket_sample: 1,
-			queue_capacity: default_queue_capacity(),
+			queue_capacity: 4096,
 		}
 	}
-}
-
-fn default_sample() -> u64 {
-	1
-}
-
-fn default_queue_capacity() -> usize {
-	4096
 }
 
 /// Errors returned when creating a trace writer.
@@ -566,6 +554,18 @@ mod tests {
 		let error = serde_json::from_str::<Config>(r#"{"unexpected":true}"#).unwrap_err();
 
 		assert!(error.to_string().contains("unknown field `unexpected`"));
+	}
+
+	#[test]
+	fn config_uses_default_when_fields_are_missing() {
+		let config = serde_json::from_str::<Config>("{}").unwrap();
+		let default = Config::default();
+
+		assert_eq!(config.path, default.path);
+		assert_eq!(config.object_sample, default.object_sample);
+		assert_eq!(config.packet_sample, default.packet_sample);
+		assert_eq!(config.socket_sample, default.socket_sample);
+		assert_eq!(config.queue_capacity, default.queue_capacity);
 	}
 
 	#[test]

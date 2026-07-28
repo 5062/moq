@@ -47,10 +47,10 @@ impl TraceConfig {
 
 		let mut config = moq_trace::Config::default();
 		config.path = Some(path.clone());
-		config.object_sample = self.object_sample.unwrap_or(1).max(1);
-		config.packet_sample = self.packet_sample.unwrap_or(1).max(1);
-		config.socket_sample = self.socket_sample.unwrap_or(1).max(1);
-		config.queue_capacity = self.queue_capacity.unwrap_or(4096).max(1);
+		config.object_sample = self.object_sample.unwrap_or(config.object_sample).max(1);
+		config.packet_sample = self.packet_sample.unwrap_or(config.packet_sample).max(1);
+		config.socket_sample = self.socket_sample.unwrap_or(config.socket_sample).max(1);
+		config.queue_capacity = self.queue_capacity.unwrap_or(config.queue_capacity).max(1);
 		let object_sample = config.object_sample;
 		let packet_sample = config.packet_sample;
 		let socket_sample = config.socket_sample;
