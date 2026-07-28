@@ -26,6 +26,10 @@ pub struct TraceConfig {
 	#[arg(long = "trace-packet-sample", env = "MOQ_TRACE_PACKET_SAMPLE")]
 	pub packet_sample: Option<u64>,
 
+	/// Emit every Nth UDP socket operation. Defaults to 1.
+	#[arg(long = "trace-socket-sample", env = "MOQ_TRACE_SOCKET_SAMPLE")]
+	pub socket_sample: Option<u64>,
+
 	/// Maximum queued trace events before new events are dropped. Defaults to 4096.
 	#[arg(long = "trace-queue-capacity", env = "MOQ_TRACE_QUEUE_CAPACITY")]
 	pub queue_capacity: Option<usize>,
@@ -45,10 +49,20 @@ impl TraceConfig {
 		config.path = Some(path.clone());
 		config.object_sample = self.object_sample.unwrap_or(1).max(1);
 		config.packet_sample = self.packet_sample.unwrap_or(1).max(1);
+		config.socket_sample = self.socket_sample.unwrap_or(1).max(1);
 		config.queue_capacity = self.queue_capacity.unwrap_or(4096).max(1);
+		let object_sample = config.object_sample;
+		let packet_sample = config.packet_sample;
+		let socket_sample = config.socket_sample;
 		let handle = moq_net::trace::Handle::new(config)?;
 		moq_trace::set_global(handle.clone());
-		tracing::info!(path = %path.display(), object_sample = self.object_sample.unwrap_or(1).max(1), packet_sample = self.packet_sample.unwrap_or(1).max(1), "raw trace enabled");
+		tracing::info!(
+			path = %path.display(),
+			object_sample,
+			packet_sample,
+			socket_sample,
+			"raw trace enabled"
+		);
 		Ok(handle)
 	}
 
@@ -59,6 +73,7 @@ impl TraceConfig {
 			self.path.is_none()
 				&& self.object_sample.is_none()
 				&& self.packet_sample.is_none()
+				&& self.socket_sample.is_none()
 				&& self.queue_capacity.is_none(),
 			"relay tracing requires building moq-relay with --features trace"
 		);

@@ -9,6 +9,15 @@ use std::thread::JoinHandle;
 
 use serde::{Deserialize, Serialize};
 
+mod packet;
+pub use packet::{
+	PacketContext, PacketEndEvent, PacketEvent, PacketOutcome, PacketPhase, PacketPhaseEvent, PacketPhaseTrace,
+	PacketTrace, PhaseEdge, StreamFrame, StreamFrameEvent,
+};
+
+mod socket;
+pub use socket::{SocketEndEvent, SocketEvent, SocketOutcome, SocketStats, SocketTrace};
+
 /// Tracing configuration shared by MoQ and QUIC instrumentation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -23,6 +32,9 @@ pub struct Config {
 	/// Emit all events for every Nth QUIC packet number. Values below 1 are treated as 1.
 	#[serde(default = "default_sample")]
 	pub packet_sample: u64,
+	/// Emit every Nth UDP socket operation. Values below 1 are treated as 1.
+	#[serde(default = "default_sample")]
+	pub socket_sample: u64,
 	/// Maximum queued events before new events are dropped.
 	#[serde(default = "default_queue_capacity")]
 	pub queue_capacity: usize,
@@ -42,6 +54,7 @@ impl Config {
 	fn normalized(mut self) -> Self {
 		self.object_sample = self.object_sample.max(1);
 		self.packet_sample = self.packet_sample.max(1);
+		self.socket_sample = self.socket_sample.max(1);
 		self.queue_capacity = self.queue_capacity.max(1);
 		self
 	}
@@ -53,6 +66,7 @@ impl Default for Config {
 			path: None,
 			object_sample: 1,
 			packet_sample: 1,
+			socket_sample: 1,
 			queue_capacity: default_queue_capacity(),
 		}
 	}
@@ -115,7 +129,7 @@ pub enum PacketSpace {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ObjectEvent {
 	/// Monotonic timestamp in nanoseconds from the local process clock.
-	pub at_ns: u128,
+	pub at_ns: u64,
 	/// Quinn stable connection ID when available.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub session_id: Option<u64>,
@@ -189,83 +203,6 @@ pub struct ObjectPhaseEvent {
 	pub object: ObjectEvent,
 }
 
-/// A named QUIC packet trace point.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[non_exhaustive]
-#[serde(rename_all = "snake_case")]
-pub enum PacketTracePoint {
-	/// Entry to an inbound UDP socket read.
-	RxSocketIoStart,
-	/// Completion of an inbound UDP socket read.
-	RxSocketIoDone,
-	/// Entry to inbound QUIC packet header parsing.
-	RxPacketHeaderParseStart,
-	/// Inbound QUIC packet header parsing completed.
-	RxPacketHeaderParsed,
-	/// Entry to inbound QUIC packet decryption.
-	RxPacketDecryptStart,
-	/// Inbound QUIC packet decryption completed.
-	RxPacketDecrypted,
-	/// Entry to inbound QUIC STREAM frame processing.
-	RxStreamFrameProcessStart,
-	/// Inbound QUIC STREAM frame processing completed.
-	RxStreamFrameProcessed,
-	/// Entry to outbound QUIC packet encoding.
-	TxPacketEncodeStart,
-	/// Outbound QUIC packet encoding completed.
-	TxPacketEncoded,
-	/// Entry to outbound QUIC packet encryption.
-	TxPacketEncryptStart,
-	/// Outbound QUIC packet encryption completed.
-	TxPacketEncrypted,
-	/// Entry to an outbound UDP socket write.
-	TxSocketIoStart,
-	/// Completion of an outbound UDP socket write.
-	TxSocketIoDone,
-}
-
-/// QUIC packet trace fields common to packet start and end events.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PacketEvent {
-	/// Monotonic timestamp in nanoseconds from the local process clock.
-	pub at_ns: u128,
-	/// Quinn stable connection ID when available.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub session_id: Option<u64>,
-	/// Whether this packet is entering or leaving the relay.
-	pub direction: Direction,
-	/// QUIC packet number, when known at this hook.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub packet_number: Option<u64>,
-	/// QUIC packet number space, when the trace point is tied to one.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub packet_space: Option<PacketSpace>,
-	/// UDP datagram length in bytes, when known at this hook.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub udp_len: Option<usize>,
-	/// QUIC stream ID for a STREAM frame carried by this packet, when present.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub stream_id: Option<u64>,
-	/// Inclusive STREAM frame offset, when present.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub stream_offset_start: Option<u64>,
-	/// Exclusive STREAM frame offset, when present.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub stream_offset_end: Option<u64>,
-	/// Sampling rate active for this event.
-	pub sample_rate: u64,
-}
-
-/// QUIC packet trace point fields.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PacketPhaseEvent {
-	/// Packet trace point observed by the instrumentation hook.
-	pub point: PacketTracePoint,
-	/// Packet metadata associated with the trace point.
-	#[serde(flatten)]
-	pub packet: PacketEvent,
-}
-
 /// One JSONL trace record.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -285,13 +222,35 @@ pub enum Event {
 	PacketStart(PacketEvent),
 	/// QUIC packet processing completed.
 	#[serde(rename = "quic_packet_end")]
-	PacketEnd(PacketEvent),
+	PacketEnd(PacketEndEvent),
 	/// QUIC packet processing phase boundary.
 	#[serde(rename = "quic_packet_phase")]
 	PacketPhase(PacketPhaseEvent),
+	/// QUIC STREAM frame mapped to its parent packet.
+	#[serde(rename = "quic_stream_frame")]
+	StreamFrame(StreamFrameEvent),
+	/// UDP socket operation started.
+	#[serde(rename = "udp_socket_start")]
+	SocketStart(SocketEvent),
+	/// UDP socket operation completed.
+	#[serde(rename = "udp_socket_end")]
+	SocketEnd(SocketEndEvent),
 }
 
 impl Event {
+	/// Process-unique trace identifier for scoped socket and packet records.
+	pub fn trace_id(&self) -> Option<u64> {
+		match self {
+			Self::SocketStart(event) => Some(event.trace_id),
+			Self::PacketStart(event) => Some(event.trace_id),
+			Self::PacketEnd(event) => Some(event.packet.trace_id),
+			Self::PacketPhase(event) => Some(event.packet.trace_id),
+			Self::StreamFrame(event) => Some(event.packet.trace_id),
+			Self::SocketEnd(event) => Some(event.socket.trace_id),
+			_ => None,
+		}
+	}
+
 	fn object_id(&self) -> Option<u64> {
 		match self {
 			Self::MoqObjectStart(event) | Self::MoqObjectEnd(event) => Some(event.object_id),
@@ -300,20 +259,11 @@ impl Event {
 		}
 	}
 
-	fn packet_number(&self) -> Option<u64> {
-		match self {
-			Self::PacketStart(event) | Self::PacketEnd(event) => event.packet_number,
-			Self::PacketPhase(event) => event.packet.packet_number,
-			_ => None,
-		}
-	}
-
 	fn set_sample_rate(&mut self, sample_rate: u64) {
 		match self {
 			Self::MoqObjectStart(event) | Self::MoqObjectEnd(event) => event.sample_rate = sample_rate,
 			Self::MoqObjectPhase(event) => event.object.sample_rate = sample_rate,
-			Self::PacketStart(event) | Self::PacketEnd(event) => event.sample_rate = sample_rate,
-			Self::PacketPhase(event) => event.packet.sample_rate = sample_rate,
+			_ => {}
 		}
 	}
 }
@@ -357,11 +307,18 @@ pub struct Handle {
 	inner: Option<Arc<Inner>>,
 }
 
+enum WriterCommand {
+	Event(Event),
+	Flush(std::sync::mpsc::SyncSender<bool>),
+}
+
 struct Inner {
 	config: Config,
-	sender: Option<std::sync::mpsc::SyncSender<Event>>,
+	sender: Option<std::sync::mpsc::SyncSender<WriterCommand>>,
 	writer: Option<JoinHandle<()>>,
 	packet_seen: AtomicU64,
+	socket_seen: AtomicU64,
+	next_trace_id: AtomicU64,
 	emitted: AtomicU64,
 	dropped: AtomicU64,
 	writer_failed: Arc<AtomicBool>,
@@ -427,24 +384,19 @@ impl Handle {
 		inner.emit(event)
 	}
 
-	/// Emit a QUIC packet event after sampling by packet number or event order when unnumbered.
-	pub fn emit_packet(&self, mut event: Event) -> bool {
+	/// Flush all events accepted before this call to the output file.
+	pub fn flush(&self) -> bool {
 		let Some(inner) = &self.inner else {
+			return true;
+		};
+		let Some(sender) = &inner.sender else {
 			return false;
 		};
-		let sample = inner.config.packet_sample;
-		let sampled = event
-			.packet_number()
-			.map(|number| number % sample == sample - 1)
-			.unwrap_or_else(|| {
-				let seen = inner.packet_seen.fetch_add(1, Ordering::Relaxed);
-				seen % sample == sample - 1
-			});
-		if !sampled {
+		let (complete, receiver) = std::sync::mpsc::sync_channel(0);
+		if sender.send(WriterCommand::Flush(complete)).is_err() {
 			return false;
 		}
-		event.set_sample_rate(sample);
-		inner.emit(event)
+		receiver.recv().unwrap_or(false)
 	}
 
 	/// Number of events accepted by this handle.
@@ -475,7 +427,7 @@ impl Handle {
 impl Inner {
 	fn new(
 		config: Config,
-		sender: Option<std::sync::mpsc::SyncSender<Event>>,
+		sender: Option<std::sync::mpsc::SyncSender<WriterCommand>>,
 		writer: Option<JoinHandle<()>>,
 		writer_failed: Arc<AtomicBool>,
 	) -> Self {
@@ -484,6 +436,8 @@ impl Inner {
 			sender,
 			writer,
 			packet_seen: AtomicU64::new(0),
+			socket_seen: AtomicU64::new(0),
+			next_trace_id: AtomicU64::new(1),
 			emitted: AtomicU64::new(0),
 			dropped: AtomicU64::new(0),
 			writer_failed,
@@ -495,7 +449,7 @@ impl Inner {
 			return false;
 		};
 
-		match sender.try_send(event) {
+		match sender.try_send(WriterCommand::Event(event)) {
 			Ok(()) => {
 				self.emitted.fetch_add(1, Ordering::Relaxed);
 				true
@@ -522,14 +476,20 @@ impl Drop for Inner {
 	}
 }
 
-fn write_events<W: Write>(writer: W, receiver: std::sync::mpsc::Receiver<Event>, failed: Arc<AtomicBool>) {
+fn write_events<W: Write>(writer: W, receiver: std::sync::mpsc::Receiver<WriterCommand>, failed: Arc<AtomicBool>) {
 	let mut writer = BufWriter::new(writer);
-	for event in receiver {
-		if serde_json::to_writer(&mut writer, &event).is_err() {
-			failed.store(true, Ordering::Relaxed);
-			break;
-		}
-		if writer.write_all(b"\n").is_err() {
+	for command in receiver {
+		let result = match command {
+			WriterCommand::Event(event) => serde_json::to_writer(&mut writer, &event)
+				.map_err(std::io::Error::other)
+				.and_then(|()| writer.write_all(b"\n")),
+			WriterCommand::Flush(complete) => {
+				let result = writer.flush();
+				let _ = complete.send(result.is_ok());
+				result
+			}
+		};
+		if result.is_err() {
 			failed.store(true, Ordering::Relaxed);
 			break;
 		}
@@ -568,9 +528,14 @@ pub fn clear_global() {
 }
 
 /// Return a monotonic timestamp in nanoseconds for trace events.
-pub fn now_ns() -> u128 {
+pub fn now_ns() -> u64 {
 	static START: OnceLock<std::time::Instant> = OnceLock::new();
-	START.get_or_init(std::time::Instant::now).elapsed().as_nanos()
+	START
+		.get_or_init(std::time::Instant::now)
+		.elapsed()
+		.as_nanos()
+		.try_into()
+		.unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -601,6 +566,23 @@ mod tests {
 		let error = serde_json::from_str::<Config>(r#"{"unexpected":true}"#).unwrap_err();
 
 		assert!(error.to_string().contains("unknown field `unexpected`"));
+	}
+
+	#[test]
+	fn flush_makes_events_visible_while_clones_are_alive() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			..Config::default()
+		})
+		.unwrap();
+		let clone = handle.clone();
+
+		assert!(handle.emit(object_event()));
+		assert!(handle.flush());
+		assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
+		drop(clone);
 	}
 
 	#[test]
@@ -640,77 +622,6 @@ mod tests {
 	}
 
 	#[test]
-	fn serializes_packet_phase_event() {
-		let event = Event::PacketPhase(PacketPhaseEvent {
-			point: PacketTracePoint::RxPacketDecrypted,
-			packet: PacketEvent {
-				at_ns: 42,
-				session_id: Some(7),
-				direction: Direction::Rx,
-				packet_number: Some(2),
-				packet_space: Some(PacketSpace::Data),
-				udp_len: Some(1200),
-				stream_id: None,
-				stream_offset_start: None,
-				stream_offset_end: None,
-				sample_rate: 1,
-			},
-		});
-
-		let json = serde_json::to_string(&event).unwrap();
-		assert!(json.contains(r#""type":"quic_packet_phase""#));
-		assert!(json.contains(r#""point":"rx_packet_decrypted""#));
-		assert!(!json.contains(r#""phase""#));
-		assert!(!json.contains(r#""edge""#));
-	}
-
-	#[test]
-	fn omits_packet_space_when_trace_point_is_socket_scoped() {
-		let event = Event::PacketPhase(PacketPhaseEvent {
-			point: PacketTracePoint::RxSocketIoDone,
-			packet: PacketEvent {
-				at_ns: 42,
-				session_id: Some(7),
-				direction: Direction::Rx,
-				packet_number: None,
-				packet_space: None,
-				udp_len: Some(1200),
-				stream_id: None,
-				stream_offset_start: None,
-				stream_offset_end: None,
-				sample_rate: 1,
-			},
-		});
-
-		let json = serde_json::to_string(&event).unwrap();
-		assert!(json.contains(r#""point":"rx_socket_io_done""#));
-		assert!(!json.contains(r#""packet_space""#));
-	}
-
-	#[test]
-	fn omits_udp_len_when_trace_point_has_not_measured_it_yet() {
-		let event = Event::PacketPhase(PacketPhaseEvent {
-			point: PacketTracePoint::TxPacketEncodeStart,
-			packet: PacketEvent {
-				at_ns: 42,
-				session_id: Some(7),
-				direction: Direction::Tx,
-				packet_number: Some(2),
-				packet_space: Some(PacketSpace::Data),
-				udp_len: None,
-				stream_id: None,
-				stream_offset_start: None,
-				stream_offset_end: None,
-				sample_rate: 1,
-			},
-		});
-
-		let json = serde_json::to_string(&event).unwrap();
-		assert!(json.contains(r#""point":"tx_packet_encode_start""#));
-		assert!(!json.contains(r#""udp_len""#));
-	}
-
-	#[test]
 	fn object_helpers_stamp_and_emit_events() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("trace.jsonl");
@@ -720,7 +631,7 @@ mod tests {
 		})
 		.unwrap();
 		let object = ObjectEvent {
-			at_ns: u128::MAX,
+			at_ns: u64::MAX,
 			session_id: Some(7),
 			direction: Direction::Tx,
 			protocol: Protocol::MoqTransport,
@@ -744,7 +655,7 @@ mod tests {
 		assert!(contents.contains(r#""type":"moq_object_phase""#));
 		assert!(contents.contains(r#""point":"tx_object_header_encoded""#));
 		assert!(contents.contains(r#""type":"moq_object_end""#));
-		assert!(!contents.contains(&u128::MAX.to_string()));
+		assert!(!contents.contains(&u64::MAX.to_string()));
 	}
 
 	#[test]
@@ -806,47 +717,6 @@ mod tests {
 		assert!(contents.contains(r#""type":"moq_object_end""#));
 	}
 
-	#[test]
-	fn samples_all_events_for_every_nth_numbered_packet() {
-		let dir = tempfile::tempdir().unwrap();
-		let handle = Handle::new(Config {
-			path: Some(dir.path().join("trace.jsonl")),
-			packet_sample: 3,
-			..Config::disabled()
-		})
-		.unwrap();
-		let packet = PacketEvent {
-			at_ns: 1,
-			session_id: Some(1),
-			direction: Direction::Tx,
-			packet_number: Some(0),
-			packet_space: Some(PacketSpace::Data),
-			udp_len: Some(1200),
-			stream_id: Some(0),
-			stream_offset_start: Some(0),
-			stream_offset_end: Some(10),
-			sample_rate: 0,
-		};
-
-		assert!(!handle.emit_packet(Event::PacketStart(packet.clone())));
-		assert!(!handle.emit_packet(Event::PacketPhase(PacketPhaseEvent {
-			point: PacketTracePoint::TxPacketEncoded,
-			packet: packet.clone(),
-		})));
-		assert!(!handle.emit_packet(Event::PacketEnd(packet.clone())));
-
-		let mut packet = packet;
-		packet.packet_number = Some(2);
-
-		assert!(handle.emit_packet(Event::PacketStart(packet.clone())));
-		assert!(handle.emit_packet(Event::PacketPhase(PacketPhaseEvent {
-			point: PacketTracePoint::TxPacketEncoded,
-			packet: packet.clone(),
-		})));
-		assert!(handle.emit_packet(Event::PacketEnd(packet)));
-		assert_eq!(handle.emitted(), 3);
-	}
-
 	struct FailingWriter;
 
 	impl Write for FailingWriter {
@@ -863,7 +733,7 @@ mod tests {
 	fn records_writer_failure() {
 		let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
 		let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-		sender.send(object_event()).unwrap();
+		sender.send(WriterCommand::Event(object_event())).unwrap();
 		drop(sender);
 
 		write_events(FailingWriter, receiver, failed.clone());
@@ -907,5 +777,162 @@ mod tests {
 
 		let contents = std::fs::read_to_string(&path).unwrap();
 		assert!(contents.contains(r#""type":"moq_object_end""#));
+	}
+
+	#[test]
+	fn socket_trace_keeps_start_and_end_together() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			socket_sample: 2,
+			..Config::default()
+		})
+		.unwrap();
+
+		assert!(handle.socket(Direction::Rx, None).is_none());
+		handle
+			.socket(Direction::Rx, None)
+			.expect("second socket operation should be sampled")
+			.finish(SocketOutcome::Success, SocketStats::new(2, 5, 6144));
+		drop(handle);
+
+		let events: Vec<Event> = std::fs::read_to_string(path)
+			.unwrap()
+			.lines()
+			.map(|line| serde_json::from_str(line).unwrap())
+			.collect();
+		assert_eq!(events.len(), 2);
+		assert_eq!(events[0].trace_id(), events[1].trace_id());
+	}
+
+	#[test]
+	fn dropped_socket_trace_records_abandoned() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			..Config::default()
+		})
+		.unwrap();
+
+		drop(handle.socket(Direction::Tx, Some(7)).unwrap());
+		drop(handle);
+
+		let events: Vec<Event> = std::fs::read_to_string(path)
+			.unwrap()
+			.lines()
+			.map(|line| serde_json::from_str(line).unwrap())
+			.collect();
+		assert!(matches!(
+			events.as_slice(),
+			[
+				Event::SocketStart(_),
+				Event::SocketEnd(SocketEndEvent {
+					outcome: SocketOutcome::Abandoned,
+					..
+				})
+			]
+		));
+	}
+
+	#[test]
+	fn serialized_events_can_be_read_back() {
+		let json = serde_json::to_string(&object_event()).unwrap();
+		let event: Event = serde_json::from_str(&json).unwrap();
+
+		assert_eq!(event, object_event());
+	}
+
+	#[test]
+	fn packet_trace_enriches_context_after_header_decode() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			..Config::default()
+		})
+		.unwrap();
+		let mut packet = handle
+			.packet(PacketContext::new(7, Direction::Rx).with_byte_len(1200))
+			.unwrap();
+
+		packet.phase(PacketPhase::HeaderParse).finish(PacketOutcome::Success);
+		packet.set_space(PacketSpace::Data);
+		packet.set_number(91);
+		packet
+			.phase(PacketPhase::HeaderUnprotect)
+			.finish(PacketOutcome::Success);
+		packet.stream_frame(StreamFrame::new(16, 120, 520), PacketOutcome::Success);
+		packet.finish(PacketOutcome::Success);
+		drop(handle);
+
+		let events: Vec<Event> = std::fs::read_to_string(path)
+			.unwrap()
+			.lines()
+			.map(|line| serde_json::from_str(line).unwrap())
+			.collect();
+		assert!(matches!(
+			events.last(),
+			Some(Event::PacketEnd(PacketEndEvent {
+				packet: PacketEvent {
+					packet_number: Some(91),
+					packet_space: Some(PacketSpace::Data),
+					..
+				},
+				outcome: PacketOutcome::Success,
+			}))
+		));
+		assert!(events.iter().all(|event| event.trace_id() == Some(1)));
+	}
+
+	#[test]
+	fn packet_with_multiple_stream_frames_has_one_interval() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			..Config::default()
+		})
+		.unwrap();
+		let packet = handle
+			.packet(
+				PacketContext::new(7, Direction::Tx)
+					.with_number(2)
+					.with_space(PacketSpace::Data),
+			)
+			.unwrap();
+
+		packet.stream_frame(StreamFrame::new(4, 0, 10), PacketOutcome::Success);
+		packet.stream_frame(StreamFrame::new(8, 20, 40), PacketOutcome::Success);
+		packet.finish(PacketOutcome::Success);
+		drop(handle);
+
+		let events: Vec<Event> = std::fs::read_to_string(path)
+			.unwrap()
+			.lines()
+			.map(|line| serde_json::from_str(line).unwrap())
+			.collect();
+		assert_eq!(
+			events
+				.iter()
+				.filter(|event| matches!(event, Event::PacketStart(_)))
+				.count(),
+			1
+		);
+		assert_eq!(
+			events
+				.iter()
+				.filter(|event| matches!(event, Event::PacketEnd(_)))
+				.count(),
+			1
+		);
+		assert_eq!(
+			events
+				.iter()
+				.filter(|event| matches!(event, Event::StreamFrame(_)))
+				.count(),
+			2
+		);
 	}
 }

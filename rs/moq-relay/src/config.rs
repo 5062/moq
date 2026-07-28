@@ -98,7 +98,7 @@ impl Config {
 	/// `Default::default()` (i.e. `false`) over the TOML value, silently
 	/// disabling settings that the TOML enabled. Type any new flag that
 	/// should be TOML-overridable as `Option<bool>` (or other `Option<T>`)
-	/// — those are left untouched when the CLI arg is absent.
+	/// Those are left untouched when the CLI arg is absent.
 	pub(crate) fn parse_and_merge<I, T>(args: I) -> anyhow::Result<Self>
 	where
 		I: IntoIterator<Item = T>,
@@ -186,6 +186,7 @@ depth = 2
 			std::env::remove_var("MOQ_TRACE_PATH");
 			std::env::remove_var("MOQ_TRACE_OBJECT_SAMPLE");
 			std::env::remove_var("MOQ_TRACE_PACKET_SAMPLE");
+			std::env::remove_var("MOQ_TRACE_SOCKET_SAMPLE");
 		}
 
 		let toml = r#"
@@ -193,6 +194,7 @@ depth = 2
 path = "/tmp/moq-trace.jsonl"
 object_sample = 10
 packet_sample = 20
+socket_sample = 30
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -208,6 +210,7 @@ packet_sample = 20
 		);
 		assert_eq!(config.trace.object_sample, Some(10));
 		assert_eq!(config.trace.packet_sample, Some(20));
+		assert_eq!(config.trace.socket_sample, Some(30));
 	}
 
 	#[test]
@@ -217,6 +220,7 @@ packet_sample = 20
 			std::env::remove_var("MOQ_TRACE_PATH");
 			std::env::remove_var("MOQ_TRACE_OBJECT_SAMPLE");
 			std::env::remove_var("MOQ_TRACE_PACKET_SAMPLE");
+			std::env::remove_var("MOQ_TRACE_SOCKET_SAMPLE");
 		}
 
 		let toml = "[trace]\npath = \"/tmp/from-toml.jsonl\"\nobject_sample = 10\npacket_sample = 20\n";
@@ -232,6 +236,8 @@ packet_sample = 20
 			std::ffi::OsString::from("/tmp/from-cli.jsonl"),
 			std::ffi::OsString::from("--trace-object-sample"),
 			std::ffi::OsString::from("5"),
+			std::ffi::OsString::from("--trace-socket-sample"),
+			std::ffi::OsString::from("5"),
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 
@@ -241,6 +247,7 @@ packet_sample = 20
 		);
 		assert_eq!(config.trace.object_sample, Some(5));
 		assert_eq!(config.trace.packet_sample, Some(20));
+		assert_eq!(config.trace.socket_sample, Some(5));
 	}
 
 	/// Serializes tests that touch `MOQ_CACHE_*`. Same rationale as
