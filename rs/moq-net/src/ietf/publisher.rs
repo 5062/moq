@@ -369,7 +369,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		loop {
 			#[cfg(feature = "trace")]
 			let object_template = trace::ObjectEvent {
-				at_ns: trace::now_ns(),
+				timestamp_ns: trace::now_ns(),
 				session_id: None,
 				direction: trace::Direction::Tx,
 				protocol: trace::Protocol::MoqTransport,

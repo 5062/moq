@@ -112,7 +112,7 @@ impl StreamFrame {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PacketEvent {
 	/// Monotonic timestamp in nanoseconds from the local process clock.
-	pub at_ns: u64,
+	pub timestamp_ns: u64,
 	/// Process-unique identifier shared by this packet's records.
 	pub trace_id: u64,
 	/// Quinn stable connection ID.
@@ -207,7 +207,7 @@ impl Handle {
 		}
 
 		let packet = PacketEvent {
-			at_ns: now_ns(),
+			timestamp_ns: now_ns(),
 			trace_id: inner.next_trace_id.fetch_add(1, Ordering::Relaxed),
 			connection_id: context.connection_id,
 			direction: context.direction,
@@ -244,7 +244,7 @@ impl PacketTrace {
 	/// Start a measured packet lifecycle phase.
 	pub fn phase(&self, phase: PacketPhase) -> PacketPhaseTrace {
 		let mut packet = self.packet.clone();
-		packet.at_ns = now_ns();
+		packet.timestamp_ns = now_ns();
 		self.handle.emit(Event::PacketPhase(PacketPhaseEvent {
 			packet: packet.clone(),
 			phase,
@@ -262,7 +262,7 @@ impl PacketTrace {
 	/// Record a STREAM frame carried by this packet.
 	pub fn stream_frame(&self, frame: StreamFrame, outcome: PacketOutcome) {
 		let mut packet = self.packet.clone();
-		packet.at_ns = now_ns();
+		packet.timestamp_ns = now_ns();
 		self.handle.emit(Event::StreamFrame(StreamFrameEvent {
 			packet,
 			stream_id: frame.stream_id,
@@ -280,7 +280,7 @@ impl PacketTrace {
 
 	fn emit_end(&self, outcome: PacketOutcome) {
 		let mut packet = self.packet.clone();
-		packet.at_ns = now_ns();
+		packet.timestamp_ns = now_ns();
 		self.handle.emit(Event::PacketEnd(PacketEndEvent { packet, outcome }));
 	}
 }
@@ -302,7 +302,7 @@ impl PacketPhaseTrace {
 
 	fn emit_done(&self, outcome: PacketOutcome) {
 		let mut packet = self.packet.clone();
-		packet.at_ns = now_ns();
+		packet.timestamp_ns = now_ns();
 		self.handle.emit(Event::PacketPhase(PacketPhaseEvent {
 			packet,
 			phase: self.phase,

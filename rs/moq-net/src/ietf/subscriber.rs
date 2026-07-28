@@ -976,7 +976,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			};
 			#[cfg(feature = "trace")]
 			let mut object_event = trace::ObjectEvent {
-				at_ns: trace::now_ns(),
+				timestamp_ns: trace::now_ns(),
 				session_id: None,
 				direction: trace::Direction::Rx,
 				protocol: trace::Protocol::MoqTransport,

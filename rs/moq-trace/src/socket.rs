@@ -47,7 +47,7 @@ impl SocketStats {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SocketEvent {
 	/// Monotonic timestamp in nanoseconds from the local process clock.
-	pub at_ns: u64,
+	pub timestamp_ns: u64,
 	/// Process-unique identifier shared by this operation's records.
 	pub trace_id: u64,
 	/// Quinn stable connection ID when the operation belongs to one connection.
@@ -90,7 +90,7 @@ impl Handle {
 		}
 
 		let event = SocketEvent {
-			at_ns: now_ns(),
+			timestamp_ns: now_ns(),
 			trace_id: inner.next_trace_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
 			connection_id,
 			direction,
@@ -114,7 +114,7 @@ impl SocketTrace {
 
 	fn emit_end(&self, outcome: SocketOutcome, stats: SocketStats) {
 		let mut socket = self.event.clone();
-		socket.at_ns = now_ns();
+		socket.timestamp_ns = now_ns();
 		self.handle
 			.emit(Event::SocketEnd(SocketEndEvent { socket, outcome, stats }));
 	}

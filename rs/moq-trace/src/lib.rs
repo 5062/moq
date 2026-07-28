@@ -129,7 +129,7 @@ pub enum PacketSpace {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ObjectEvent {
 	/// Monotonic timestamp in nanoseconds from the local process clock.
-	pub at_ns: u64,
+	pub timestamp_ns: u64,
 	/// Quinn stable connection ID when available.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub session_id: Option<u64>,
@@ -274,7 +274,7 @@ pub fn object_interval_start(handle: &Handle, object: &ObjectEvent) -> bool {
 		return false;
 	};
 	let mut object = object.clone();
-	object.at_ns = now_ns();
+	object.timestamp_ns = now_ns();
 	object.sample_rate = sample_rate;
 	handle.emit(Event::MoqObjectStart(object))
 }
@@ -285,7 +285,7 @@ pub fn object_interval_end(handle: &Handle, object: &ObjectEvent) -> bool {
 		return false;
 	};
 	let mut object = object.clone();
-	object.at_ns = now_ns();
+	object.timestamp_ns = now_ns();
 	object.sample_rate = sample_rate;
 	handle.emit(Event::MoqObjectEnd(object))
 }
@@ -296,7 +296,7 @@ pub fn object_phase(handle: &Handle, point: ObjectTracePoint, object: &ObjectEve
 		return false;
 	};
 	let mut object = object.clone();
-	object.at_ns = now_ns();
+	object.timestamp_ns = now_ns();
 	object.sample_rate = sample_rate;
 	handle.emit(Event::MoqObjectPhase(ObjectPhaseEvent { point, object }))
 }
@@ -546,7 +546,7 @@ mod tests {
 
 	fn object_event() -> Event {
 		Event::MoqObjectEnd(ObjectEvent {
-			at_ns: 42,
+			timestamp_ns: 42,
 			session_id: Some(7),
 			direction: Direction::Tx,
 			protocol: Protocol::MoqTransport,
@@ -598,7 +598,7 @@ mod tests {
 		let event = Event::MoqObjectPhase(ObjectPhaseEvent {
 			point: ObjectTracePoint::RxObjectCreated,
 			object: ObjectEvent {
-				at_ns: 42,
+				timestamp_ns: 42,
 				session_id: Some(7),
 				direction: Direction::Rx,
 				protocol: Protocol::MoqTransport,
@@ -631,7 +631,7 @@ mod tests {
 		})
 		.unwrap();
 		let object = ObjectEvent {
-			at_ns: u64::MAX,
+			timestamp_ns: u64::MAX,
 			session_id: Some(7),
 			direction: Direction::Tx,
 			protocol: Protocol::MoqTransport,

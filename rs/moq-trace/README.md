@@ -36,7 +36,7 @@ startup instead of silently ignoring it.
 ## Output
 
 The output is newline-delimited JSON. Every line has a `type` field. Monotonic
-`at_ns` timestamps are useful for latency deltas inside one process, not for
+`timestamp_ns` timestamps are useful for latency deltas inside one process, not for
 wall-clock comparison between hosts.
 
 The record types are:
@@ -49,18 +49,18 @@ The record types are:
 Example packet lifecycle:
 
 ```json
-{"type":"quic_packet_start","at_ns":123456700,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","sample_rate":1}
-{"type":"quic_packet_phase","at_ns":123456710,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","byte_len":1232,"sample_rate":1,"phase":"packet_encrypt","edge":"start"}
-{"type":"quic_packet_phase","at_ns":123456760,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","byte_len":1232,"sample_rate":1,"phase":"packet_encrypt","edge":"done","outcome":"success"}
-{"type":"quic_stream_frame","at_ns":123456770,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","byte_len":1232,"sample_rate":1,"stream_id":16,"offset_start":120,"offset_end":520,"outcome":"success"}
-{"type":"quic_packet_end","at_ns":123456780,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","byte_len":1232,"sample_rate":1,"outcome":"success"}
+{"type":"quic_packet_start","timestamp_ns":123456700,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","sample_rate":1}
+{"type":"quic_packet_phase","timestamp_ns":123456710,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","byte_len":1232,"sample_rate":1,"phase":"packet_encrypt","edge":"start"}
+{"type":"quic_packet_phase","timestamp_ns":123456760,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","byte_len":1232,"sample_rate":1,"phase":"packet_encrypt","edge":"done","outcome":"success"}
+{"type":"quic_stream_frame","timestamp_ns":123456770,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","byte_len":1232,"sample_rate":1,"stream_id":16,"offset_start":120,"offset_end":520,"outcome":"success"}
+{"type":"quic_packet_end","timestamp_ns":123456780,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","byte_len":1232,"sample_rate":1,"outcome":"success"}
 ```
 
 Example receive socket operation with GRO:
 
 ```json
-{"type":"udp_socket_start","at_ns":123456800,"trace_id":18,"direction":"rx","sample_rate":1}
-{"type":"udp_socket_end","at_ns":123456850,"trace_id":18,"direction":"rx","sample_rate":1,"outcome":"success","buffers":2,"datagrams":5,"bytes":6144}
+{"type":"udp_socket_start","timestamp_ns":123456800,"trace_id":18,"direction":"rx","sample_rate":1}
+{"type":"udp_socket_end","timestamp_ns":123456850,"trace_id":18,"direction":"rx","sample_rate":1,"outcome":"success","buffers":2,"datagrams":5,"bytes":6144}
 ```
 
 ## Event semantics
