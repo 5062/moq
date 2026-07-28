@@ -30,7 +30,6 @@ members = [
     "rs/moq-video",
     "rs/moq-wasm",
 ]
-exclude = ["rs/moq-trace/vendor/quinn/quinn", "rs/moq-trace/vendor/quinn/quinn-proto"]
 default-members = [
     "rs/kio",
     "rs/hang",
@@ -137,5 +136,6 @@ codegen-units = 1
 strip = true
 
 [patch.crates-io]
-quinn = { path = "rs/moq-trace/vendor/quinn/quinn" }
-quinn-proto = { path = "rs/moq-trace/vendor/quinn/quinn-proto" }
+moq-trace = { path = "rs/moq-trace" }
+quinn = { git = "https://github.com/5062/quinn", rev = "7d95828f86da0e8027c90251b3b0977cc445877b" }
+quinn-proto = { git = "https://github.com/5062/quinn", rev = "7d95828f86da0e8027c90251b3b0977cc445877b" }

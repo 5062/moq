@@ -6,7 +6,7 @@ Raw JSONL tracing for measuring MoQ relay processing overhead.
 from two layers:
 
 - MoQ object events from `moq-transport` publisher and subscriber group streams.
-- QUIC packet events from the vendored local `quinn-proto` patch.
+- QUIC packet events from the patched Quinn fork.
 
 Tracing is disabled unless a trace output path is configured and the relevant
 crates are built with the `trace` feature.
@@ -167,19 +167,16 @@ Instrumentation paths never block on disk I/O.
 
 ## Quinn Patch
 
-The relay uses a local vendored quinn copy for packet-level hooks:
+The relay uses a patched Quinn fork for packet-level hooks. The root workspace
+patches crates.io `quinn` and `quinn-proto` to one pinned fork revision, and
+patches crates.io `moq-trace` back to this workspace so Quinn and MoQ share the
+same process-global trace handle.
 
-```text
-rs/moq-trace/vendor/quinn/quinn
-rs/moq-trace/vendor/quinn/quinn-proto
-```
+Fork details, upstream base commits, and refresh instructions live in
+[QUINN.md](QUINN.md).
 
-The root workspace patches crates.io to these paths. This is not a git
-submodule. Upstream source versions and refresh instructions live in
-`vendor/quinn/UPSTREAM.md`.
-
-Keep local instrumentation changes isolated and marked with `MoQ trace hook`
-comments so future upstream refreshes can review and reapply the patch.
+Keep instrumentation changes isolated and marked with `MoQ trace hook` comments
+so future upstream refreshes can review and reapply the patch.
 
 ## Verification
 
@@ -191,8 +188,7 @@ cargo test -p moq-net --features trace
 cargo test -p moq-relay
 cargo test -p moq-relay --features trace
 cargo test -p moq-native --features quinn,trace
-cargo test --manifest-path rs/moq-trace/vendor/quinn/quinn-proto/Cargo.toml
-cargo test --manifest-path rs/moq-trace/vendor/quinn/quinn-proto/Cargo.toml --features moq-trace
+nix develop /home/siyuan/moq-trace --command cargo test -p quinn-proto --features moq-trace --config 'patch.crates-io.moq-trace.path="/home/siyuan/moq-trace/rs/moq-trace"'
 ```
 
 Before landing a relay tracing change, run the repository check:

@@ -6,7 +6,6 @@ pkg/
 .direnv/
 .terraform/
 **/CHANGELOG.md
-rs/moq-trace/vendor/
 
 # IETF drafts are kramdown-rfc markdown, not CommonMark; linted by `just
 # drafts check` (kramdown-rfc) instead.
