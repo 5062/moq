@@ -22,7 +22,6 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 	}
 
 	/// Return the number of application stream bytes written by this writer.
-	#[cfg(feature = "trace")]
 	pub fn offset(&self) -> u64 {
 		self.offset
 	}
@@ -136,5 +135,15 @@ impl<S: web_transport_trait::SendStream, V> Drop for Writer<S, V> {
 			// Unlike the Quinn default, we abort the stream on drop.
 			stream.reset(Error::Cancel.to_code());
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[allow(dead_code)]
+	fn offset_is_available_without_trace<S: web_transport_trait::SendStream, V>() {
+		let _: fn(&Writer<S, V>) -> u64 = Writer::offset;
 	}
 }

@@ -14,7 +14,6 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
-#[cfg(feature = "trace")]
 use crate::trace;
 
 use super::{Message, Version};
@@ -89,7 +88,6 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	origin: origin::Producer,
 	control: Control,
 	stats: stats::Handle,
-	#[cfg(feature = "trace")]
 	trace: trace::Handle,
 	/// Per-session ingress broadcast-subscription tracker. Each upstream
 	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
@@ -130,7 +128,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		origin: origin::Producer,
 		control: Control,
 		stats: stats::Handle,
-		#[allow(unused_variables)] trace: crate::trace::Handle,
+		trace: crate::trace::Handle,
 		version: Version,
 		tasks: Tasks,
 	) -> Self {
@@ -140,7 +138,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			origin,
 			control,
 			stats,
-			#[cfg(feature = "trace")]
 			trace,
 			broadcasts,
 			session_origin: crate::Origin::random(),
@@ -959,45 +956,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		mut producer: group::Producer,
 		track_stats: Arc<stats::SubscriberTrack>,
 	) -> Result<(), Error> {
-		#[cfg(feature = "trace")]
 		let mut object_id = 0;
 
 		loop {
-			#[cfg(feature = "trace")]
 			let object_start = stream.offset();
 			let Some(id_delta) = stream.decode_maybe::<u64>().await? else {
 				break;
 			};
-			#[cfg(feature = "trace")]
-			let object_id_current = {
-				let current = object_id;
-				object_id += 1;
-				current
-			};
-			#[cfg(feature = "trace")]
-			let mut object_event = trace::ObjectEvent {
-				timestamp_ns: trace::now_ns(),
-				session_id: None,
-				direction: trace::Direction::Rx,
-				protocol: trace::Protocol::MoqTransport,
-				track_alias: group.track_alias,
-				group_id: group.group_id,
-				object_id: object_id_current,
-				stream_id: None,
-				stream_offset_start: Some(object_start),
-				stream_offset_end: None,
-				payload_bytes: 0,
-				sample_rate: 0,
-			};
-			#[cfg(feature = "trace")]
-			{
-				trace::object_interval_start(&self.trace, &object_event);
-				trace::object_phase(
-					&self.trace,
-					trace::ObjectTracePoint::RxObjectHeaderParseStart,
-					&object_event,
-				);
-			}
+			let mut object = self.trace.object(
+				trace::ObjectContext::new(trace::Direction::Rx, group.track_alias, group.group_id, object_id)
+					.with_stream(None, object_start),
+			);
+			object_id += 1;
+			object.phase(trace::ObjectTracePoint::RxObjectHeaderParseStart);
 
 			if id_delta != 0 {
 				tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
@@ -1015,92 +986,48 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			};
 
 			let size: u64 = stream.decode().await?;
-			#[cfg(feature = "trace")]
-			{
-				object_event.payload_bytes = size;
-			}
+			object.set_payload_bytes(size);
 			if size == 0 {
 				let status: u64 = stream.decode().await?;
-				#[cfg(feature = "trace")]
-				{
-					object_event.stream_offset_end = Some(stream.offset());
-					trace::object_phase(
-						&self.trace,
-						trace::ObjectTracePoint::RxObjectHeaderParsed,
-						&object_event,
-					);
-				}
+				object.set_stream_offset_end(stream.offset());
+				object.phase(trace::ObjectTracePoint::RxObjectHeaderParsed);
 				if status == 0 {
 					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-					#[cfg(feature = "trace")]
-					{
-						trace::object_phase(&self.trace, trace::ObjectTracePoint::RxLookupStart, &object_event);
-						trace::object_phase(&self.trace, trace::ObjectTracePoint::RxObjectCreateStart, &object_event);
-					}
+					object.phase(trace::ObjectTracePoint::RxLookupStart);
+					object.phase(trace::ObjectTracePoint::RxObjectCreateStart);
 					let frame = producer.create_frame(frame::Info { size: 0, timestamp })?;
-					#[cfg(feature = "trace")]
-					{
-						trace::object_phase(&self.trace, trace::ObjectTracePoint::RxObjectCreated, &object_event);
-						trace::object_phase(&self.trace, trace::ObjectTracePoint::RxLookupDone, &object_event);
-					}
+					object.phase(trace::ObjectTracePoint::RxObjectCreated);
+					object.phase(trace::ObjectTracePoint::RxLookupDone);
 					track_stats.frame();
 					frame.finish()?;
-					#[cfg(feature = "trace")]
-					{
-						object_event.stream_offset_end = Some(stream.offset());
-						trace::object_interval_end(&self.trace, &object_event);
-					}
+					object.set_stream_offset_end(stream.offset());
+					object.finish();
 				} else if status == 3 && !group.flags.has_end {
 					break;
 				} else {
 					return Err(Error::Unsupported);
 				}
 			} else {
-				#[cfg(feature = "trace")]
-				{
-					object_event.stream_offset_end = Some(stream.offset());
-					trace::object_phase(
-						&self.trace,
-						trace::ObjectTracePoint::RxObjectHeaderParsed,
-						&object_event,
-					);
-				}
+				object.set_stream_offset_end(stream.offset());
+				object.phase(trace::ObjectTracePoint::RxObjectHeaderParsed);
 				// `create_frame` is the allocation chokepoint and rejects an oversized
 				// `size` before allocating, so no pre-check is needed.
 				let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-				#[cfg(feature = "trace")]
-				{
-					trace::object_phase(&self.trace, trace::ObjectTracePoint::RxLookupStart, &object_event);
-					trace::object_phase(&self.trace, trace::ObjectTracePoint::RxObjectCreateStart, &object_event);
-				}
+				object.phase(trace::ObjectTracePoint::RxLookupStart);
+				object.phase(trace::ObjectTracePoint::RxObjectCreateStart);
 				let mut frame = producer.create_frame(frame::Info { size, timestamp })?;
-				#[cfg(feature = "trace")]
-				{
-					trace::object_phase(&self.trace, trace::ObjectTracePoint::RxObjectCreated, &object_event);
-					trace::object_phase(&self.trace, trace::ObjectTracePoint::RxLookupDone, &object_event);
-				}
+				object.phase(trace::ObjectTracePoint::RxObjectCreated);
+				object.phase(trace::ObjectTracePoint::RxLookupDone);
 				track_stats.frame();
 
-				if let Err(err) = self
-					.run_frame(
-						stream,
-						&mut frame,
-						&track_stats,
-						#[cfg(feature = "trace")]
-						&object_event,
-					)
-					.await
-				{
+				if let Err(err) = self.run_frame(stream, &mut frame, &track_stats, &mut object).await {
 					let _ = frame.abort(err.clone());
 					return Err(err);
 				}
 
 				frame.finish()?;
-				#[cfg(feature = "trace")]
-				{
-					object_event.stream_offset_end = Some(stream.offset());
-					trace::object_interval_end(&self.trace, &object_event);
-				}
+				object.set_stream_offset_end(stream.offset());
+				object.finish();
 			}
 		}
 
@@ -1112,21 +1039,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		frame: &mut frame::Producer<'_>,
 		track_stats: &stats::SubscriberTrack,
-		#[cfg(feature = "trace")] object: &trace::ObjectEvent,
+		object: &mut trace::ObjectTrace,
 	) -> Result<(), Error> {
 		while frame.remaining() > 0 {
-			#[cfg(feature = "trace")]
-			trace::object_phase(&self.trace, trace::ObjectTracePoint::RxPayloadReadStart, object);
+			object.phase(trace::ObjectTracePoint::RxPayloadReadStart);
 			match stream.read_chunk(frame.remaining()).await? {
 				Some(chunk) if !chunk.is_empty() => {
 					track_stats.bytes(chunk.len() as u64);
 					frame.write(chunk)?;
-					#[cfg(feature = "trace")]
-					{
-						let mut object = object.clone();
-						object.stream_offset_end = Some(stream.offset());
-						trace::object_phase(&self.trace, trace::ObjectTracePoint::RxPayloadReadDone, &object);
-					}
+					object.set_stream_offset_end(stream.offset());
+					object.phase(trace::ObjectTracePoint::RxPayloadReadDone);
 				}
 				_ => return Err(Error::WrongSize),
 			}

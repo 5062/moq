@@ -181,6 +181,104 @@ pub enum ObjectTracePoint {
 	TxPayloadWriteDone,
 }
 
+/// Stable metadata known before a moq-transport object trace starts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectContext {
+	session_id: Option<u64>,
+	direction: Direction,
+	track_alias: u64,
+	group_id: u64,
+	object_id: u64,
+	stream_id: Option<u64>,
+	stream_offset_start: Option<u64>,
+	payload_bytes: u64,
+}
+
+impl ObjectContext {
+	/// Create metadata for one moq-transport object.
+	pub fn new(direction: Direction, track_alias: u64, group_id: u64, object_id: u64) -> Self {
+		Self {
+			session_id: None,
+			direction,
+			track_alias,
+			group_id,
+			object_id,
+			stream_id: None,
+			stream_offset_start: None,
+			payload_bytes: 0,
+		}
+	}
+
+	/// Attach the stable transport session identifier.
+	pub fn with_session_id(mut self, session_id: u64) -> Self {
+		self.session_id = Some(session_id);
+		self
+	}
+
+	/// Attach the transport stream identifier and starting byte offset.
+	pub fn with_stream(mut self, stream_id: Option<u64>, offset_start: u64) -> Self {
+		self.stream_id = stream_id;
+		self.stream_offset_start = Some(offset_start);
+		self
+	}
+
+	/// Attach a payload size known before tracing starts.
+	pub fn with_payload_bytes(mut self, payload_bytes: u64) -> Self {
+		self.payload_bytes = payload_bytes;
+		self
+	}
+}
+
+/// A sampled moq-transport object trace, or a zero-work disabled token.
+#[must_use = "object traces must be explicitly finished when processing completes"]
+pub struct ObjectTrace {
+	handle: Option<Handle>,
+	object: Option<ObjectEvent>,
+}
+
+impl ObjectTrace {
+	/// Return a disabled object trace token.
+	pub fn disabled() -> Self {
+		Self {
+			handle: None,
+			object: None,
+		}
+	}
+
+	/// Update the object payload size once it is known.
+	pub fn set_payload_bytes(&mut self, payload_bytes: u64) {
+		if let Some(object) = &mut self.object {
+			object.payload_bytes = payload_bytes;
+		}
+	}
+
+	/// Update the exclusive stream byte offset reached by this object.
+	pub fn set_stream_offset_end(&mut self, stream_offset_end: u64) {
+		if let Some(object) = &mut self.object {
+			object.stream_offset_end = Some(stream_offset_end);
+		}
+	}
+
+	/// Emit a processing phase boundary for this object.
+	pub fn phase(&self, point: ObjectTracePoint) {
+		let (Some(handle), Some(object)) = (&self.handle, &self.object) else {
+			return;
+		};
+		let mut object = object.clone();
+		object.timestamp_ns = now_ns();
+		handle.emit(Event::MoqObjectPhase(ObjectPhaseEvent { point, object }));
+	}
+
+	/// Finish the object interval with the latest metadata.
+	pub fn finish(mut self) {
+		let (Some(handle), Some(mut object)) = (self.handle.take(), self.object.take()) else {
+			return;
+		};
+		object.timestamp_ns = now_ns();
+		handle.emit(Event::MoqObjectEnd(object));
+	}
+}
+
 /// moq-transport object trace point fields.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ObjectPhaseEvent {
@@ -345,6 +443,32 @@ impl Handle {
 			Some(sample)
 		} else {
 			None
+		}
+	}
+
+	/// Start a moq-transport object trace after applying object sampling.
+	pub fn object(&self, context: ObjectContext) -> ObjectTrace {
+		let Some(sample_rate) = self.object_sample_rate(context.object_id) else {
+			return ObjectTrace::disabled();
+		};
+		let object = ObjectEvent {
+			timestamp_ns: now_ns(),
+			session_id: context.session_id,
+			direction: context.direction,
+			protocol: Protocol::MoqTransport,
+			track_alias: context.track_alias,
+			group_id: context.group_id,
+			object_id: context.object_id,
+			stream_id: context.stream_id,
+			stream_offset_start: context.stream_offset_start,
+			stream_offset_end: None,
+			payload_bytes: context.payload_bytes,
+			sample_rate,
+		};
+		self.emit(Event::MoqObjectStart(object.clone()));
+		ObjectTrace {
+			handle: Some(self.clone()),
+			object: Some(object),
 		}
 	}
 
@@ -658,6 +782,107 @@ mod tests {
 		assert!(!contents.contains(&u64::MAX.to_string()));
 	}
 
+	#[test]
+	fn object_trace_updates_metadata_and_emits_interval() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			..Config::disabled()
+		})
+		.unwrap();
+		let context = ObjectContext::new(Direction::Tx, 11, 12, 13)
+			.with_session_id(7)
+			.with_stream(Some(16), 100)
+			.with_payload_bytes(44);
+
+		let mut object = handle.object(context);
+		object.phase(ObjectTracePoint::TxObjectHeaderEncodeStart);
+		object.set_payload_bytes(44);
+		object.set_stream_offset_end(144);
+		object.phase(ObjectTracePoint::TxObjectHeaderEncoded);
+		object.finish();
+		drop(handle);
+
+		let contents = std::fs::read_to_string(path).unwrap();
+		let events = contents
+			.lines()
+			.map(|line| serde_json::from_str::<Event>(line).unwrap())
+			.collect::<Vec<_>>();
+		assert_eq!(events.len(), 4);
+		assert!(matches!(
+			events[0],
+			Event::MoqObjectStart(ref object) if object.payload_bytes == 44
+		));
+		assert!(matches!(
+			events[1],
+			Event::MoqObjectPhase(ObjectPhaseEvent {
+				point: ObjectTracePoint::TxObjectHeaderEncodeStart,
+				..
+			})
+		));
+		assert!(matches!(
+			events[2],
+			Event::MoqObjectPhase(ObjectPhaseEvent {
+				point: ObjectTracePoint::TxObjectHeaderEncoded,
+				ref object,
+			}) if object.payload_bytes == 44 && object.stream_offset_end == Some(144)
+		));
+		assert!(matches!(
+			events[3],
+			Event::MoqObjectEnd(ref object)
+				if object.session_id == Some(7)
+					&& object.stream_id == Some(16)
+					&& object.stream_offset_start == Some(100)
+					&& object.stream_offset_end == Some(144)
+		));
+	}
+
+	#[test]
+	fn object_trace_samples_once_before_emitting_phases() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			object_sample: 3,
+			..Config::disabled()
+		})
+		.unwrap();
+
+		for object_id in 0..3 {
+			let object = handle.object(ObjectContext::new(Direction::Rx, 11, 12, object_id));
+			object.phase(ObjectTracePoint::RxObjectHeaderParseStart);
+			object.finish();
+		}
+		drop(handle);
+
+		let contents = std::fs::read_to_string(path).unwrap();
+		let events = contents
+			.lines()
+			.map(|line| serde_json::from_str::<Event>(line).unwrap())
+			.collect::<Vec<_>>();
+		assert_eq!(events.len(), 3);
+		assert!(events.iter().all(|event| match event {
+			Event::MoqObjectStart(object) | Event::MoqObjectEnd(object) => {
+				object.object_id == 2 && object.sample_rate == 3
+			}
+			Event::MoqObjectPhase(event) => event.object.object_id == 2 && event.object.sample_rate == 3,
+			_ => false,
+		}));
+	}
+
+	#[test]
+	fn disabled_object_trace_is_noop() {
+		let handle = Handle::new(Config::disabled()).unwrap();
+		let mut object = handle.object(ObjectContext::new(Direction::Rx, 11, 12, 13));
+
+		object.phase(ObjectTracePoint::RxObjectHeaderParseStart);
+		object.set_payload_bytes(44);
+		object.set_stream_offset_end(144);
+		object.finish();
+
+		assert_eq!(handle.emitted(), 0);
+	}
 	#[test]
 	fn samples_all_events_for_every_nth_object() {
 		let dir = tempfile::tempdir().unwrap();

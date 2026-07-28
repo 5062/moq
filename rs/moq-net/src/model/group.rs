@@ -588,6 +588,29 @@ impl Consumer {
 	///
 	/// Returns None if the group is finished and the index is out of range.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+		let Some((info, source)) = ready!(self.poll_next_frame_source(waiter)?) else {
+			return Poll::Ready(Ok(None));
+		};
+		Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))))
+	}
+
+	pub(crate) fn poll_next_frame_traced(
+		&mut self,
+		waiter: &kio::Waiter,
+		trace: &crate::trace::Handle,
+		context: &crate::trace::ObjectContext,
+	) -> Poll<Result<Option<(frame::Consumer, crate::trace::ObjectTrace)>>> {
+		let Some((info, source)) = ready!(self.poll_next_frame_source(waiter)?) else {
+			return Poll::Ready(Ok(None));
+		};
+		let object = trace.object(context.clone().with_payload_bytes(info.size));
+		object.phase(crate::trace::ObjectTracePoint::TxObjectCloneStart);
+		let frame = frame::Consumer::new(self.state.clone(), info, source);
+		object.phase(crate::trace::ObjectTracePoint::TxObjectCloned);
+		Poll::Ready(Ok(Some((frame, object))))
+	}
+
+	fn poll_next_frame_source(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<(frame::Info, frame::Source)>>> {
 		// Hand out any frames a prior read_frame prefetched before touching the tail.
 		if let Some(frame) = self.prefetch.pop() {
 			self.index += 1;
@@ -595,53 +618,16 @@ impl Consumer {
 				size: frame.payload.len() as u64,
 				timestamp: frame.timestamp,
 			};
-			let source = frame::Source::Complete(frame.payload);
-			return Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))));
+			return Poll::Ready(Ok(Some((info, frame::Source::Complete(frame.payload)))));
 		}
 
 		let index = self.index;
-		let Some((info, source)) = ready!(self.poll(waiter, |state| state.poll_frame_source(index))?) else {
+		let Some(source) = ready!(self.poll(waiter, |state| state.poll_frame_source(index))?) else {
 			return Poll::Ready(Ok(None));
 		};
 
 		self.index += 1;
-		Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))))
-	}
-
-	#[cfg(feature = "trace")]
-	pub(crate) fn poll_next_frame_traced(
-		&mut self,
-		waiter: &kio::Waiter,
-		trace: &crate::trace::Handle,
-		object: &crate::trace::ObjectEvent,
-	) -> Poll<Result<Option<frame::Consumer>>> {
-		if let Some(frame) = self.prefetch.pop() {
-			self.index += 1;
-			let info = frame::Info {
-				size: frame.payload.len() as u64,
-				timestamp: frame.timestamp,
-			};
-			let source = frame::Source::Complete(frame.payload);
-			let mut object = object.clone();
-			object.payload_bytes = info.size;
-			crate::trace::object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloneStart, &object);
-			let frame = frame::Consumer::new(self.state.clone(), info, source);
-			crate::trace::object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloned, &object);
-			return Poll::Ready(Ok(Some(frame)));
-		}
-
-		let index = self.index;
-		let Some((info, source)) = ready!(self.poll(waiter, |state| state.poll_frame_source(index))?) else {
-			return Poll::Ready(Ok(None));
-		};
-
-		self.index += 1;
-		let mut object = object.clone();
-		object.payload_bytes = info.size;
-		crate::trace::object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloneStart, &object);
-		let frame = frame::Consumer::new(self.state.clone(), info, source);
-		crate::trace::object_phase(trace, crate::trace::ObjectTracePoint::TxObjectCloned, &object);
-		Poll::Ready(Ok(Some(frame)))
+		Poll::Ready(Ok(Some(source)))
 	}
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.

@@ -91,6 +91,97 @@ pub use moq_trace as trace;
 #[cfg(not(feature = "trace"))]
 /// No-op tracing types used when the `trace` feature is disabled.
 pub mod trace {
+	/// Whether an object is entering or leaving the relay.
+	#[derive(Clone, Copy)]
+	pub enum Direction {
+		/// Object is entering the relay.
+		Rx,
+		/// Object is leaving the relay.
+		Tx,
+	}
+
+	/// A named moq-transport object trace point.
+	#[derive(Clone, Copy)]
+	pub enum ObjectTracePoint {
+		/// Inbound object header parsing started.
+		RxObjectHeaderParseStart,
+		/// Inbound object header parsing completed.
+		RxObjectHeaderParsed,
+		/// Inbound model lookup started.
+		RxLookupStart,
+		/// Inbound model lookup completed.
+		RxLookupDone,
+		/// Inbound object creation started.
+		RxObjectCreateStart,
+		/// Inbound object creation completed.
+		RxObjectCreated,
+		/// Inbound payload reading started.
+		RxPayloadReadStart,
+		/// Inbound payload reading completed.
+		RxPayloadReadDone,
+		/// Outbound object cloning started.
+		TxObjectCloneStart,
+		/// Outbound object cloning completed.
+		TxObjectCloned,
+		/// Outbound object header encoding started.
+		TxObjectHeaderEncodeStart,
+		/// Outbound object header encoding completed.
+		TxObjectHeaderEncoded,
+		/// Outbound payload writing started.
+		TxPayloadWriteStart,
+		/// Outbound payload writing completed.
+		TxPayloadWriteDone,
+	}
+
+	/// No-op metadata used when the `trace` feature is disabled.
+	#[derive(Clone)]
+	pub struct ObjectContext;
+
+	impl ObjectContext {
+		/// Create no-op metadata for one object.
+		pub fn new(_direction: Direction, _track_alias: u64, _group_id: u64, _object_id: u64) -> Self {
+			Self
+		}
+
+		/// Ignore an optional session identifier.
+		pub fn with_session_id(self, _session_id: u64) -> Self {
+			self
+		}
+
+		/// Ignore an optional stream identifier and starting byte offset.
+		pub fn with_stream(self, _stream_id: Option<u64>, _offset_start: u64) -> Self {
+			self
+		}
+
+		/// Ignore a payload size known before tracing starts.
+		pub fn with_payload_bytes(self, _payload_bytes: u64) -> Self {
+			self
+		}
+	}
+
+	/// No-op object trace used when the `trace` feature is disabled.
+	#[must_use = "object traces must be explicitly finished when processing completes"]
+	pub struct ObjectTrace;
+
+	impl ObjectTrace {
+		/// Return a disabled object trace token.
+		pub fn disabled() -> Self {
+			Self
+		}
+
+		/// Ignore a payload size update.
+		pub fn set_payload_bytes(&mut self, _payload_bytes: u64) {}
+
+		/// Ignore a stream offset update.
+		pub fn set_stream_offset_end(&mut self, _stream_offset_end: u64) {}
+
+		/// Ignore an object processing phase.
+		pub fn phase(&self, _point: ObjectTracePoint) {}
+
+		/// Finish the no-op object interval.
+		pub fn finish(self) {}
+	}
+
 	/// No-op trace handle used when the `trace` feature is disabled.
 	#[derive(Clone, Default)]
 	pub struct Handle;
@@ -99,6 +190,11 @@ pub mod trace {
 		/// Return a disabled trace handle.
 		pub fn disabled() -> Self {
 			Self
+		}
+
+		/// Return a no-op trace token for one object.
+		pub fn object(&self, _context: ObjectContext) -> ObjectTrace {
+			ObjectTrace
 		}
 	}
 }

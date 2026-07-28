@@ -23,7 +23,6 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	}
 
 	/// Return the number of application stream bytes consumed by this reader.
-	#[cfg(feature = "trace")]
 	pub fn offset(&self) -> u64 {
 		self.offset
 	}
@@ -179,5 +178,15 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 			version,
 			offset: self.offset,
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[allow(dead_code)]
+	fn offset_is_available_without_trace<S: web_transport_trait::RecvStream, V>() {
+		let _: fn(&Reader<S, V>) -> u64 = Reader::offset;
 	}
 }

@@ -1,4 +1,3 @@
-#[cfg(feature = "trace")]
 use crate::trace;
 use crate::{group, origin, stats, track};
 use std::{collections::HashMap, task::Poll};
@@ -22,7 +21,6 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	origin: origin::Consumer,
 	control: Control,
 	stats: stats::Handle,
-	#[cfg(feature = "trace")]
 	trace: trace::Handle,
 	/// Per-session egress broadcast-subscription tracker. Each downstream
 	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts
@@ -37,7 +35,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		origin: origin::Consumer,
 		control: Control,
 		stats: stats::Handle,
-		#[allow(unused_variables)] trace: crate::trace::Handle,
+		trace: crate::trace::Handle,
 		version: Version,
 	) -> Self {
 		let broadcasts = stats.publisher_broadcasts();
@@ -46,7 +44,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			origin,
 			control,
 			stats,
-			#[cfg(feature = "trace")]
 			trace,
 			broadcasts,
 			version,
@@ -328,10 +325,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let priority = track.subscription().priority;
-			#[cfg(feature = "trace")]
 			let trace = self.trace.clone();
-			#[cfg(not(feature = "trace"))]
-			let trace = crate::trace::Handle;
 			tasks.push(
 				Self::run_group(
 					self.session.clone(),
@@ -353,7 +347,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		priority: u8,
 		mut group: group::Consumer,
 		track_stats: std::sync::Arc<stats::PublisherTrack>,
-		#[allow(unused_variables)] trace: crate::trace::Handle,
+		trace: crate::trace::Handle,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
@@ -363,25 +357,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		stream.encode(&msg).await?;
 		track_stats.group();
-		#[cfg(feature = "trace")]
 		let mut object_id = 0;
 
 		loop {
-			#[cfg(feature = "trace")]
-			let object_template = trace::ObjectEvent {
-				timestamp_ns: trace::now_ns(),
-				session_id: None,
-				direction: trace::Direction::Tx,
-				protocol: trace::Protocol::MoqTransport,
-				track_alias: msg.track_alias,
-				group_id: msg.group_id,
-				object_id,
-				stream_id: None,
-				stream_offset_start: Some(stream.offset()),
-				stream_offset_end: None,
-				payload_bytes: 0,
-				sample_rate: 0,
-			};
+			let context = trace::ObjectContext::new(trace::Direction::Tx, msg.track_alias, msg.group_id, object_id)
+				.with_stream(None, stream.offset());
 			// Wait for the next frame, bailing if the peer closes the stream first.
 			let frame = {
 				let mut closed = std::pin::pin!(stream.closed());
@@ -389,40 +369,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					if waiter.poll_future(closed.as_mut()).is_ready() {
 						return Poll::Ready(Err(Error::Cancel));
 					}
-					#[cfg(feature = "trace")]
-					{
-						group.poll_next_frame_traced(waiter, &trace, &object_template)
-					}
-					#[cfg(not(feature = "trace"))]
-					group.poll_next_frame(waiter)
+					group.poll_next_frame_traced(waiter, &trace, &context)
 				})
 				.await
 			};
 
-			let mut frame = match frame? {
+			let (mut frame, mut object) = match frame? {
 				Some(frame) => frame,
 				None => break,
 			};
-
-			#[cfg(feature = "trace")]
-			let mut object_event = {
-				let mut object = object_template;
-				object.payload_bytes = frame.size;
-				object
-			};
-			#[cfg(feature = "trace")]
-			{
-				object_id += 1;
-			}
-			#[cfg(feature = "trace")]
-			{
-				trace::object_interval_start(&trace, &object_event);
-				trace::object_phase(
-					&trace,
-					trace::ObjectTracePoint::TxObjectHeaderEncodeStart,
-					&object_event,
-				);
-			}
+			object_id += 1;
+			object.phase(trace::ObjectTracePoint::TxObjectHeaderEncodeStart);
 
 			// object id delta is always 0.
 			stream.encode(&0u64).await?;
@@ -442,17 +399,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			if frame.size == 0 {
 				// Have to write the object status too.
 				stream.encode(&0u8).await?;
-				#[cfg(feature = "trace")]
-				{
-					object_event.stream_offset_end = Some(stream.offset());
-					trace::object_phase(&trace, trace::ObjectTracePoint::TxObjectHeaderEncoded, &object_event);
-				}
+				object.set_stream_offset_end(stream.offset());
+				object.phase(trace::ObjectTracePoint::TxObjectHeaderEncoded);
 			} else {
-				#[cfg(feature = "trace")]
-				{
-					object_event.stream_offset_end = Some(stream.offset());
-					trace::object_phase(&trace, trace::ObjectTracePoint::TxObjectHeaderEncoded, &object_event);
-				}
+				object.set_stream_offset_end(stream.offset());
+				object.phase(trace::ObjectTracePoint::TxObjectHeaderEncoded);
 				// Stream each chunk of the frame.
 				loop {
 					let chunk = {
@@ -469,14 +420,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					match chunk? {
 						Some(chunk) => {
 							let n = chunk.len() as u64;
-							#[cfg(feature = "trace")]
-							trace::object_phase(&trace, trace::ObjectTracePoint::TxPayloadWriteStart, &object_event);
+							object.phase(trace::ObjectTracePoint::TxPayloadWriteStart);
 							stream.write_chunk(chunk).await?;
-							#[cfg(feature = "trace")]
-							{
-								object_event.stream_offset_end = Some(stream.offset());
-								trace::object_phase(&trace, trace::ObjectTracePoint::TxPayloadWriteDone, &object_event);
-							}
+							object.set_stream_offset_end(stream.offset());
+							object.phase(trace::ObjectTracePoint::TxPayloadWriteDone);
 							track_stats.bytes(n);
 						}
 						None => break,
@@ -484,11 +431,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				}
 			}
 
-			#[cfg(feature = "trace")]
-			{
-				object_event.stream_offset_end = Some(stream.offset());
-				trace::object_interval_end(&trace, &object_event);
-			}
+			object.set_stream_offset_end(stream.offset());
+			object.finish();
 		}
 
 		stream.finish()?;
