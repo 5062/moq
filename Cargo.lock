@@ -6445,7 +6445,7 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.11"
-source = "git+https://github.com/5062/quinn?rev=7d95828f86da0e8027c90251b3b0977cc445877b#7d95828f86da0e8027c90251b3b0977cc445877b"
+source = "git+https://github.com/5062/quinn?rev=9b92255a960c3705d830bbdb7e50a272859e4e5a#9b92255a960c3705d830bbdb7e50a272859e4e5a"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -6465,7 +6465,7 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.16"
-source = "git+https://github.com/5062/quinn?rev=7d95828f86da0e8027c90251b3b0977cc445877b#7d95828f86da0e8027c90251b3b0977cc445877b"
+source = "git+https://github.com/5062/quinn?rev=9b92255a960c3705d830bbdb7e50a272859e4e5a#9b92255a960c3705d830bbdb7e50a272859e4e5a"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -6490,7 +6490,7 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.5.15"
-source = "git+https://github.com/5062/quinn?rev=7d95828f86da0e8027c90251b3b0977cc445877b#7d95828f86da0e8027c90251b3b0977cc445877b"
+source = "git+https://github.com/5062/quinn?rev=9b92255a960c3705d830bbdb7e50a272859e4e5a#9b92255a960c3705d830bbdb7e50a272859e4e5a"
 dependencies = [
  "cfg_aliases",
  "libc",

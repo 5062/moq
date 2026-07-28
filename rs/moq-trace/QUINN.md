@@ -7,7 +7,7 @@ Fork:
 ```text
 https://github.com/5062/quinn
 branch: moq-trace-0.11
-rev: 7d95828f86da0e8027c90251b3b0977cc445877b
+rev: 9b92255a960c3705d830bbdb7e50a272859e4e5a
 ```
 
 Upstream base:

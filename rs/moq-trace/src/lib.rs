@@ -1,5 +1,3 @@
-//! Raw JSONL tracing for MoQ relay object and QUIC packet latency.
-
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -77,10 +75,10 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
-	/// Event was observed while reading from the peer.
-	Inbound,
-	/// Event was observed while writing to the peer.
-	Outbound,
+	/// Event was observed while receiving from the peer.
+	Rx,
+	/// Event was observed while transmitting to the peer.
+	Tx,
 }
 
 /// MoQ protocol family represented by an object event.
@@ -502,7 +500,7 @@ mod tests {
 		Event::MoqObjectEnd(ObjectEvent {
 			at_ns: 42,
 			session_id: Some(7),
-			direction: Direction::Outbound,
+			direction: Direction::Tx,
 			protocol: Protocol::MoqTransport,
 			track_alias: 11,
 			group_id: 12,
@@ -530,7 +528,7 @@ mod tests {
 			object: ObjectEvent {
 				at_ns: 42,
 				session_id: Some(7),
-				direction: Direction::Inbound,
+				direction: Direction::Rx,
 				protocol: Protocol::MoqTransport,
 				track_alias: 11,
 				group_id: 12,
@@ -558,7 +556,7 @@ mod tests {
 			packet: PacketEvent {
 				at_ns: 42,
 				session_id: Some(7),
-				direction: Direction::Inbound,
+				direction: Direction::Rx,
 				packet_number: Some(2),
 				packet_space: Some(PacketSpace::Data),
 				udp_len: Some(1200),
@@ -583,7 +581,7 @@ mod tests {
 			packet: PacketEvent {
 				at_ns: 42,
 				session_id: Some(7),
-				direction: Direction::Inbound,
+				direction: Direction::Rx,
 				packet_number: None,
 				packet_space: None,
 				udp_len: Some(1200),
@@ -606,7 +604,7 @@ mod tests {
 			packet: PacketEvent {
 				at_ns: 42,
 				session_id: Some(7),
-				direction: Direction::Outbound,
+				direction: Direction::Tx,
 				packet_number: Some(2),
 				packet_space: Some(PacketSpace::Data),
 				udp_len: None,
@@ -634,7 +632,7 @@ mod tests {
 		let object = ObjectEvent {
 			at_ns: u128::MAX,
 			session_id: Some(7),
-			direction: Direction::Outbound,
+			direction: Direction::Tx,
 			protocol: Protocol::MoqTransport,
 			track_alias: 11,
 			group_id: 12,
@@ -690,7 +688,7 @@ mod tests {
 			handle.emit(Event::PacketEnd(PacketEvent {
 				at_ns: 1,
 				session_id: Some(1),
-				direction: Direction::Outbound,
+				direction: Direction::Tx,
 				packet_number: Some(2),
 				packet_space: Some(PacketSpace::Data),
 				udp_len: Some(1200),

@@ -51,25 +51,25 @@ hosts.
 Example object event:
 
 ```json
-{"type":"moq_object_end","at_ns":123456789,"direction":"outbound","protocol":"moq_transport","track_alias":7,"group_id":42,"object_id":3,"stream_offset_start":120,"stream_offset_end":520,"payload_bytes":400,"sample_rate":1}
+{"type":"moq_object_end","at_ns":123456789,"direction":"tx","protocol":"moq_transport","track_alias":7,"group_id":42,"object_id":3,"stream_offset_start":120,"stream_offset_end":520,"payload_bytes":400,"sample_rate":1}
 ```
 
 Example object trace point event:
 
 ```json
-{"type":"moq_object_phase","point":"tx_object_header_encoded","at_ns":123456900,"direction":"outbound","protocol":"moq_transport","track_alias":7,"group_id":42,"object_id":3,"stream_offset_start":120,"stream_offset_end":144,"payload_bytes":400,"sample_rate":1}
+{"type":"moq_object_phase","point":"tx_object_header_encoded","at_ns":123456900,"direction":"tx","protocol":"moq_transport","track_alias":7,"group_id":42,"object_id":3,"stream_offset_start":120,"stream_offset_end":144,"payload_bytes":400,"sample_rate":1}
 ```
 
 Example packet event:
 
 ```json
-{"type":"quic_packet_end","at_ns":123456999,"direction":"outbound","packet_number":9901,"packet_space":"data","udp_len":1232,"stream_id":16,"stream_offset_start":120,"stream_offset_end":520,"sample_rate":1}
+{"type":"quic_packet_end","at_ns":123456999,"direction":"tx","packet_number":9901,"packet_space":"data","udp_len":1232,"stream_id":16,"stream_offset_start":120,"stream_offset_end":520,"sample_rate":1}
 ```
 
 Example packet trace point event:
 
 ```json
-{"type":"quic_packet_phase","point":"tx_packet_encrypted","at_ns":123457050,"direction":"outbound","packet_number":9901,"packet_space":"data","udp_len":1232,"sample_rate":1}
+{"type":"quic_packet_phase","point":"tx_packet_encrypted","at_ns":123457050,"direction":"tx","packet_number":9901,"packet_space":"data","udp_len":1232,"sample_rate":1}
 ```
 
 ## Event Semantics

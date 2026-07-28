@@ -331,7 +331,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			#[cfg(feature = "trace")]
 			let trace = self.trace.clone();
 			#[cfg(not(feature = "trace"))]
-			let trace = crate::trace::Handle::default();
+			let trace = crate::trace::Handle;
 			tasks.push(
 				Self::run_group(
 					self.session.clone(),
@@ -371,7 +371,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let object_template = trace::ObjectEvent {
 				at_ns: trace::now_ns(),
 				session_id: None,
-				direction: trace::Direction::Outbound,
+				direction: trace::Direction::Tx,
 				protocol: trace::Protocol::MoqTransport,
 				track_alias: msg.track_alias,
 				group_id: msg.group_id,

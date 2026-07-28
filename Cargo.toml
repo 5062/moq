@@ -137,5 +137,5 @@ strip = true
 
 [patch.crates-io]
 moq-trace = { path = "rs/moq-trace" }
-quinn = { git = "https://github.com/5062/quinn", rev = "7d95828f86da0e8027c90251b3b0977cc445877b" }
-quinn-proto = { git = "https://github.com/5062/quinn", rev = "7d95828f86da0e8027c90251b3b0977cc445877b" }
+quinn = { git = "https://github.com/5062/quinn", rev = "9b92255a960c3705d830bbdb7e50a272859e4e5a" }
+quinn-proto = { git = "https://github.com/5062/quinn", rev = "9b92255a960c3705d830bbdb7e50a272859e4e5a" }
