@@ -1,22 +1,26 @@
+//! Raw JSONL tracing for MoQ relay object and QUIC packet latency.
+
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 use std::thread::JoinHandle;
 
 use serde::{Deserialize, Serialize};
 
 /// Tracing configuration shared by MoQ and QUIC instrumentation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Config {
 	/// File path for newline-delimited JSON events. `None` keeps tracing in no-op mode.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub path: Option<PathBuf>,
-	/// Emit every Nth MoQ object event. Values below 1 are treated as 1.
+	/// Emit all events for every Nth MoQ object ID. Values below 1 are treated as 1.
 	#[serde(default = "default_sample")]
 	pub object_sample: u64,
-	/// Emit every Nth QUIC packet event. Values below 1 are treated as 1.
+	/// Emit all events for every Nth QUIC packet number. Values below 1 are treated as 1.
 	#[serde(default = "default_sample")]
 	pub packet_sample: u64,
 	/// Maximum queued events before new events are dropped.
@@ -69,6 +73,9 @@ pub enum Error {
 	/// The trace output file could not be created.
 	#[error("failed to create trace output")]
 	Create(#[source] std::io::Error),
+	/// The trace writer thread could not be spawned.
+	#[error("failed to spawn trace writer")]
+	Spawn(#[source] std::io::Error),
 }
 
 /// Trace event direction at the relay boundary.
@@ -83,6 +90,7 @@ pub enum Direction {
 
 /// MoQ protocol family represented by an object event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub enum Protocol {
 	/// IETF moq-transport object stream.
@@ -260,6 +268,7 @@ pub struct PacketPhaseEvent {
 
 /// One JSONL trace record.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
 	/// First byte of a moq-transport object was observed.
@@ -283,6 +292,22 @@ pub enum Event {
 }
 
 impl Event {
+	fn object_id(&self) -> Option<u64> {
+		match self {
+			Self::MoqObjectStart(event) | Self::MoqObjectEnd(event) => Some(event.object_id),
+			Self::MoqObjectPhase(event) => Some(event.object.object_id),
+			_ => None,
+		}
+	}
+
+	fn packet_number(&self) -> Option<u64> {
+		match self {
+			Self::PacketStart(event) | Self::PacketEnd(event) => event.packet_number,
+			Self::PacketPhase(event) => event.packet.packet_number,
+			_ => None,
+		}
+	}
+
 	fn set_sample_rate(&mut self, sample_rate: u64) {
 		match self {
 			Self::MoqObjectStart(event) | Self::MoqObjectEnd(event) => event.sample_rate = sample_rate,
@@ -295,23 +320,35 @@ impl Event {
 
 /// Emit the canonical moq-transport object interval start event.
 pub fn object_interval_start(handle: &Handle, object: &ObjectEvent) -> bool {
+	let Some(sample_rate) = handle.object_sample_rate(object.object_id) else {
+		return false;
+	};
 	let mut object = object.clone();
 	object.at_ns = now_ns();
-	handle.emit_object(Event::MoqObjectStart(object))
+	object.sample_rate = sample_rate;
+	handle.emit(Event::MoqObjectStart(object))
 }
 
 /// Emit the canonical moq-transport object interval end event.
 pub fn object_interval_end(handle: &Handle, object: &ObjectEvent) -> bool {
+	let Some(sample_rate) = handle.object_sample_rate(object.object_id) else {
+		return false;
+	};
 	let mut object = object.clone();
 	object.at_ns = now_ns();
-	handle.emit_object(Event::MoqObjectEnd(object))
+	object.sample_rate = sample_rate;
+	handle.emit(Event::MoqObjectEnd(object))
 }
 
 /// Emit a moq-transport object phase event.
 pub fn object_phase(handle: &Handle, point: ObjectTracePoint, object: &ObjectEvent) -> bool {
+	let Some(sample_rate) = handle.object_sample_rate(object.object_id) else {
+		return false;
+	};
 	let mut object = object.clone();
 	object.at_ns = now_ns();
-	handle.emit_object(Event::MoqObjectPhase(ObjectPhaseEvent { point, object }))
+	object.sample_rate = sample_rate;
+	handle.emit(Event::MoqObjectPhase(ObjectPhaseEvent { point, object }))
 }
 
 /// A cheap cloneable handle used by instrumentation sites to emit trace events.
@@ -322,12 +359,12 @@ pub struct Handle {
 
 struct Inner {
 	config: Config,
-	sender: Mutex<Option<std::sync::mpsc::SyncSender<Event>>>,
-	writer: Mutex<Option<JoinHandle<()>>>,
-	object_seen: AtomicU64,
+	sender: Option<std::sync::mpsc::SyncSender<Event>>,
+	writer: Option<JoinHandle<()>>,
 	packet_seen: AtomicU64,
 	emitted: AtomicU64,
 	dropped: AtomicU64,
+	writer_failed: Arc<AtomicBool>,
 }
 
 impl Handle {
@@ -335,22 +372,35 @@ impl Handle {
 	pub fn new(config: Config) -> Result<Self, Error> {
 		let config = config.normalized();
 		let Some(path) = config.path.clone() else {
-			return Ok(Self {
-				inner: Some(Arc::new(Inner::new(config, None, None))),
-			});
+			return Ok(Self::disabled());
 		};
 
 		let file = File::create(path).map_err(Error::Create)?;
 		let (sender, receiver) = std::sync::mpsc::sync_channel(config.queue_capacity);
-		let writer = std::thread::spawn(move || write_events(file, receiver));
+		let writer_failed = Arc::new(AtomicBool::new(false));
+		let writer_status = writer_failed.clone();
+		let writer = std::thread::Builder::new()
+			.name("moq-trace-writer".into())
+			.spawn(move || write_events(file, receiver, writer_status))
+			.map_err(Error::Spawn)?;
 		Ok(Self {
-			inner: Some(Arc::new(Inner::new(config, Some(sender), Some(writer)))),
+			inner: Some(Arc::new(Inner::new(config, Some(sender), Some(writer), writer_failed))),
 		})
 	}
 
 	/// Return a disabled handle.
 	pub fn disabled() -> Self {
 		Self::default()
+	}
+
+	fn object_sample_rate(&self, object_id: u64) -> Option<u64> {
+		let inner = self.inner.as_ref()?;
+		let sample = inner.config.object_sample;
+		if object_id % sample == sample - 1 {
+			Some(sample)
+		} else {
+			None
+		}
 	}
 
 	/// Emit an event without applying object or packet sampling.
@@ -361,28 +411,36 @@ impl Handle {
 		inner.emit(event)
 	}
 
-	/// Emit a MoQ object event after applying object sampling.
+	/// Emit a MoQ object event after sampling by object ID.
 	pub fn emit_object(&self, mut event: Event) -> bool {
 		let Some(inner) = &self.inner else {
 			return false;
 		};
+		let Some(object_id) = event.object_id() else {
+			return false;
+		};
 		let sample = inner.config.object_sample;
-		let seen = inner.object_seen.fetch_add(1, Ordering::Relaxed) + 1;
-		if seen % sample != 0 {
+		if object_id % sample != sample - 1 {
 			return false;
 		}
 		event.set_sample_rate(sample);
 		inner.emit(event)
 	}
 
-	/// Emit a QUIC packet event after applying packet sampling.
+	/// Emit a QUIC packet event after sampling by packet number or event order when unnumbered.
 	pub fn emit_packet(&self, mut event: Event) -> bool {
 		let Some(inner) = &self.inner else {
 			return false;
 		};
 		let sample = inner.config.packet_sample;
-		let seen = inner.packet_seen.fetch_add(1, Ordering::Relaxed) + 1;
-		if seen % sample != 0 {
+		let sampled = event
+			.packet_number()
+			.map(|number| number % sample == sample - 1)
+			.unwrap_or_else(|| {
+				let seen = inner.packet_seen.fetch_add(1, Ordering::Relaxed);
+				seen % sample == sample - 1
+			});
+		if !sampled {
 			return false;
 		}
 		event.set_sample_rate(sample);
@@ -404,25 +462,37 @@ impl Handle {
 			.map(|inner| inner.dropped.load(Ordering::Relaxed))
 			.unwrap_or_default()
 	}
+
+	/// Whether the background writer encountered a terminal error.
+	pub fn writer_failed(&self) -> bool {
+		self.inner
+			.as_ref()
+			.map(|inner| inner.writer_failed.load(Ordering::Relaxed))
+			.unwrap_or_default()
+	}
 }
 
 impl Inner {
-	fn new(config: Config, sender: Option<std::sync::mpsc::SyncSender<Event>>, writer: Option<JoinHandle<()>>) -> Self {
+	fn new(
+		config: Config,
+		sender: Option<std::sync::mpsc::SyncSender<Event>>,
+		writer: Option<JoinHandle<()>>,
+		writer_failed: Arc<AtomicBool>,
+	) -> Self {
 		Self {
 			config,
-			sender: Mutex::new(sender),
-			writer: Mutex::new(writer),
-			object_seen: AtomicU64::new(0),
+			sender,
+			writer,
 			packet_seen: AtomicU64::new(0),
 			emitted: AtomicU64::new(0),
 			dropped: AtomicU64::new(0),
+			writer_failed,
 		}
 	}
 
 	fn emit(&self, event: Event) -> bool {
-		let Some(sender) = self.sender.lock().expect("trace sender poisoned").as_ref().cloned() else {
-			self.emitted.fetch_add(1, Ordering::Relaxed);
-			return true;
+		let Some(sender) = self.sender.as_ref() else {
+			return false;
 		};
 
 		match sender.try_send(event) {
@@ -430,8 +500,13 @@ impl Inner {
 				self.emitted.fetch_add(1, Ordering::Relaxed);
 				true
 			}
-			Err(_) => {
+			Err(std::sync::mpsc::TrySendError::Full(_)) => {
 				self.dropped.fetch_add(1, Ordering::Relaxed);
+				false
+			}
+			Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+				self.dropped.fetch_add(1, Ordering::Relaxed);
+				self.writer_failed.store(true, Ordering::Relaxed);
 				false
 			}
 		}
@@ -440,43 +515,51 @@ impl Inner {
 
 impl Drop for Inner {
 	fn drop(&mut self) {
-		self.sender.lock().expect("trace sender poisoned").take();
-		if let Some(writer) = self.writer.lock().expect("trace writer poisoned").take() {
+		self.sender.take();
+		if let Some(writer) = self.writer.take() {
 			let _ = writer.join();
 		}
 	}
 }
 
-fn write_events(file: File, receiver: std::sync::mpsc::Receiver<Event>) {
-	let mut file = BufWriter::new(file);
+fn write_events<W: Write>(writer: W, receiver: std::sync::mpsc::Receiver<Event>, failed: Arc<AtomicBool>) {
+	let mut writer = BufWriter::new(writer);
 	for event in receiver {
-		if serde_json::to_writer(&mut file, &event).is_err() {
+		if serde_json::to_writer(&mut writer, &event).is_err() {
+			failed.store(true, Ordering::Relaxed);
 			break;
 		}
-		if file.write_all(b"\n").is_err() {
+		if writer.write_all(b"\n").is_err() {
+			failed.store(true, Ordering::Relaxed);
 			break;
 		}
 	}
-	let _ = file.flush();
+	if writer.flush().is_err() {
+		failed.store(true, Ordering::Relaxed);
+	}
 }
 
-static GLOBAL: OnceLock<Mutex<Handle>> = OnceLock::new();
+static GLOBAL: OnceLock<RwLock<Weak<Inner>>> = OnceLock::new();
 
 /// Replace the process-global trace handle used by vendored QUIC hooks.
+///
+/// The registry does not extend the handle lifetime, so the caller must retain a clone.
 pub fn set_global(handle: Handle) {
+	let inner = handle.inner.as_ref().map(Arc::downgrade).unwrap_or_default();
 	*GLOBAL
-		.get_or_init(|| Mutex::new(Handle::disabled()))
-		.lock()
-		.expect("trace global poisoned") = handle;
+		.get_or_init(|| RwLock::new(Weak::new()))
+		.write()
+		.expect("trace global poisoned") = inner;
 }
 
 /// Return the process-global trace handle used by vendored QUIC hooks.
 pub fn global() -> Handle {
-	GLOBAL
-		.get_or_init(|| Mutex::new(Handle::disabled()))
-		.lock()
+	let inner = GLOBAL
+		.get_or_init(|| RwLock::new(Weak::new()))
+		.read()
 		.expect("trace global poisoned")
-		.clone()
+		.upgrade();
+	Handle { inner }
 }
 
 /// Clear the process-global trace handle.
@@ -492,7 +575,7 @@ pub fn now_ns() -> u128 {
 
 #[cfg(test)]
 mod tests {
-	use std::time::Duration;
+	use std::io;
 
 	use super::*;
 
@@ -511,6 +594,13 @@ mod tests {
 			payload_bytes: 44,
 			sample_rate: 1,
 		})
+	}
+
+	#[test]
+	fn config_rejects_unknown_fields() {
+		let error = serde_json::from_str::<Config>(r#"{"unexpected":true}"#).unwrap_err();
+
+		assert!(error.to_string().contains("unknown field `unexpected`"));
 	}
 
 	#[test]
@@ -658,51 +748,148 @@ mod tests {
 	}
 
 	#[test]
-	fn samples_every_n_events_and_records_rate() {
+	fn samples_all_events_for_every_nth_object() {
+		let dir = tempfile::tempdir().unwrap();
 		let handle = Handle::new(Config {
+			path: Some(dir.path().join("trace.jsonl")),
 			object_sample: 3,
 			..Config::disabled()
 		})
 		.unwrap();
 
-		let event = object_event();
-		assert!(!handle.emit_object(event.clone()));
-		assert!(!handle.emit_object(event.clone()));
-		assert!(handle.emit_object(event));
-		assert_eq!(handle.emitted(), 1);
+		let mut skipped = object_event();
+		if let Event::MoqObjectEnd(object) = &mut skipped {
+			object.object_id = 0;
+		}
+
+		assert!(!handle.emit_object(skipped.clone()));
+		assert!(!handle.emit_object(skipped.clone()));
+		assert!(!handle.emit_object(skipped));
+
+		let mut sampled = object_event();
+		if let Event::MoqObjectEnd(object) = &mut sampled {
+			object.object_id = 2;
+		}
+
+		assert!(handle.emit_object(sampled.clone()));
+		assert!(handle.emit_object(sampled.clone()));
+		assert!(handle.emit_object(sampled));
+		assert_eq!(handle.emitted(), 3);
+	}
+
+	#[test]
+	fn config_without_path_is_disabled() {
+		let handle = Handle::new(Config::disabled()).unwrap();
+
+		assert!(!handle.emit(object_event()));
+		assert_eq!(handle.emitted(), 0);
+		assert_eq!(handle.dropped(), 0);
+	}
+
+	#[test]
+	fn global_handle_does_not_keep_writer_alive() {
+		clear_global();
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			..Config::disabled()
+		})
+		.unwrap();
+		set_global(handle.clone());
+
+		assert!(global().emit(object_event()));
+		drop(handle);
+
+		assert!(!global().emit(object_event()));
+		let contents = std::fs::read_to_string(path).unwrap();
+		assert!(contents.contains(r#""type":"moq_object_end""#));
+	}
+
+	#[test]
+	fn samples_all_events_for_every_nth_numbered_packet() {
+		let dir = tempfile::tempdir().unwrap();
+		let handle = Handle::new(Config {
+			path: Some(dir.path().join("trace.jsonl")),
+			packet_sample: 3,
+			..Config::disabled()
+		})
+		.unwrap();
+		let packet = PacketEvent {
+			at_ns: 1,
+			session_id: Some(1),
+			direction: Direction::Tx,
+			packet_number: Some(0),
+			packet_space: Some(PacketSpace::Data),
+			udp_len: Some(1200),
+			stream_id: Some(0),
+			stream_offset_start: Some(0),
+			stream_offset_end: Some(10),
+			sample_rate: 0,
+		};
+
+		assert!(!handle.emit_packet(Event::PacketStart(packet.clone())));
+		assert!(!handle.emit_packet(Event::PacketPhase(PacketPhaseEvent {
+			point: PacketTracePoint::TxPacketEncoded,
+			packet: packet.clone(),
+		})));
+		assert!(!handle.emit_packet(Event::PacketEnd(packet.clone())));
+
+		let mut packet = packet;
+		packet.packet_number = Some(2);
+
+		assert!(handle.emit_packet(Event::PacketStart(packet.clone())));
+		assert!(handle.emit_packet(Event::PacketPhase(PacketPhaseEvent {
+			point: PacketTracePoint::TxPacketEncoded,
+			packet: packet.clone(),
+		})));
+		assert!(handle.emit_packet(Event::PacketEnd(packet)));
+		assert_eq!(handle.emitted(), 3);
+	}
+
+	struct FailingWriter;
+
+	impl Write for FailingWriter {
+		fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+			Err(io::Error::other("expected test failure"))
+		}
+
+		fn flush(&mut self) -> io::Result<()> {
+			Ok(())
+		}
+	}
+
+	#[test]
+	fn records_writer_failure() {
+		let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+		sender.send(object_event()).unwrap();
+		drop(sender);
+
+		write_events(FailingWriter, receiver, failed.clone());
+		let handle = Handle {
+			inner: Some(Arc::new(Inner::new(Config::default(), None, None, failed))),
+		};
+		assert!(handle.writer_failed());
 	}
 
 	#[test]
 	fn drops_when_queue_is_full() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path),
-			queue_capacity: 1,
-			..Config::disabled()
-		})
-		.unwrap();
+		let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+		let handle = Handle {
+			inner: Some(Arc::new(Inner::new(
+				Config::default(),
+				Some(sender),
+				None,
+				Arc::new(AtomicBool::new(false)),
+			))),
+		};
 
-		let mut saw_drop = false;
-		for _ in 0..1000 {
-			handle.emit(Event::PacketEnd(PacketEvent {
-				at_ns: 1,
-				session_id: Some(1),
-				direction: Direction::Tx,
-				packet_number: Some(2),
-				packet_space: Some(PacketSpace::Data),
-				udp_len: Some(1200),
-				stream_id: Some(0),
-				stream_offset_start: Some(0),
-				stream_offset_end: Some(10),
-				sample_rate: 1,
-			}));
-			if handle.dropped() > 0 {
-				saw_drop = true;
-				break;
-			}
-		}
-		assert!(saw_drop);
+		assert!(handle.emit(object_event()));
+		assert!(!handle.emit(object_event()));
+		assert_eq!(handle.dropped(), 1);
+		drop(handle);
+		drop(receiver);
 	}
 
 	#[test]
@@ -718,14 +905,7 @@ mod tests {
 			assert!(handle.emit(object_event()));
 		}
 
-		let deadline = std::time::Instant::now() + Duration::from_secs(2);
-		let contents = loop {
-			let contents = std::fs::read_to_string(&path).unwrap_or_default();
-			if contents.contains(r#""type":"moq_object_end""#) || std::time::Instant::now() >= deadline {
-				break contents;
-			}
-			std::thread::sleep(Duration::from_millis(10));
-		};
+		let contents = std::fs::read_to_string(&path).unwrap();
 		assert!(contents.contains(r#""type":"moq_object_end""#));
 	}
 }

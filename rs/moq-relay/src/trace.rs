@@ -18,11 +18,11 @@ pub struct TraceConfig {
 	#[arg(long = "trace-path", env = "MOQ_TRACE_PATH")]
 	pub path: Option<PathBuf>,
 
-	/// Emit every Nth moq-transport object event. Defaults to 1.
+	/// Emit all events for every Nth moq-transport object ID. Defaults to 1.
 	#[arg(long = "trace-object-sample", env = "MOQ_TRACE_OBJECT_SAMPLE")]
 	pub object_sample: Option<u64>,
 
-	/// Emit every Nth QUIC packet event. Defaults to 1.
+	/// Emit all events for every Nth QUIC packet number. Defaults to 1.
 	#[arg(long = "trace-packet-sample", env = "MOQ_TRACE_PACKET_SAMPLE")]
 	pub packet_sample: Option<u64>,
 
@@ -41,12 +41,11 @@ impl TraceConfig {
 			return Ok(handle);
 		};
 
-		let config = moq_trace::Config {
-			path: Some(path.clone()),
-			object_sample: self.object_sample.unwrap_or(1).max(1),
-			packet_sample: self.packet_sample.unwrap_or(1).max(1),
-			queue_capacity: self.queue_capacity.unwrap_or(4096).max(1),
-		};
+		let mut config = moq_trace::Config::default();
+		config.path = Some(path.clone());
+		config.object_sample = self.object_sample.unwrap_or(1).max(1);
+		config.packet_sample = self.packet_sample.unwrap_or(1).max(1);
+		config.queue_capacity = self.queue_capacity.unwrap_or(4096).max(1);
 		let handle = moq_net::trace::Handle::new(config)?;
 		moq_trace::set_global(handle.clone());
 		tracing::info!(path = %path.display(), object_sample = self.object_sample.unwrap_or(1).max(1), packet_sample = self.packet_sample.unwrap_or(1).max(1), "raw trace enabled");

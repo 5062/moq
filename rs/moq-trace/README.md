@@ -158,12 +158,17 @@ overlapping stream byte ranges.
 
 ## Sampling And Backpressure
 
-`object_sample` and `packet_sample` emit every Nth event for their layer. Emitted
-events include the active `sample_rate`.
+`object_sample` retains every event for each Nth object ID, so the selected
+object's start, phase, and end records remain correlated. `packet_sample` does
+the same for each Nth packet number. Packet events without a packet number,
+such as socket-scoped trace points, are sampled individually by event order.
+Emitted events include the active `sample_rate`.
 
 Events are sent to a bounded queue and written by a background thread. When the
 queue is full or closed, new events are dropped and counted by `Handle::dropped`.
-Instrumentation paths never block on disk I/O.
+Instrumentation paths never block on disk I/O. `Handle::writer_failed` reports
+whether the background writer encountered a terminal serialization or I/O
+error.
 
 ## Quinn Patch
 
