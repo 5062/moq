@@ -130,7 +130,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		origin: origin::Producer,
 		control: Control,
 		stats: stats::Handle,
-		#[cfg(feature = "trace")] trace: trace::Handle,
+		#[allow(unused_variables)] trace: crate::trace::Handle,
 		version: Version,
 		tasks: Tasks,
 	) -> Self {

@@ -22,7 +22,7 @@ pub fn start<S: web_transport_trait::Session>(
 	// Tier-scoped stats handle. Pass [`crate::stats::Handle::default`] to opt out.
 	stats: crate::stats::Handle,
 	// Trace handle. Pass [`crate::trace::Handle::default`] to opt out.
-	_trace: crate::trace::Handle,
+	#[allow(unused_variables)] trace: crate::trace::Handle,
 	version: Version,
 	// The request path we advertise in our SETUP (draft-17+ clients on URL-less
 	// transports). A server passes `None`.
@@ -32,9 +32,6 @@ pub fn start<S: web_transport_trait::Session>(
 	// GOAWAY channel; `None` lets the uni loop read the SETUP itself.
 	peer_setup: Option<Reader<S::RecvStream, crate::Version>>,
 ) -> Result<MaybeSendBox<'static, Result<(), Error>>, Error> {
-	#[cfg(feature = "trace")]
-	let trace = _trace;
-
 	let driver = async move {
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
@@ -56,21 +53,11 @@ pub fn start<S: web_transport_trait::Session>(
 					publish,
 					control.clone(),
 					stats.clone(),
-					#[cfg(feature = "trace")]
 					trace.clone(),
 					version,
 				);
 				let (tasks, mut task_set) = TaskSet::new();
-				let subscriber = Subscriber::new(
-					adapter.clone(),
-					subscribe,
-					control,
-					stats,
-					#[cfg(feature = "trace")]
-					trace,
-					version,
-					tasks,
-				);
+				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, stats, trace, version, tasks);
 
 				let dispatch_session = adapter.clone();
 				let mut sub_ns = subscriber.clone();
@@ -146,21 +133,11 @@ pub fn start<S: web_transport_trait::Session>(
 					publish,
 					control.clone(),
 					stats.clone(),
-					#[cfg(feature = "trace")]
 					trace.clone(),
 					version,
 				);
 				let (tasks, mut task_set) = TaskSet::new();
-				let subscriber = Subscriber::new(
-					session.clone(),
-					subscribe,
-					control,
-					stats,
-					#[cfg(feature = "trace")]
-					trace,
-					version,
-					tasks,
-				);
+				let subscriber = Subscriber::new(session.clone(), subscribe, control, stats, trace, version, tasks);
 
 				let sub_ns_session = session.clone();
 				let mut sub_ns = subscriber.clone();

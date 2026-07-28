@@ -37,7 +37,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		origin: origin::Consumer,
 		control: Control,
 		stats: stats::Handle,
-		#[cfg(feature = "trace")] trace: trace::Handle,
+		#[allow(unused_variables)] trace: crate::trace::Handle,
 		version: Version,
 	) -> Self {
 		let broadcasts = stats.publisher_broadcasts();
@@ -328,6 +328,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let priority = track.subscription().priority;
+			#[cfg(feature = "trace")]
+			let trace = self.trace.clone();
+			#[cfg(not(feature = "trace"))]
+			let trace = crate::trace::Handle::default();
 			tasks.push(
 				Self::run_group(
 					self.session.clone(),
@@ -335,8 +339,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					priority,
 					group,
 					track_stats.clone(),
-					#[cfg(feature = "trace")]
-					self.trace.clone(),
+					trace,
 					self.version,
 				)
 				.map(|_| ()),
@@ -350,7 +353,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		priority: u8,
 		mut group: group::Consumer,
 		track_stats: std::sync::Arc<stats::PublisherTrack>,
-		#[cfg(feature = "trace")] trace: trace::Handle,
+		#[allow(unused_variables)] trace: crate::trace::Handle,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
