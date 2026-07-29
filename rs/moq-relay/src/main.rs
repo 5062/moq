@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
 	let stats = config.stats.build(cluster.origin.clone());
 	let trace = config.trace.build()?;
 	let cluster = cluster.with_stats(stats.registry().clone()).with_trace(trace.clone());
-	let server = server.with_trace(trace);
+	let server = server.with_trace(trace.clone());
 
 	// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 	// /metrics + /health, separate from the customer-facing web server. No-op
@@ -89,14 +89,49 @@ async fn main() -> anyhow::Result<()> {
 	#[cfg(not(feature = "jemalloc"))]
 	let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
-	tokio::select! {
-		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),
-		Err(err) = web.run() => return Err(err).context("web server failed"),
-		Err(err) = internal.run() => return Err(err).context("internal server failed"),
-		Err(err) = serve(server, cluster, auth) => return Err(err).context("server failed"),
-		Err(err) = jemalloc => return Err(err).context("jemalloc profiler failed"),
-		else => Ok(()),
+	let server_run = async {
+		tokio::select! {
+			Err(err) = cluster.clone().run() => Err(err).context("cluster failed"),
+			Err(err) = web.run() => Err(err).context("web server failed"),
+			Err(err) = internal.run() => Err(err).context("internal server failed"),
+			Err(err) = serve(server, cluster, auth) => Err(err).context("server failed"),
+			Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
+			else => Ok(()),
+		}
+	};
+	let shutdown = async {
+		if let Err(err) = tokio::signal::ctrl_c().await {
+			tracing::warn!(%err, "failed to listen for interrupt");
+		}
+	};
+	run_until_shutdown(trace, server_run, shutdown).await
+}
+
+fn flush_trace(trace: &moq_net::trace::Handle) -> bool {
+	#[cfg(feature = "trace")]
+	{
+		trace.flush()
 	}
+	#[cfg(not(feature = "trace"))]
+	{
+		let _ = trace;
+		true
+	}
+}
+
+async fn run_until_shutdown<F, S>(trace: moq_net::trace::Handle, server: F, shutdown: S) -> anyhow::Result<()>
+where
+	F: std::future::Future<Output = anyhow::Result<()>>,
+	S: std::future::Future<Output = ()>,
+{
+	tokio::pin!(server);
+	tokio::pin!(shutdown);
+	let result = tokio::select! {
+		result = &mut server => result,
+		() = &mut shutdown => Ok(()),
+	};
+	anyhow::ensure!(flush_trace(&trace), "failed to flush relay trace");
+	result
 }
 
 async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> anyhow::Result<()> {
@@ -119,4 +154,35 @@ async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> 
 	}
 
 	anyhow::bail!("stopped accepting connections")
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn shutdown_flushes_trace_writer() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let mut config = moq_trace::Config::default();
+		config.path = Some(path.clone());
+		let trace = moq_trace::Handle::new(config).unwrap();
+		let object = trace.object(moq_trace::ObjectContext::new(
+			moq_trace::Direction::Tx,
+			moq_trace::ObjectIdentity::new(1, 2, 3),
+		));
+		object.finish();
+
+		run_until_shutdown(
+			trace,
+			std::future::pending::<anyhow::Result<()>>(),
+			std::future::ready(()),
+		)
+		.await
+		.unwrap();
+
+		let output = std::fs::read_to_string(path).unwrap();
+		assert_eq!(output.lines().count(), 2);
+		assert!(output.ends_with('\n'));
+	}
 }

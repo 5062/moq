@@ -209,7 +209,11 @@ async fn produce(
 				.unwrap_or_default()
 				.as_millis(),
 		};
-		let header = Bytes::from(serde_json::to_vec(&header)?);
+		let mut header = serde_json::to_vec(&header)?;
+		if rolled.group_size == 0 && header.len() < rolled.frame_size as usize {
+			header.resize(rolled.frame_size as usize, b' ');
+		}
+		let header = Bytes::from(header);
 		group.write_frame(moq_net::Timestamp::now(), header.clone())?;
 		stats.frame_sent(header.len());
 
@@ -460,14 +464,24 @@ mod tests {
 		let track = broadcast.create_track(TRACK, None).unwrap();
 		let consumer = broadcast.consume();
 
-		let task = tokio::spawn(produce(0, "bench/test".into(), rolled(10, 4, 0), track, stats.clone()));
+		let task = tokio::spawn(produce(
+			0,
+			"bench/test".into(),
+			rolled(10, 1024, 0),
+			track,
+			stats.clone(),
+		));
 		tokio::time::advance(Duration::from_millis(250)).await;
 
 		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap();
 		let mut group = sub.next_group().await.unwrap().expect("a group");
 
-		// Just the keyframe, then the group ends.
-		assert!(group.read_frame().await.unwrap().is_some(), "keyframe");
+		// Just one frame of the requested size, containing JSON plus trailing whitespace.
+		let keyframe = group.read_frame().await.unwrap().expect("keyframe");
+		assert_eq!(keyframe.payload.len(), 1024);
+		let header: serde_json::Value = serde_json::from_slice(&keyframe.payload).unwrap();
+		assert_eq!(header["group_size"], 0);
+		assert_eq!(header["frame_size"], 1024);
 		assert!(group.read_frame().await.unwrap().is_none(), "no payload frames");
 
 		task.abort();

@@ -144,7 +144,15 @@
         # Python dependencies
         pyDeps = with pkgs; [
           uv
-          python3
+          (python3.withPackages (
+            pythonPackages: with pythonPackages; [
+              matplotlib
+              numpy
+              pandas
+              pydantic
+              typer
+            ]
+          ))
         ];
 
         # CDN/deployment dependencies
