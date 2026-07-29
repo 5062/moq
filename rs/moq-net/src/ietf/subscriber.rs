@@ -996,11 +996,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				object.phase(trace::ObjectTracePoint::RxObjectHeaderParsed);
 				if status == 0 {
 					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-					object.phase(trace::ObjectTracePoint::RxLookupStart);
 					object.phase(trace::ObjectTracePoint::RxObjectCreateStart);
 					let frame = producer.create_frame(frame::Info { size: 0, timestamp })?;
 					object.phase(trace::ObjectTracePoint::RxObjectCreated);
-					object.phase(trace::ObjectTracePoint::RxLookupDone);
 					track_stats.frame();
 					frame.finish()?;
 					object.set_stream_offset_end(stream.offset());
@@ -1016,11 +1014,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				// `create_frame` is the allocation chokepoint and rejects an oversized
 				// `size` before allocating, so no pre-check is needed.
 				let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-				object.phase(trace::ObjectTracePoint::RxLookupStart);
 				object.phase(trace::ObjectTracePoint::RxObjectCreateStart);
 				let mut frame = producer.create_frame(frame::Info { size, timestamp })?;
 				object.phase(trace::ObjectTracePoint::RxObjectCreated);
-				object.phase(trace::ObjectTracePoint::RxLookupDone);
 				track_stats.frame();
 
 				if let Err(err) = self.run_frame(stream, &mut frame, &track_stats, &mut object).await {

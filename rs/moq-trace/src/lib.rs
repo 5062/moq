@@ -155,10 +155,6 @@ pub enum ObjectTracePoint {
 	RxObjectHeaderParseStart,
 	/// Inbound object header parsing completed.
 	RxObjectHeaderParsed,
-	/// Inbound object model lookup started.
-	RxLookupStart,
-	/// Inbound object model lookup completed.
-	RxLookupDone,
 	/// Inbound object creation started.
 	RxObjectCreateStart,
 	/// Inbound object creation completed.

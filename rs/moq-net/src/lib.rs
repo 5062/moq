@@ -107,10 +107,6 @@ pub mod trace {
 		RxObjectHeaderParseStart,
 		/// Inbound object header parsing completed.
 		RxObjectHeaderParsed,
-		/// Inbound model lookup started.
-		RxLookupStart,
-		/// Inbound model lookup completed.
-		RxLookupDone,
 		/// Inbound object creation started.
 		RxObjectCreateStart,
 		/// Inbound object creation completed.
