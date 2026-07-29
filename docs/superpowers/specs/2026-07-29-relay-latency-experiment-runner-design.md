@@ -112,11 +112,12 @@ outbound trace per configured subscriber.
 
 Object events do not currently carry a stable subscriber session identity. The
 analyzer therefore treats the outbound traces for a logical object as an
-unordered set of forwarded copies. It records a deterministic copy ordinal
-after sorting those traces by start timestamp, but the ordinal is scoped to one
-logical object and is not presented as a stable subscriber identity.
+unordered set of forwarded copies. It records deterministic copy ordinals after sorting each boundary type by
+timestamp. An ordinal is scoped to one logical object and one metric boundary; it
+is not joined across metrics or presented as a stable subscriber identity.
 
-For each outbound copy of a matched object, the runner records:
+For each outbound boundary of a matched object, the runner records independent
+long-form metric samples:
 
 - forwarding start delay: inbound object start to outbound object start;
 - model handoff delay: inbound create completion to outbound clone start;
