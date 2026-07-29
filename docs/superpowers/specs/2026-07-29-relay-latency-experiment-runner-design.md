@@ -3,11 +3,11 @@
 ## Goal
 
 Provide a reproducible Python runner that builds and launches a local MoQ relay,
-one publisher, and one subscriber; optionally pins the relay to one logical CPU;
-collects relay trace data; computes latency statistics; and writes a Matplotlib
+one publisher, and one or more subscribers; optionally pins the relay to one
+logical CPU; collects relay trace data; computes latency statistics; and writes a Matplotlib
 report.
 
-The default workload is:
+The workload is configurable. Its defaults are:
 
 - one publisher;
 - one subscriber;
@@ -56,6 +56,7 @@ unpinned so they do not consume the measured relay CPU deliberately.
 The command line will expose:
 
 - `--relay-cpu`;
+- `--subscribers`;
 - `--duration`;
 - `--warmup`;
 - `--cooldown`;
@@ -74,7 +75,10 @@ allow analysis against custom local builds without changing the script.
 
 The runner will validate that Linux CPU affinity is available when
 `--relay-cpu` is set, that the selected CPU belongs to the process's allowed
-affinity set, and that both binaries accept `moq-transport-19`.
+affinity set, and that both binaries accept `moq-transport-19`. Subscriber
+count, object size, and fps must all be positive integers. The subscriber
+process uses one `moq-bench` connection per requested subscriber, with every
+connection subscribing to the publisher's broadcast.
 
 ## Process lifecycle
 
@@ -85,7 +89,7 @@ The runner will:
 3. launch the relay with full object, packet, and socket tracing;
 4. wait until the relay log reports that it is listening;
 5. launch the publisher and wait until its log reports a connection;
-6. launch the subscriber;
+6. launch the subscriber process with the configured connection count;
 7. wait for the configured benchmark duration;
 8. verify successful publisher and subscriber exit statuses;
 9. send the relay an interrupt and wait for graceful trace flushing;
@@ -100,22 +104,31 @@ the relay's negotiated-version log before analyzing results.
 
 ## Data analysis
 
-The experiment is intentionally limited to one publisher, one subscriber, and
-one track. Completed inbound and outbound objects are matched by group ID and
-object ID after filtering for the configured payload size.
+The experiment is intentionally limited to one publisher and one track, with a
+configurable number of subscribers. Completed inbound and outbound objects are
+grouped by group ID and object ID after filtering for the configured payload
+size. Each logical object must have exactly one inbound trace and exactly one
+outbound trace per configured subscriber.
 
-For each matched object, the runner records:
+Object events do not currently carry a stable subscriber session identity. The
+analyzer therefore treats the outbound traces for a logical object as an
+unordered set of forwarded copies. It records a deterministic copy ordinal
+after sorting those traces by start timestamp, but the ordinal is scoped to one
+logical object and is not presented as a stable subscriber identity.
+
+For each outbound copy of a matched object, the runner records:
 
 - forwarding start delay: inbound object start to outbound object start;
 - model handoff delay: inbound create completion to outbound clone start;
 - drain gap: inbound object completion to outbound object completion;
 - full relay span: inbound object start to outbound object completion.
 
-Warm-up and cool-down are removed by timestamp relative to the matched live
-object window. The analyzer rejects an empty steady-state window, noncontiguous
-group sequences, unsuccessful packet outcomes, and mismatched packet or socket
-start/end counts. Malformed final records are treated as errors because the
-runner shuts the relay down gracefully.
+Warm-up and cool-down are removed using the inbound object's timestamp relative
+to the matched live object window. The analyzer rejects an empty steady-state
+window, noncontiguous group sequences, a fanout cardinality other than the
+configured subscriber count, unsuccessful packet outcomes, and mismatched
+packet or socket start/end counts. Malformed final records are treated as errors
+because the runner shuts the relay down gracefully.
 
 The runner computes count, mean, p50, p95, p99, and maximum for every latency
 metric.
@@ -133,8 +146,8 @@ Each run directory contains:
 - `latency.png`.
 
 `summary.json` includes the full command configuration, CPU affinity mode,
-binary paths, protocol version, workload, trace validation counts, and latency
-statistics.
+binary paths, protocol version, subscriber count, object size, fps, trace
+validation counts, and latency statistics.
 
 The Matplotlib report uses the noninteractive `Agg` backend and contains:
 
@@ -143,7 +156,8 @@ The Matplotlib report uses the noninteractive `Agg` backend and contains:
 3. per-object latency over elapsed experiment time.
 
 All plotted axes use milliseconds and identify whether the relay was pinned or
-unpinned.
+unpinned. Multi-subscriber runs plot the aggregate distribution across every
+forwarded copy.
 
 ## Testing
 
@@ -155,7 +169,9 @@ fixtures. They will cover:
 
 - pinned and unpinned command construction;
 - rejection of a CPU outside the allowed affinity set;
-- inbound/outbound object matching;
+- positive subscriber-count, object-size, and fps validation;
+- one-to-many inbound/outbound object matching;
+- fanout-cardinality mismatch rejection;
 - warm-up and cool-down trimming;
 - percentile calculations;
 - incomplete and malformed trace rejection;
@@ -172,4 +188,5 @@ Python tests will run before the smoke experiment.
 - Sweeping multiple CPU counts or workload rates automatically.
 - Comparing multiple runs in one chart.
 - Measuring client-side end-to-end wall-clock latency.
-- Supporting more than one publisher, subscriber, or track in trace matching.
+- Supporting more than one publisher or track in trace matching.
+- Stable per-subscriber labels or per-subscriber time series.
