@@ -60,7 +60,7 @@ pub struct PacketContext {
 
 impl PacketContext {
 	/// Create packet metadata for one Quinn connection and direction.
-	pub fn new(connection_id: u64, direction: Direction) -> Self {
+	pub fn new(direction: Direction, connection_id: u64) -> Self {
 		Self {
 			connection_id,
 			direction,
@@ -175,25 +175,29 @@ pub struct PacketEndEvent {
 
 /// A sampled QUIC packet whose completion consumes the token.
 #[must_use = "dropping a packet trace records an abandoned packet"]
-pub struct PacketTrace {
+pub struct PacketTrace(Option<PacketTraceState>);
+
+struct PacketTraceState {
 	handle: Handle,
 	packet: PacketEvent,
-	finished: bool,
 }
 
 /// A sampled packet phase whose completion consumes the token.
 #[must_use = "dropping a packet phase records an abandoned phase"]
-pub struct PacketPhaseTrace {
+pub struct PacketPhaseTrace(Option<PacketPhaseTraceState>);
+
+struct PacketPhaseTraceState {
 	handle: Handle,
 	packet: PacketEvent,
 	phase: PacketPhase,
-	finished: bool,
 }
 
 impl Handle {
 	/// Start a sampled QUIC packet trace.
-	pub fn packet(&self, context: PacketContext) -> Option<PacketTrace> {
-		let inner = self.inner.as_ref()?;
+	pub fn packet(&self, context: PacketContext) -> PacketTrace {
+		let Some(inner) = self.inner.as_ref() else {
+			return PacketTrace::disabled();
+		};
 		let sample_rate = inner.config.packet_sample;
 		let sampled = context
 			.packet_number
@@ -203,7 +207,7 @@ impl Handle {
 				seen % sample_rate == sample_rate - 1
 			});
 		if !sampled {
-			return None;
+			return PacketTrace::disabled();
 		}
 
 		let packet = PacketEvent {
@@ -217,53 +221,68 @@ impl Handle {
 			sample_rate,
 		};
 		inner.emit(Event::PacketStart(packet.clone()));
-		Some(PacketTrace {
+		PacketTrace(Some(PacketTraceState {
 			handle: self.clone(),
 			packet,
-			finished: false,
-		})
+		}))
 	}
 }
 
 impl PacketTrace {
+	/// Return a disabled packet trace token.
+	pub fn disabled() -> Self {
+		Self(None)
+	}
+
 	/// Record the packet number discovered during RX processing.
 	pub fn set_number(&mut self, number: u64) {
-		self.packet.packet_number = Some(number);
+		if let Some(state) = &mut self.0 {
+			state.packet.packet_number = Some(number);
+		}
 	}
 
 	/// Record the packet number space discovered during RX processing.
 	pub fn set_space(&mut self, space: PacketSpace) {
-		self.packet.packet_space = Some(space);
+		if let Some(state) = &mut self.0 {
+			state.packet.packet_space = Some(space);
+		}
 	}
 
 	/// Record the final encoded packet length.
 	pub fn set_byte_len(&mut self, byte_len: usize) {
-		self.packet.byte_len = Some(byte_len);
+		if let Some(state) = &mut self.0 {
+			state.packet.byte_len = Some(byte_len);
+		}
 	}
 
 	/// Start a measured packet lifecycle phase.
 	pub fn phase(&self, phase: PacketPhase) -> PacketPhaseTrace {
-		let mut packet = self.packet.clone();
+		let Some(state) = &self.0 else {
+			return PacketPhaseTrace::disabled();
+		};
+		let mut packet = state.packet.clone();
 		packet.timestamp_ns = now_ns();
-		self.handle.emit(Event::PacketPhase(PacketPhaseEvent {
+		state.handle.emit(Event::PacketPhase(PacketPhaseEvent {
 			packet: packet.clone(),
 			phase,
 			edge: PhaseEdge::Start,
 			outcome: None,
 		}));
-		PacketPhaseTrace {
-			handle: self.handle.clone(),
+		PacketPhaseTrace(Some(PacketPhaseTraceState {
+			handle: state.handle.clone(),
 			packet,
 			phase,
-			finished: false,
-		}
+		}))
 	}
 
 	/// Record a STREAM frame carried by this packet.
 	pub fn stream_frame(&self, frame: StreamFrame, outcome: PacketOutcome) {
-		let mut packet = self.packet.clone();
+		let Some(state) = &self.0 else {
+			return;
+		};
+		let mut packet = state.packet.clone();
 		packet.timestamp_ns = now_ns();
-		self.handle.emit(Event::StreamFrame(StreamFrameEvent {
+		state.handle.emit(Event::StreamFrame(StreamFrameEvent {
 			packet,
 			stream_id: frame.stream_id,
 			offset_start: frame.offset_start,
@@ -274,12 +293,15 @@ impl PacketTrace {
 
 	/// Finish the packet with an explicit result.
 	pub fn finish(mut self, outcome: PacketOutcome) {
-		self.emit_end(outcome);
-		self.finished = true;
+		if let Some(state) = self.0.take() {
+			state.emit_end(outcome);
+		}
 	}
+}
 
-	fn emit_end(&self, outcome: PacketOutcome) {
-		let mut packet = self.packet.clone();
+impl PacketTraceState {
+	fn emit_end(self, outcome: PacketOutcome) {
+		let mut packet = self.packet;
 		packet.timestamp_ns = now_ns();
 		self.handle.emit(Event::PacketEnd(PacketEndEvent { packet, outcome }));
 	}
@@ -287,21 +309,28 @@ impl PacketTrace {
 
 impl Drop for PacketTrace {
 	fn drop(&mut self) {
-		if !self.finished {
-			self.emit_end(PacketOutcome::Abandoned);
+		if let Some(state) = self.0.take() {
+			state.emit_end(PacketOutcome::Abandoned);
 		}
 	}
 }
 
 impl PacketPhaseTrace {
-	/// Finish the phase with an explicit result.
-	pub fn finish(mut self, outcome: PacketOutcome) {
-		self.emit_done(outcome);
-		self.finished = true;
+	fn disabled() -> Self {
+		Self(None)
 	}
 
-	fn emit_done(&self, outcome: PacketOutcome) {
-		let mut packet = self.packet.clone();
+	/// Finish the phase with an explicit result.
+	pub fn finish(mut self, outcome: PacketOutcome) {
+		if let Some(state) = self.0.take() {
+			state.emit_done(outcome);
+		}
+	}
+}
+
+impl PacketPhaseTraceState {
+	fn emit_done(self, outcome: PacketOutcome) {
+		let mut packet = self.packet;
 		packet.timestamp_ns = now_ns();
 		self.handle.emit(Event::PacketPhase(PacketPhaseEvent {
 			packet,
@@ -314,8 +343,8 @@ impl PacketPhaseTrace {
 
 impl Drop for PacketPhaseTrace {
 	fn drop(&mut self) {
-		if !self.finished {
-			self.emit_done(PacketOutcome::Abandoned);
+		if let Some(state) = self.0.take() {
+			state.emit_done(PacketOutcome::Abandoned);
 		}
 	}
 }

@@ -360,8 +360,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut object_id = 0;
 
 		loop {
-			let context = trace::ObjectContext::new(trace::Direction::Tx, msg.track_alias, msg.group_id, object_id)
-				.with_stream(None, stream.offset());
+			let context = trace::ObjectContext::new(
+				trace::Direction::Tx,
+				trace::ObjectIdentity::new(msg.track_alias, msg.group_id, object_id),
+			)
+			.with_stream_offset_start(stream.offset());
 			// Wait for the next frame, bailing if the peer closes the stream first.
 			let frame = {
 				let mut closed = std::pin::pin!(stream.closed());

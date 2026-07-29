@@ -964,8 +964,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				break;
 			};
 			let mut object = self.trace.object(
-				trace::ObjectContext::new(trace::Direction::Rx, group.track_alias, group.group_id, object_id)
-					.with_stream(None, object_start),
+				trace::ObjectContext::new(
+					trace::Direction::Rx,
+					trace::ObjectIdentity::new(group.track_alias, group.group_id, object_id),
+				)
+				.with_stream_offset_start(object_start),
 			);
 			object_id += 1;
 			object.phase(trace::ObjectTracePoint::RxObjectHeaderParseStart);

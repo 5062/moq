@@ -133,13 +133,24 @@ pub mod trace {
 		TxPayloadWriteDone,
 	}
 
+	/// No-op object identity used when the `trace` feature is disabled.
+	#[derive(Clone, Copy)]
+	pub struct ObjectIdentity;
+
+	impl ObjectIdentity {
+		/// Create a no-op identity from object coordinates.
+		pub fn new(_track_alias: u64, _group_id: u64, _object_id: u64) -> Self {
+			Self
+		}
+	}
+
 	/// No-op metadata used when the `trace` feature is disabled.
 	#[derive(Clone)]
 	pub struct ObjectContext;
 
 	impl ObjectContext {
 		/// Create no-op metadata for one object.
-		pub fn new(_direction: Direction, _track_alias: u64, _group_id: u64, _object_id: u64) -> Self {
+		pub fn new(_direction: Direction, _identity: ObjectIdentity) -> Self {
 			Self
 		}
 
@@ -148,8 +159,13 @@ pub mod trace {
 			self
 		}
 
-		/// Ignore an optional stream identifier and starting byte offset.
-		pub fn with_stream(self, _stream_id: Option<u64>, _offset_start: u64) -> Self {
+		/// Ignore an optional stream identifier.
+		pub fn with_stream_id(self, _stream_id: u64) -> Self {
+			self
+		}
+
+		/// Ignore an optional starting stream byte offset.
+		pub fn with_stream_offset_start(self, _offset_start: u64) -> Self {
 			self
 		}
 

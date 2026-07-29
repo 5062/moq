@@ -181,6 +181,25 @@ pub enum ObjectTracePoint {
 	TxPayloadWriteDone,
 }
 
+/// Stable identity of one moq-transport object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObjectIdentity {
+	track_alias: u64,
+	group_id: u64,
+	object_id: u64,
+}
+
+impl ObjectIdentity {
+	/// Create an identity from its track alias, group ID, and object ID.
+	pub fn new(track_alias: u64, group_id: u64, object_id: u64) -> Self {
+		Self {
+			track_alias,
+			group_id,
+			object_id,
+		}
+	}
+}
+
 /// Stable metadata known before a moq-transport object trace starts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectContext {
@@ -196,13 +215,13 @@ pub struct ObjectContext {
 
 impl ObjectContext {
 	/// Create metadata for one moq-transport object.
-	pub fn new(direction: Direction, track_alias: u64, group_id: u64, object_id: u64) -> Self {
+	pub fn new(direction: Direction, identity: ObjectIdentity) -> Self {
 		Self {
 			session_id: None,
 			direction,
-			track_alias,
-			group_id,
-			object_id,
+			track_alias: identity.track_alias,
+			group_id: identity.group_id,
+			object_id: identity.object_id,
 			stream_id: None,
 			stream_offset_start: None,
 			payload_bytes: 0,
@@ -215,9 +234,14 @@ impl ObjectContext {
 		self
 	}
 
-	/// Attach the transport stream identifier and starting byte offset.
-	pub fn with_stream(mut self, stream_id: Option<u64>, offset_start: u64) -> Self {
-		self.stream_id = stream_id;
+	/// Attach the transport stream identifier.
+	pub fn with_stream_id(mut self, stream_id: u64) -> Self {
+		self.stream_id = Some(stream_id);
+		self
+	}
+
+	/// Attach the inclusive stream byte offset where this object starts.
+	pub fn with_stream_offset_start(mut self, offset_start: u64) -> Self {
 		self.stream_offset_start = Some(offset_start);
 		self
 	}
@@ -231,51 +255,53 @@ impl ObjectContext {
 
 /// A sampled moq-transport object trace, or a zero-work disabled token.
 #[must_use = "object traces must be explicitly finished when processing completes"]
-pub struct ObjectTrace {
-	handle: Option<Handle>,
-	object: Option<ObjectEvent>,
+pub struct ObjectTrace(Option<ObjectTraceState>);
+
+struct ObjectTraceState {
+	handle: Handle,
+	object: ObjectEvent,
 }
 
 impl ObjectTrace {
 	/// Return a disabled object trace token.
 	pub fn disabled() -> Self {
-		Self {
-			handle: None,
-			object: None,
-		}
+		Self(None)
 	}
 
 	/// Update the object payload size once it is known.
 	pub fn set_payload_bytes(&mut self, payload_bytes: u64) {
-		if let Some(object) = &mut self.object {
+		if let Some(state) = &mut self.0 {
+			let object = &mut state.object;
 			object.payload_bytes = payload_bytes;
 		}
 	}
 
 	/// Update the exclusive stream byte offset reached by this object.
 	pub fn set_stream_offset_end(&mut self, stream_offset_end: u64) {
-		if let Some(object) = &mut self.object {
-			object.stream_offset_end = Some(stream_offset_end);
+		if let Some(state) = &mut self.0 {
+			state.object.stream_offset_end = Some(stream_offset_end);
 		}
 	}
 
 	/// Emit a processing phase boundary for this object.
 	pub fn phase(&self, point: ObjectTracePoint) {
-		let (Some(handle), Some(object)) = (&self.handle, &self.object) else {
+		let Some(state) = &self.0 else {
 			return;
 		};
-		let mut object = object.clone();
+		let mut object = state.object.clone();
 		object.timestamp_ns = now_ns();
-		handle.emit(Event::MoqObjectPhase(ObjectPhaseEvent { point, object }));
+		state
+			.handle
+			.emit(Event::MoqObjectPhase(ObjectPhaseEvent { point, object }));
 	}
 
 	/// Finish the object interval with the latest metadata.
 	pub fn finish(mut self) {
-		let (Some(handle), Some(mut object)) = (self.handle.take(), self.object.take()) else {
+		let Some(mut state) = self.0.take() else {
 			return;
 		};
-		object.timestamp_ns = now_ns();
-		handle.emit(Event::MoqObjectEnd(object));
+		state.object.timestamp_ns = now_ns();
+		state.handle.emit(Event::MoqObjectEnd(state.object));
 	}
 }
 
@@ -466,10 +492,10 @@ impl Handle {
 			sample_rate,
 		};
 		self.emit(Event::MoqObjectStart(object.clone()));
-		ObjectTrace {
-			handle: Some(self.clone()),
-			object: Some(object),
-		}
+		ObjectTrace(Some(ObjectTraceState {
+			handle: self.clone(),
+			object,
+		}))
 	}
 
 	/// Emit an event without applying object or packet sampling.
@@ -791,9 +817,10 @@ mod tests {
 			..Config::disabled()
 		})
 		.unwrap();
-		let context = ObjectContext::new(Direction::Tx, 11, 12, 13)
+		let context = ObjectContext::new(Direction::Tx, ObjectIdentity::new(11, 12, 13))
 			.with_session_id(7)
-			.with_stream(Some(16), 100)
+			.with_stream_id(16)
+			.with_stream_offset_start(100)
 			.with_payload_bytes(44);
 
 		let mut object = handle.object(context);
@@ -850,7 +877,10 @@ mod tests {
 		.unwrap();
 
 		for object_id in 0..3 {
-			let object = handle.object(ObjectContext::new(Direction::Rx, 11, 12, object_id));
+			let object = handle.object(ObjectContext::new(
+				Direction::Rx,
+				ObjectIdentity::new(11, 12, object_id),
+			));
 			object.phase(ObjectTracePoint::RxObjectHeaderParseStart);
 			object.finish();
 		}
@@ -874,7 +904,7 @@ mod tests {
 	#[test]
 	fn disabled_object_trace_is_noop() {
 		let handle = Handle::new(Config::disabled()).unwrap();
-		let mut object = handle.object(ObjectContext::new(Direction::Rx, 11, 12, 13));
+		let mut object = handle.object(ObjectContext::new(Direction::Rx, ObjectIdentity::new(11, 12, 13)));
 
 		object.phase(ObjectTracePoint::RxObjectHeaderParseStart);
 		object.set_payload_bytes(44);
@@ -1070,6 +1100,98 @@ mod tests {
 	}
 
 	#[test]
+	fn dropped_packet_trace_records_abandoned() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			..Config::default()
+		})
+		.unwrap();
+
+		drop(handle.packet(PacketContext::new(Direction::Rx, 7)));
+		drop(handle);
+
+		let events: Vec<Event> = std::fs::read_to_string(path)
+			.unwrap()
+			.lines()
+			.map(|line| serde_json::from_str(line).unwrap())
+			.collect();
+		assert!(matches!(
+			events.as_slice(),
+			[
+				Event::PacketStart(_),
+				Event::PacketEnd(PacketEndEvent {
+					outcome: PacketOutcome::Abandoned,
+					..
+				})
+			]
+		));
+	}
+
+	#[test]
+	fn dropped_packet_phase_records_abandoned() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			..Config::default()
+		})
+		.unwrap();
+		let packet = handle.packet(PacketContext::new(Direction::Rx, 7));
+
+		drop(packet.phase(PacketPhase::HeaderParse));
+		packet.finish(PacketOutcome::Success);
+		drop(handle);
+
+		let events: Vec<Event> = std::fs::read_to_string(path)
+			.unwrap()
+			.lines()
+			.map(|line| serde_json::from_str(line).unwrap())
+			.collect();
+		assert!(matches!(
+			&events[2],
+			Event::PacketPhase(PacketPhaseEvent {
+				edge: PhaseEdge::Done,
+				outcome: Some(PacketOutcome::Abandoned),
+				..
+			})
+		));
+	}
+
+	#[test]
+	fn disabled_packet_trace_is_noop() {
+		let handle = Handle::new(Config::disabled()).unwrap();
+		let mut packet = handle.packet(PacketContext::new(Direction::Rx, 7));
+
+		packet.phase(PacketPhase::HeaderParse).finish(PacketOutcome::Success);
+		packet.set_number(91);
+		packet.set_space(PacketSpace::Data);
+		packet.set_byte_len(1200);
+		packet.stream_frame(StreamFrame::new(16, 0, 10), PacketOutcome::Success);
+		packet.finish(PacketOutcome::Success);
+
+		assert_eq!(handle.emitted(), 0);
+	}
+
+	#[test]
+	fn unsampled_packet_trace_is_noop() {
+		let dir = tempfile::tempdir().unwrap();
+		let handle = Handle::new(Config {
+			path: Some(dir.path().join("trace.jsonl")),
+			packet_sample: 2,
+			..Config::default()
+		})
+		.unwrap();
+		let packet = handle.packet(PacketContext::new(Direction::Tx, 7).with_number(0));
+
+		packet.phase(PacketPhase::FrameEncode).finish(PacketOutcome::Success);
+		packet.finish(PacketOutcome::Success);
+
+		assert_eq!(handle.emitted(), 0);
+	}
+
+	#[test]
 	fn packet_trace_enriches_context_after_header_decode() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("trace.jsonl");
@@ -1078,9 +1200,7 @@ mod tests {
 			..Config::default()
 		})
 		.unwrap();
-		let mut packet = handle
-			.packet(PacketContext::new(7, Direction::Rx).with_byte_len(1200))
-			.unwrap();
+		let mut packet = handle.packet(PacketContext::new(Direction::Rx, 7).with_byte_len(1200));
 
 		packet.phase(PacketPhase::HeaderParse).finish(PacketOutcome::Success);
 		packet.set_space(PacketSpace::Data);
@@ -1120,13 +1240,11 @@ mod tests {
 			..Config::default()
 		})
 		.unwrap();
-		let packet = handle
-			.packet(
-				PacketContext::new(7, Direction::Tx)
-					.with_number(2)
-					.with_space(PacketSpace::Data),
-			)
-			.unwrap();
+		let packet = handle.packet(
+			PacketContext::new(Direction::Tx, 7)
+				.with_number(2)
+				.with_space(PacketSpace::Data),
+		);
 
 		packet.stream_frame(StreamFrame::new(4, 0, 10), PacketOutcome::Success);
 		packet.stream_frame(StreamFrame::new(8, 20, 40), PacketOutcome::Success);
