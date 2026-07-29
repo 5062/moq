@@ -603,10 +603,10 @@ impl Consumer {
 		let Some((info, source)) = ready!(self.poll_next_frame_source(waiter)?) else {
 			return Poll::Ready(Ok(None));
 		};
-		let object = trace.object(context.clone().with_payload_bytes(info.size));
-		object.phase(crate::trace::ObjectTracePoint::TxObjectCloneStart);
+		let mut object = trace.object(context.clone().with_payload_bytes(info.size));
+		let clone = object.phase(crate::trace::ObjectPhase::Clone);
 		let frame = frame::Consumer::new(self.state.clone(), info, source);
-		object.phase(crate::trace::ObjectTracePoint::TxObjectCloned);
+		clone.finish(crate::trace::ObjectOutcome::Success);
 		Poll::Ready(Ok(Some((frame, object))))
 	}
 

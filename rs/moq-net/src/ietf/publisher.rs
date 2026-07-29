@@ -382,31 +382,37 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				None => break,
 			};
 			object_id += 1;
-			object.phase(trace::ObjectTracePoint::TxObjectHeaderEncodeStart);
+			let mut header = object.phase(trace::ObjectPhase::HeaderEncode);
+			let result: Result<(), Error> = async {
+				// Object ID delta is always 0.
+				stream.encode(&0u64).await?;
 
-			// object id delta is always 0.
-			stream.encode(&0u64).await?;
+				// Per-object extension headers carry the frame presentation timestamp.
+				if msg.flags.has_extensions {
+					let mut ext = bytes::BytesMut::new();
+					ietf::encode_object_time(&mut ext, frame.timestamp, version)?;
+					stream.encode(&(ext.len() as u64)).await?;
+					stream.write_chunk(ext.freeze()).await?;
+				}
 
-			// Per-object extension headers carry the frame's presentation timestamp.
-			if msg.flags.has_extensions {
-				let mut ext = bytes::BytesMut::new();
-				ietf::encode_object_time(&mut ext, frame.timestamp, version)?;
-				stream.encode(&(ext.len() as u64)).await?;
-				stream.write_chunk(ext.freeze()).await?;
+				stream.encode(&frame.size).await?;
+				if frame.size == 0 {
+					stream.encode(&0u8).await?;
+				}
+				Ok(())
 			}
-
-			// Write the size of the frame.
-			stream.encode(&frame.size).await?;
+			.await;
+			header.set_stream_offset_end(stream.offset());
+			match result {
+				Ok(()) => header.finish(trace::ObjectOutcome::Success),
+				Err(err) => {
+					header.finish(trace::ObjectOutcome::Failed);
+					return Err(err);
+				}
+			}
 			track_stats.frame();
 
-			if frame.size == 0 {
-				// Have to write the object status too.
-				stream.encode(&0u8).await?;
-				object.set_stream_offset_end(stream.offset());
-				object.phase(trace::ObjectTracePoint::TxObjectHeaderEncoded);
-			} else {
-				object.set_stream_offset_end(stream.offset());
-				object.phase(trace::ObjectTracePoint::TxObjectHeaderEncoded);
+			if frame.size != 0 {
 				// Stream each chunk of the frame.
 				loop {
 					let chunk = {
@@ -423,10 +429,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					match chunk? {
 						Some(chunk) => {
 							let n = chunk.len() as u64;
-							object.phase(trace::ObjectTracePoint::TxPayloadWriteStart);
-							stream.write_chunk(chunk).await?;
-							object.set_stream_offset_end(stream.offset());
-							object.phase(trace::ObjectTracePoint::TxPayloadWriteDone);
+							let mut write = object.phase(trace::ObjectPhase::PayloadWrite);
+							match stream.write_chunk(chunk).await {
+								Ok(()) => {
+									write.set_stream_offset_end(stream.offset());
+									write.finish(trace::ObjectOutcome::Success);
+								}
+								Err(err) => {
+									write.finish(trace::ObjectOutcome::Failed);
+									return Err(err);
+								}
+							}
 							track_stats.bytes(n);
 						}
 						None => break,

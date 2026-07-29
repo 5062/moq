@@ -94,7 +94,10 @@ records its stream ID and exclusive byte range. Packet context can be enriched
 after the start record when RX header processing discovers the number space or
 packet number.
 
-MoQ object phases retain the existing `point` field. Object identity is:
+MoQ object phases follow the same scoped shape: a `phase` and `edge` pair, with an
+`outcome` on done edges. The phase values are `header_parse`, `create`,
+`payload_read`, `clone`, `header_encode`, and `payload_write`. Object outcomes
+are `success`, `failed`, and `abandoned`. Object identity is:
 
 ```text
 (session_id, track_alias, group_id, object_id)

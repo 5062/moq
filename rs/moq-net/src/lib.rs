@@ -100,33 +100,32 @@ pub mod trace {
 		Tx,
 	}
 
-	/// A named moq-transport object trace point.
+	/// A measured step in the object lifecycle.
 	#[derive(Clone, Copy)]
-	pub enum ObjectTracePoint {
-		/// Inbound object header parsing started.
-		RxObjectHeaderParseStart,
-		/// Inbound object header parsing completed.
-		RxObjectHeaderParsed,
-		/// Inbound object creation started.
-		RxObjectCreateStart,
-		/// Inbound object creation completed.
-		RxObjectCreated,
-		/// Inbound payload reading started.
-		RxPayloadReadStart,
-		/// Inbound payload reading completed.
-		RxPayloadReadDone,
-		/// Outbound object cloning started.
-		TxObjectCloneStart,
-		/// Outbound object cloning completed.
-		TxObjectCloned,
-		/// Outbound object header encoding started.
-		TxObjectHeaderEncodeStart,
-		/// Outbound object header encoding completed.
-		TxObjectHeaderEncoded,
-		/// Outbound payload writing started.
-		TxPayloadWriteStart,
-		/// Outbound payload writing completed.
-		TxPayloadWriteDone,
+	pub enum ObjectPhase {
+		/// Parse an inbound object header.
+		HeaderParse,
+		/// Create an inbound object in the relay model.
+		Create,
+		/// Read an inbound object payload.
+		PayloadRead,
+		/// Clone or select an outbound object.
+		Clone,
+		/// Encode an outbound object header.
+		HeaderEncode,
+		/// Write an outbound object payload.
+		PayloadWrite,
+	}
+
+	/// Result of an object lifecycle phase.
+	#[derive(Clone, Copy)]
+	pub enum ObjectOutcome {
+		/// Processing completed successfully.
+		Success,
+		/// Processing completed with an error.
+		Failed,
+		/// The phase ended without an explicit outcome.
+		Abandoned,
 	}
 
 	/// No-op object identity used when the `trace` feature is disabled.
@@ -175,6 +174,12 @@ pub mod trace {
 	#[must_use = "object traces must be explicitly finished when processing completes"]
 	pub struct ObjectTrace;
 
+	/// No-op scoped object phase used when tracing is disabled.
+	#[must_use = "object phases must be explicitly finished when processing completes"]
+	pub struct ObjectPhaseTrace<'a> {
+		_object: &'a mut ObjectTrace,
+	}
+
 	impl ObjectTrace {
 		/// Return a disabled object trace token.
 		pub fn disabled() -> Self {
@@ -187,11 +192,24 @@ pub mod trace {
 		/// Ignore a stream offset update.
 		pub fn set_stream_offset_end(&mut self, _stream_offset_end: u64) {}
 
-		/// Ignore an object processing phase.
-		pub fn phase(&self, _point: ObjectTracePoint) {}
+		/// Return a no-op scoped object phase.
+		pub fn phase(&mut self, _phase: ObjectPhase) -> ObjectPhaseTrace<'_> {
+			ObjectPhaseTrace { _object: self }
+		}
 
 		/// Finish the no-op object interval.
 		pub fn finish(self) {}
+	}
+
+	impl ObjectPhaseTrace<'_> {
+		/// Ignore a payload size update.
+		pub fn set_payload_bytes(&mut self, _payload_bytes: u64) {}
+
+		/// Ignore a stream offset update.
+		pub fn set_stream_offset_end(&mut self, _stream_offset_end: u64) {}
+
+		/// Finish the no-op object phase.
+		pub fn finish(self, _outcome: ObjectOutcome) {}
 	}
 
 	/// No-op trace handle used when the `trace` feature is disabled.

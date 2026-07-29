@@ -971,15 +971,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				.with_stream_offset_start(object_start),
 			);
 			object_id += 1;
-			object.phase(trace::ObjectTracePoint::RxObjectHeaderParseStart);
+			let mut header = object.phase(trace::ObjectPhase::HeaderParse);
 
 			if id_delta != 0 {
+				header.finish(trace::ObjectOutcome::Failed);
 				tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
 				return Err(Error::Unsupported);
 			}
 
-			// Per-object extension headers may carry the frame's presentation timestamp
-			// (Timestamp/Timescale Object Properties). Absent it, stamp the local receive time.
+			// Per-object extension headers may carry the frame presentation timestamp.
+			// Absent it, stamp the local receive time.
 			let timestamp = if group.flags.has_extensions {
 				let size: usize = stream.decode().await?;
 				let mut ext = stream.read_exact(size).await?;
@@ -989,16 +990,29 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			};
 
 			let size: u64 = stream.decode().await?;
-			object.set_payload_bytes(size);
-			if size == 0 {
-				let status: u64 = stream.decode().await?;
-				object.set_stream_offset_end(stream.offset());
-				object.phase(trace::ObjectTracePoint::RxObjectHeaderParsed);
+			header.set_payload_bytes(size);
+			let status = if size == 0 {
+				Some(stream.decode::<u64>().await?)
+			} else {
+				None
+			};
+			header.set_stream_offset_end(stream.offset());
+			header.finish(trace::ObjectOutcome::Success);
+
+			if let Some(status) = status {
 				if status == 0 {
 					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-					object.phase(trace::ObjectTracePoint::RxObjectCreateStart);
-					let frame = producer.create_frame(frame::Info { size: 0, timestamp })?;
-					object.phase(trace::ObjectTracePoint::RxObjectCreated);
+					let create = object.phase(trace::ObjectPhase::Create);
+					let frame = match producer.create_frame(frame::Info { size: 0, timestamp }) {
+						Ok(frame) => {
+							create.finish(trace::ObjectOutcome::Success);
+							frame
+						}
+						Err(err) => {
+							create.finish(trace::ObjectOutcome::Failed);
+							return Err(err);
+						}
+					};
 					track_stats.frame();
 					frame.finish()?;
 					object.set_stream_offset_end(stream.offset());
@@ -1009,14 +1023,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::Unsupported);
 				}
 			} else {
-				object.set_stream_offset_end(stream.offset());
-				object.phase(trace::ObjectTracePoint::RxObjectHeaderParsed);
-				// `create_frame` is the allocation chokepoint and rejects an oversized
-				// `size` before allocating, so no pre-check is needed.
+				// `create_frame` rejects an oversized `size` before allocating.
 				let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-				object.phase(trace::ObjectTracePoint::RxObjectCreateStart);
-				let mut frame = producer.create_frame(frame::Info { size, timestamp })?;
-				object.phase(trace::ObjectTracePoint::RxObjectCreated);
+				let create = object.phase(trace::ObjectPhase::Create);
+				let mut frame = match producer.create_frame(frame::Info { size, timestamp }) {
+					Ok(frame) => {
+						create.finish(trace::ObjectOutcome::Success);
+						frame
+					}
+					Err(err) => {
+						create.finish(trace::ObjectOutcome::Failed);
+						return Err(err);
+					}
+				};
 				track_stats.frame();
 
 				if let Err(err) = self.run_frame(stream, &mut frame, &track_stats, &mut object).await {
@@ -1041,16 +1060,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		object: &mut trace::ObjectTrace,
 	) -> Result<(), Error> {
 		while frame.remaining() > 0 {
-			object.phase(trace::ObjectTracePoint::RxPayloadReadStart);
-			match stream.read_chunk(frame.remaining()).await? {
-				Some(chunk) if !chunk.is_empty() => {
-					track_stats.bytes(chunk.len() as u64);
-					frame.write(chunk)?;
-					object.set_stream_offset_end(stream.offset());
-					object.phase(trace::ObjectTracePoint::RxPayloadReadDone);
+			let mut read = object.phase(trace::ObjectPhase::PayloadRead);
+			let chunk = match stream.read_chunk(frame.remaining()).await {
+				Ok(Some(chunk)) if !chunk.is_empty() => chunk,
+				Ok(_) => {
+					read.finish(trace::ObjectOutcome::Failed);
+					return Err(Error::WrongSize);
 				}
-				_ => return Err(Error::WrongSize),
+				Err(err) => {
+					read.finish(trace::ObjectOutcome::Failed);
+					return Err(err);
+				}
+			};
+			track_stats.bytes(chunk.len() as u64);
+			if let Err(err) = frame.write(chunk) {
+				read.finish(trace::ObjectOutcome::Failed);
+				return Err(err);
 			}
+			read.set_stream_offset_end(stream.offset());
+			read.finish(trace::ObjectOutcome::Success);
 		}
 		Ok(())
 	}

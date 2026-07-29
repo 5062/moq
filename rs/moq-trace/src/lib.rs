@@ -146,35 +146,36 @@ pub struct ObjectEvent {
 	pub sample_rate: u64,
 }
 
-/// A named moq-transport object trace point.
+/// A measured step in the moq-transport object lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
-pub enum ObjectTracePoint {
-	/// Inbound object header parsing started.
-	RxObjectHeaderParseStart,
-	/// Inbound object header parsing completed.
-	RxObjectHeaderParsed,
-	/// Inbound object creation started.
-	RxObjectCreateStart,
-	/// Inbound object creation completed.
-	RxObjectCreated,
-	/// Inbound object payload read started.
-	RxPayloadReadStart,
-	/// Inbound object payload read completed.
-	RxPayloadReadDone,
-	/// Outbound object clone or selection started.
-	TxObjectCloneStart,
-	/// Outbound object clone or selection completed.
-	TxObjectCloned,
-	/// Outbound object header encoding started.
-	TxObjectHeaderEncodeStart,
-	/// Outbound object header encoding completed.
-	TxObjectHeaderEncoded,
-	/// Outbound object payload write started.
-	TxPayloadWriteStart,
-	/// Outbound object payload write completed.
-	TxPayloadWriteDone,
+pub enum ObjectPhase {
+	/// Parse an inbound object header.
+	HeaderParse,
+	/// Create an inbound object in the relay model.
+	Create,
+	/// Read an inbound object payload.
+	PayloadRead,
+	/// Clone or select an outbound object from the relay model.
+	Clone,
+	/// Encode an outbound object header.
+	HeaderEncode,
+	/// Write an outbound object payload.
+	PayloadWrite,
+}
+
+/// Result of an object lifecycle phase.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectOutcome {
+	/// Processing completed successfully.
+	Success,
+	/// Processing completed with an error.
+	Failed,
+	/// The phase token was dropped before an outcome was recorded.
+	Abandoned,
 }
 
 /// Stable identity of one moq-transport object.
@@ -258,6 +259,14 @@ struct ObjectTraceState {
 	object: ObjectEvent,
 }
 
+/// A scoped object phase whose completion consumes the token.
+#[must_use = "dropping an object phase records an abandoned phase"]
+pub struct ObjectPhaseTrace<'a> {
+	object: &'a mut ObjectTrace,
+	phase: ObjectPhase,
+	finished: bool,
+}
+
 impl ObjectTrace {
 	/// Return a disabled object trace token.
 	pub fn disabled() -> Self {
@@ -279,16 +288,28 @@ impl ObjectTrace {
 		}
 	}
 
-	/// Emit a processing phase boundary for this object.
-	pub fn phase(&self, point: ObjectTracePoint) {
+	/// Start a measured object lifecycle phase.
+	pub fn phase(&mut self, phase: ObjectPhase) -> ObjectPhaseTrace<'_> {
+		self.emit_phase(phase, PhaseEdge::Start, None);
+		ObjectPhaseTrace {
+			object: self,
+			phase,
+			finished: false,
+		}
+	}
+
+	fn emit_phase(&self, phase: ObjectPhase, edge: PhaseEdge, outcome: Option<ObjectOutcome>) {
 		let Some(state) = &self.0 else {
 			return;
 		};
 		let mut object = state.object.clone();
 		object.timestamp_ns = now_ns();
-		state
-			.handle
-			.emit(Event::MoqObjectPhase(ObjectPhaseEvent { point, object }));
+		state.handle.emit(Event::MoqObjectPhase(ObjectPhaseEvent {
+			phase,
+			edge,
+			outcome,
+			object,
+		}));
 	}
 
 	/// Finish the object interval with the latest metadata.
@@ -301,12 +322,44 @@ impl ObjectTrace {
 	}
 }
 
-/// moq-transport object trace point fields.
+impl ObjectPhaseTrace<'_> {
+	/// Update the object payload size once it is known.
+	pub fn set_payload_bytes(&mut self, payload_bytes: u64) {
+		self.object.set_payload_bytes(payload_bytes);
+	}
+
+	/// Update the exclusive stream byte offset reached by this object.
+	pub fn set_stream_offset_end(&mut self, stream_offset_end: u64) {
+		self.object.set_stream_offset_end(stream_offset_end);
+	}
+
+	/// Finish the phase with an explicit result.
+	pub fn finish(mut self, outcome: ObjectOutcome) {
+		self.object.emit_phase(self.phase, PhaseEdge::Done, Some(outcome));
+		self.finished = true;
+	}
+}
+
+impl Drop for ObjectPhaseTrace<'_> {
+	fn drop(&mut self) {
+		if !self.finished {
+			self.object
+				.emit_phase(self.phase, PhaseEdge::Done, Some(ObjectOutcome::Abandoned));
+		}
+	}
+}
+
+/// moq-transport object phase fields.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ObjectPhaseEvent {
-	/// Object trace point observed by the instrumentation hook.
-	pub point: ObjectTracePoint,
-	/// Object metadata associated with the trace point.
+	/// Object lifecycle phase being measured.
+	pub phase: ObjectPhase,
+	/// Whether this boundary starts or completes the phase.
+	pub edge: PhaseEdge,
+	/// Completion result, present only when `edge` is `done`.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub outcome: Option<ObjectOutcome>,
+	/// Object metadata associated with the phase boundary.
 	#[serde(flatten)]
 	pub object: ObjectEvent,
 }
@@ -396,17 +449,6 @@ pub fn object_interval_end(handle: &Handle, object: &ObjectEvent) -> bool {
 	object.timestamp_ns = now_ns();
 	object.sample_rate = sample_rate;
 	handle.emit(Event::MoqObjectEnd(object))
-}
-
-/// Emit a moq-transport object phase event.
-pub fn object_phase(handle: &Handle, point: ObjectTracePoint, object: &ObjectEvent) -> bool {
-	let Some(sample_rate) = handle.object_sample_rate(object.object_id) else {
-		return false;
-	};
-	let mut object = object.clone();
-	object.timestamp_ns = now_ns();
-	object.sample_rate = sample_rate;
-	handle.emit(Event::MoqObjectPhase(ObjectPhaseEvent { point, object }))
 }
 
 /// A cheap cloneable handle used by instrumentation sites to emit trace events.
@@ -742,7 +784,9 @@ mod tests {
 	#[test]
 	fn serializes_object_phase_event() {
 		let event = Event::MoqObjectPhase(ObjectPhaseEvent {
-			point: ObjectTracePoint::RxObjectCreated,
+			phase: ObjectPhase::Create,
+			edge: PhaseEdge::Done,
+			outcome: Some(ObjectOutcome::Success),
 			object: ObjectEvent {
 				timestamp_ns: 42,
 				session_id: Some(7),
@@ -761,14 +805,15 @@ mod tests {
 
 		let json = serde_json::to_string(&event).unwrap();
 		assert!(json.contains(r#""type":"moq_object_phase""#));
-		assert!(json.contains(r#""point":"rx_object_created""#));
+		assert!(json.contains(r#""phase":"create""#));
+		assert!(json.contains(r#""edge":"done""#));
+		assert!(json.contains(r#""outcome":"success""#));
 		assert!(!json.contains("frame"));
-		assert!(!json.contains(r#""phase""#));
-		assert!(!json.contains(r#""edge""#));
+		assert!(!json.contains(r#""point""#));
 	}
 
 	#[test]
-	fn object_helpers_stamp_and_emit_events() {
+	fn object_interval_helpers_stamp_and_emit_events() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("trace.jsonl");
 		let handle = Handle::new(Config {
@@ -792,16 +837,52 @@ mod tests {
 		};
 
 		object_interval_start(&handle, &object);
-		object_phase(&handle, ObjectTracePoint::TxObjectHeaderEncoded, &object);
 		object_interval_end(&handle, &object);
 		drop(handle);
 
 		let contents = std::fs::read_to_string(path).unwrap();
 		assert!(contents.contains(r#""type":"moq_object_start""#));
-		assert!(contents.contains(r#""type":"moq_object_phase""#));
-		assert!(contents.contains(r#""point":"tx_object_header_encoded""#));
 		assert!(contents.contains(r#""type":"moq_object_end""#));
 		assert!(!contents.contains(&u64::MAX.to_string()));
+	}
+
+	#[test]
+	fn object_phase_guard_records_latest_metadata_and_abandonment() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			..Config::disabled()
+		})
+		.unwrap();
+		let mut object = handle.object(ObjectContext::new(Direction::Rx, ObjectIdentity::new(11, 12, 13)));
+
+		{
+			let mut phase = object.phase(ObjectPhase::HeaderParse);
+			phase.set_payload_bytes(44);
+			phase.set_stream_offset_end(144);
+		}
+		object.finish();
+		drop(handle);
+
+		let events: Vec<Event> = std::fs::read_to_string(path)
+			.unwrap()
+			.lines()
+			.map(|line| serde_json::from_str(line).unwrap())
+			.collect();
+		assert!(matches!(
+			&events[2],
+			Event::MoqObjectPhase(ObjectPhaseEvent {
+				phase: ObjectPhase::HeaderParse,
+				edge: PhaseEdge::Done,
+				outcome: Some(ObjectOutcome::Abandoned),
+				object: ObjectEvent {
+					payload_bytes: 44,
+					stream_offset_end: Some(144),
+					..
+				},
+			})
+		));
 	}
 
 	#[test]
@@ -820,10 +901,10 @@ mod tests {
 			.with_payload_bytes(44);
 
 		let mut object = handle.object(context);
-		object.phase(ObjectTracePoint::TxObjectHeaderEncodeStart);
-		object.set_payload_bytes(44);
-		object.set_stream_offset_end(144);
-		object.phase(ObjectTracePoint::TxObjectHeaderEncoded);
+		let mut phase = object.phase(ObjectPhase::HeaderEncode);
+		phase.set_payload_bytes(44);
+		phase.set_stream_offset_end(144);
+		phase.finish(ObjectOutcome::Success);
 		object.finish();
 		drop(handle);
 
@@ -840,14 +921,18 @@ mod tests {
 		assert!(matches!(
 			events[1],
 			Event::MoqObjectPhase(ObjectPhaseEvent {
-				point: ObjectTracePoint::TxObjectHeaderEncodeStart,
+				phase: ObjectPhase::HeaderEncode,
+				edge: PhaseEdge::Start,
+				outcome: None,
 				..
 			})
 		));
 		assert!(matches!(
 			events[2],
 			Event::MoqObjectPhase(ObjectPhaseEvent {
-				point: ObjectTracePoint::TxObjectHeaderEncoded,
+				phase: ObjectPhase::HeaderEncode,
+				edge: PhaseEdge::Done,
+				outcome: Some(ObjectOutcome::Success),
 				ref object,
 			}) if object.payload_bytes == 44 && object.stream_offset_end == Some(144)
 		));
@@ -873,11 +958,11 @@ mod tests {
 		.unwrap();
 
 		for object_id in 0..3 {
-			let object = handle.object(ObjectContext::new(
+			let mut object = handle.object(ObjectContext::new(
 				Direction::Rx,
 				ObjectIdentity::new(11, 12, object_id),
 			));
-			object.phase(ObjectTracePoint::RxObjectHeaderParseStart);
+			object.phase(ObjectPhase::HeaderParse).finish(ObjectOutcome::Success);
 			object.finish();
 		}
 		drop(handle);
@@ -887,7 +972,7 @@ mod tests {
 			.lines()
 			.map(|line| serde_json::from_str::<Event>(line).unwrap())
 			.collect::<Vec<_>>();
-		assert_eq!(events.len(), 3);
+		assert_eq!(events.len(), 4);
 		assert!(events.iter().all(|event| match event {
 			Event::MoqObjectStart(object) | Event::MoqObjectEnd(object) => {
 				object.object_id == 2 && object.sample_rate == 3
@@ -902,9 +987,10 @@ mod tests {
 		let handle = Handle::new(Config::disabled()).unwrap();
 		let mut object = handle.object(ObjectContext::new(Direction::Rx, ObjectIdentity::new(11, 12, 13)));
 
-		object.phase(ObjectTracePoint::RxObjectHeaderParseStart);
-		object.set_payload_bytes(44);
-		object.set_stream_offset_end(144);
+		let mut phase = object.phase(ObjectPhase::HeaderParse);
+		phase.set_payload_bytes(44);
+		phase.set_stream_offset_end(144);
+		phase.finish(ObjectOutcome::Success);
 		object.finish();
 
 		assert_eq!(handle.emitted(), 0);
