@@ -6445,7 +6445,7 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.11"
-source = "git+https://github.com/5062/quinn?branch=moq-trace%2Fquinn-0.11#0ef4218b25ef64a7aed17dfab1ac083e490323e6"
+source = "git+https://github.com/5062/quinn?branch=moq-trace%2Fquinn-0.11#29d6d093c454a3759cd09ea94512c2e757f6827a"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -6465,7 +6465,7 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.16"
-source = "git+https://github.com/5062/quinn?branch=moq-trace%2Fquinn-0.11#0ef4218b25ef64a7aed17dfab1ac083e490323e6"
+source = "git+https://github.com/5062/quinn?branch=moq-trace%2Fquinn-0.11#29d6d093c454a3759cd09ea94512c2e757f6827a"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -6490,7 +6490,7 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.5.15"
-source = "git+https://github.com/5062/quinn?branch=moq-trace%2Fquinn-0.11#0ef4218b25ef64a7aed17dfab1ac083e490323e6"
+source = "git+https://github.com/5062/quinn?branch=moq-trace%2Fquinn-0.11#29d6d093c454a3759cd09ea94512c2e757f6827a"
 dependencies = [
  "cfg_aliases",
  "libc",
