@@ -12,11 +12,10 @@ import re
 import signal
 import subprocess
 import time
-from collections import defaultdict
 from typing import Annotated, BinaryIO
 
 import matplotlib
-import pandas as pd
+import polars as pl
 import typer
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -30,6 +29,37 @@ METRICS = {
     "model_handoff": "Model handoff",
     "drain_gap": "Drain gap",
     "full_span": "Full relay span",
+}
+
+BOUNDARIES = (
+    "rx_starts",
+    "rx_create_done",
+    "rx_ends",
+    "tx_starts",
+    "tx_clone_starts",
+    "tx_ends",
+)
+
+SAMPLE_SCHEMA = {
+    "group_id": pl.Int64,
+    "object_id": pl.Int64,
+    "metric": pl.String,
+    "copy_ordinal": pl.Int64,
+    "elapsed_ms": pl.Float64,
+    "latency_us": pl.Float64,
+}
+
+TRACE_SCHEMA = {
+    "type": pl.String,
+    "timestamp_ns": pl.Int64,
+    "trace_id": pl.UInt64,
+    "direction": pl.String,
+    "group_id": pl.Int64,
+    "object_id": pl.Int64,
+    "phase": pl.String,
+    "edge": pl.String,
+    "outcome": pl.String,
+    "payload_bytes": pl.Int64,
 }
 
 
@@ -153,7 +183,7 @@ def build_subscriber_command(config: ExperimentConfig) -> list[str]:
 class Analysis:
     """Validated latency samples and aggregate trace counts."""
 
-    samples: pd.DataFrame
+    samples: pl.DataFrame
     statistics: dict[str, dict[str, float | int]]
     packet_count: int
     socket_count: int
@@ -164,56 +194,112 @@ class TraceError(RuntimeError):
     """A trace is malformed, incomplete, or does not match the workload."""
 
 
-def summarize(samples: pd.DataFrame) -> dict[str, dict[str, float | int]]:
+def _read_trace(path: pathlib.Path) -> pl.DataFrame:
+    """Read the consumed trace fields with stable nullable types."""
+
+    try:
+        return pl.read_ndjson(path, schema=TRACE_SCHEMA)
+    except (OSError, pl.exceptions.PolarsError) as error:
+        raise TraceError(f"failed to read trace {path}: {error}") from error
+
+
+def summarize(samples: pl.DataFrame) -> dict[str, dict[str, float | int]]:
     """Summarize latency samples by metric."""
 
-    if samples.empty:
+    if samples.is_empty():
         raise ValueError("cannot summarize an empty sample")
-    grouped = samples.groupby("metric", sort=False)["latency_us"]
-    statistics = grouped.agg(count="count", mean="mean", max="max").join(
-        grouped.quantile((0.50, 0.95, 0.99)).unstack().rename(columns={0.50: "p50", 0.95: "p95", 0.99: "p99"})
+    statistics = samples.group_by("metric", maintain_order=True).agg(
+        pl.len().alias("count"),
+        pl.col("latency_us").mean().alias("mean"),
+        pl.col("latency_us").quantile(0.50, interpolation="linear").alias("p50"),
+        pl.col("latency_us").quantile(0.95, interpolation="linear").alias("p95"),
+        pl.col("latency_us").quantile(0.99, interpolation="linear").alias("p99"),
+        pl.col("latency_us").max().alias("max"),
     )
-    statistics = statistics[["count", "mean", "p50", "p95", "p99", "max"]].round(12)
     return {
-        str(metric): {
+        row["metric"]: {
             "count": int(row["count"]),
-            "mean": float(row["mean"]),
-            "p50": float(row["p50"]),
-            "p95": float(row["p95"]),
-            "p99": float(row["p99"]),
-            "max": float(row["max"]),
+            "mean": round(float(row["mean"]), 12),
+            "p50": round(float(row["p50"]), 12),
+            "p95": round(float(row["p95"]), 12),
+            "p99": round(float(row["p99"]), 12),
+            "max": round(float(row["max"]), 12),
         }
-        for metric, row in statistics.iterrows()
+        for row in statistics.iter_rows(named=True)
     }
 
 
-def _load_events(path: pathlib.Path) -> list[dict]:
-    events = []
-    try:
-        with path.open() as trace:
-            for line_number, line in enumerate(trace, 1):
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError as error:
-                    raise TraceError(f"malformed JSON on line {line_number}: {error}") from error
-    except OSError as error:
-        raise TraceError(f"failed to read trace {path}: {error}") from error
-    return events
-
-
 def _validate_scopes(
-    events: list[dict],
+    events: pl.DataFrame,
     start_type: str,
     end_type: str,
     require_success: bool,
 ) -> int:
-    starts = {event["trace_id"] for event in events if event.get("type") == start_type}
-    ends = {event["trace_id"] for event in events if event.get("type") == end_type}
+    start_events = events.filter(pl.col("type") == start_type)
+    end_events = events.filter(pl.col("type") == end_type)
+    if start_events["trace_id"].null_count() or end_events["trace_id"].null_count():
+        raise TraceError(f"{start_type}/{end_type} contains missing trace IDs")
+    starts = set(start_events["trace_id"].to_list())
+    ends = set(end_events["trace_id"].to_list())
     if starts != ends:
         raise TraceError(f"{start_type}/{end_type} trace IDs do not match: {len(starts)} starts, {len(ends)} ends")
-    if require_success and any(event.get("outcome") != "success" for event in events if event.get("type") == end_type):
+    if require_success and not end_events.filter((pl.col("outcome") != "success").fill_null(True)).is_empty():
         raise TraceError(f"{end_type} contains unsuccessful outcomes")
     return len(starts)
+
+
+def _group_objects(events: pl.DataFrame, object_size: int) -> pl.DataFrame:
+    """Reduce object events to sorted boundary timestamp lists."""
+
+    objects = events.filter(pl.col("type").str.starts_with("moq_object_"))
+    missing = objects.filter(
+        pl.any_horizontal(
+            pl.col("group_id").is_null(),
+            pl.col("object_id").is_null(),
+            pl.col("timestamp_ns").is_null(),
+        )
+    )
+    if not missing.is_empty():
+        raise TraceError(f"object event is missing identity: {missing.row(0, named=True)}")
+
+    boundary = (
+        pl.when((pl.col("type") == "moq_object_start") & (pl.col("direction") == "rx"))
+        .then(pl.lit("rx_starts"))
+        .when((pl.col("type") == "moq_object_start") & (pl.col("direction") == "tx"))
+        .then(pl.lit("tx_starts"))
+        .when((pl.col("type") == "moq_object_end") & (pl.col("direction") == "rx"))
+        .then(pl.lit("rx_ends"))
+        .when((pl.col("type") == "moq_object_end") & (pl.col("direction") == "tx"))
+        .then(pl.lit("tx_ends"))
+        .when(
+            (pl.col("type") == "moq_object_phase")
+            & (pl.col("direction") == "rx")
+            & (pl.col("phase") == "create")
+            & (pl.col("edge") == "done")
+        )
+        .then(pl.lit("rx_create_done"))
+        .when(
+            (pl.col("type") == "moq_object_phase")
+            & (pl.col("direction") == "tx")
+            & (pl.col("phase") == "clone")
+            & (pl.col("edge") == "start")
+        )
+        .then(pl.lit("tx_clone_starts"))
+        .otherwise(pl.lit(None, dtype=pl.String))
+        .alias("boundary")
+    )
+    objects = objects.with_columns(boundary)
+    grouped = objects.group_by("group_id", "object_id", maintain_order=True).agg(
+        *(pl.col("timestamp_ns").filter(pl.col("boundary") == name).sort().alias(name) for name in BOUNDARIES),
+        (
+            (pl.col("type") == "moq_object_end")
+            & (pl.col("direction") == "rx")
+            & (pl.col("payload_bytes") == object_size)
+        )
+        .any()
+        .alias("payload_matches"),
+    )
+    return grouped.filter("payload_matches").drop("payload_matches")
 
 
 def analyze_trace(
@@ -225,67 +311,34 @@ def analyze_trace(
 ) -> Analysis:
     """Parse, validate, trim, and summarize a relay JSONL trace."""
 
-    events = _load_events(path)
+    events = _read_trace(path)
     packet_count = _validate_scopes(events, "quic_packet_start", "quic_packet_end", True)
     socket_count = _validate_scopes(events, "udp_socket_start", "udp_socket_end", False)
-    boundaries = {
-        name: defaultdict(list)
-        for name in (
-            "rx_starts",
-            "rx_create_done",
-            "rx_ends",
-            "tx_starts",
-            "tx_clone_starts",
-            "tx_ends",
-        )
-    }
-    payload_keys = set()
-    for event in events:
-        event_type = event.get("type")
-        if not event_type or not event_type.startswith("moq_object_"):
-            continue
-        try:
-            key = (int(event["group_id"]), int(event["object_id"]))
-            timestamp = int(event["timestamp_ns"])
-        except (KeyError, TypeError, ValueError) as error:
-            raise TraceError(f"object event is missing identity: {event}") from error
-        direction = event.get("direction")
-        if event_type == "moq_object_start":
-            boundary = "rx_starts" if direction == "rx" else "tx_starts"
-            boundaries[boundary][key].append(timestamp)
-        elif event_type == "moq_object_end":
-            boundary = "rx_ends" if direction == "rx" else "tx_ends"
-            boundaries[boundary][key].append(timestamp)
-            if direction == "rx" and event.get("payload_bytes") == object_size:
-                payload_keys.add(key)
-        elif event_type == "moq_object_phase":
-            phase = event.get("phase")
-            edge = event.get("edge")
-            if direction == "rx" and phase == "create" and edge == "done":
-                boundaries["rx_create_done"][key].append(timestamp)
-            elif direction == "tx" and phase == "clone" and edge == "start":
-                boundaries["tx_clone_starts"][key].append(timestamp)
-
-    if not payload_keys:
+    objects = _group_objects(events, object_size)
+    if objects.is_empty():
         raise TraceError(f"trace has no completed {object_size}-byte inbound objects")
+    object_index = {(int(row["group_id"]), int(row["object_id"])): row for row in objects.iter_rows(named=True)}
+    payload_keys = sorted(object_index)
     for key in payload_keys:
-        if len(boundaries["rx_starts"][key]) != 1:
-            raise TraceError(f"{key} has {len(boundaries['rx_starts'][key])} rx_starts")
+        rx_starts = object_index[key]["rx_starts"]
+        if len(rx_starts) != 1:
+            raise TraceError(f"{key} has {len(rx_starts)} rx_starts")
 
-    first_rx = min(boundaries["rx_starts"][key][0] for key in payload_keys)
-    last_rx = max(boundaries["rx_starts"][key][0] for key in payload_keys)
+    first_rx = min(object_index[key]["rx_starts"][0] for key in payload_keys)
+    last_rx = max(object_index[key]["rx_starts"][0] for key in payload_keys)
     window_start = first_rx + int(warmup * 1_000_000_000)
     window_end = last_rx - int(cooldown * 1_000_000_000)
-    keys = sorted(key for key in payload_keys if window_start <= boundaries["rx_starts"][key][0] <= window_end)
+    keys = [key for key in payload_keys if window_start <= object_index[key]["rx_starts"][0] <= window_end]
     if not keys:
         raise TraceError("steady-state window contains no complete objects")
     for key in keys:
+        obj = object_index[key]
         for name in ("rx_create_done", "rx_ends"):
-            if len(boundaries[name][key]) != 1:
-                raise TraceError(f"{key} has {len(boundaries[name][key])} {name}")
+            if len(obj[name]) != 1:
+                raise TraceError(f"{key} has {len(obj[name])} {name}")
         for name in ("tx_starts", "tx_clone_starts", "tx_ends"):
-            if len(boundaries[name][key]) != subscribers:
-                raise TraceError(f"{key} has {len(boundaries[name][key])} {name}, expected {subscribers}")
+            if len(obj[name]) != subscribers:
+                raise TraceError(f"{key} has {len(obj[name])} {name}, expected {subscribers}")
     groups = sorted({group for group, _object in keys})
     if groups != list(range(groups[0], groups[-1] + 1)):
         raise TraceError("steady-state groups are not contiguous")
@@ -293,15 +346,16 @@ def analyze_trace(
     rows = []
     for group_id, object_id in keys:
         key = (group_id, object_id)
-        rx_start = boundaries["rx_starts"][key][0]
-        rx_create = boundaries["rx_create_done"][key][0]
-        rx_end = boundaries["rx_ends"][key][0]
+        obj = object_index[key]
+        rx_start = obj["rx_starts"][0]
+        rx_create = obj["rx_create_done"][0]
+        rx_end = obj["rx_ends"][0]
         elapsed_ms = (rx_start - first_rx) / 1_000_000
         metric_boundaries = {
-            "forward_start": (rx_start, boundaries["tx_starts"][key]),
-            "model_handoff": (rx_create, boundaries["tx_clone_starts"][key]),
-            "drain_gap": (rx_end, boundaries["tx_ends"][key]),
-            "full_span": (rx_start, boundaries["tx_ends"][key]),
+            "forward_start": (rx_start, obj["tx_starts"]),
+            "model_handoff": (rx_create, obj["tx_clone_starts"]),
+            "drain_gap": (rx_end, obj["tx_ends"]),
+            "full_span": (rx_start, obj["tx_ends"]),
         }
         for metric in METRICS:
             origin, targets = metric_boundaries[metric]
@@ -317,10 +371,7 @@ def analyze_trace(
                     }
                 )
 
-    samples = pd.DataFrame.from_records(
-        rows,
-        columns=("group_id", "object_id", "metric", "copy_ordinal", "elapsed_ms", "latency_us"),
-    )
+    samples = pl.DataFrame(rows, schema=SAMPLE_SCHEMA)
     return Analysis(
         samples=samples,
         statistics=summarize(samples),
@@ -334,9 +385,7 @@ def write_csv(path: pathlib.Path, analysis: Analysis) -> None:
     """Write deterministic long-form object latency samples."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    analysis.samples.sort_values(["group_id", "object_id", "metric", "copy_ordinal"]).to_csv(
-        path, index=False, float_format="%.6f"
-    )
+    analysis.samples.sort("group_id", "object_id", "metric", "copy_ordinal").write_csv(path, float_precision=6)
 
 
 def write_summary(
@@ -383,8 +432,9 @@ def plot_analysis(path: pathlib.Path, config: ExperimentConfig, analysis: Analys
     fig, axes = plt.subplots(1, 3, figsize=(17, 5.5))
     colors = plt.get_cmap("tab10").colors
 
-    for index, (metric, samples) in enumerate(analysis.samples.groupby("metric", sort=False)):
-        values_ms = samples["latency_us"] / 1_000
+    for index, metric in enumerate(METRICS):
+        samples = analysis.samples.filter(pl.col("metric") == metric)
+        values_ms = (samples["latency_us"] / 1_000).to_numpy()
         axes[0].ecdf(
             values_ms,
             label=METRICS.get(metric, metric),
@@ -414,10 +464,11 @@ def plot_analysis(path: pathlib.Path, config: ExperimentConfig, analysis: Analys
     axes[1].set_ylabel("Latency (ms)")
     axes[1].grid(axis="y", alpha=0.25)
 
-    for index, (metric, samples) in enumerate(analysis.samples.groupby("metric", sort=False)):
+    for index, metric in enumerate(METRICS):
+        samples = analysis.samples.filter(pl.col("metric") == metric)
         axes[2].scatter(
-            samples["elapsed_ms"] / 1_000,
-            samples["latency_us"] / 1_000,
+            (samples["elapsed_ms"] / 1_000).to_numpy(),
+            (samples["latency_us"] / 1_000).to_numpy(),
             label=METRICS.get(metric, metric),
             color=colors[index],
             s=8,

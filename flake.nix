@@ -147,8 +147,7 @@
           (python3.withPackages (
             pythonPackages: with pythonPackages; [
               matplotlib
-              numpy
-              pandas
+              polars
               pydantic
               typer
             ]
