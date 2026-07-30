@@ -23,6 +23,7 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
 
 PROTOCOL = "moq-transport-19"
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 METRICS = {
     "forward_start": "Forward start",
@@ -53,6 +54,7 @@ TRACE_SCHEMA = {
     "type": pl.String,
     "timestamp_ns": pl.Int64,
     "trace_id": pl.UInt64,
+    "session_id": pl.UInt64,
     "direction": pl.String,
     "group_id": pl.Int64,
     "object_id": pl.Int64,
@@ -180,6 +182,38 @@ def build_subscriber_command(config: ExperimentConfig) -> list[str]:
 
 
 @dataclasses.dataclass(frozen=True)
+class TimelineSelection:
+    """A real object selected nearest one full-span statistic."""
+
+    statistic: str
+    target_us: float
+    group_id: int
+    object_id: int
+    actual_us: float
+
+
+@dataclasses.dataclass(frozen=True)
+class TimelineInterval:
+    """One paired object lifecycle or processing phase interval."""
+
+    direction: str
+    session_id: int
+    phase: str
+    occurrence: int
+    start_us: float
+    end_us: float
+
+
+@dataclasses.dataclass(frozen=True)
+class ObjectTimeline:
+    """All traced intervals for one selected logical object."""
+
+    selection: TimelineSelection
+    intervals: tuple[TimelineInterval, ...]
+    slowest_session_id: int
+
+
+@dataclasses.dataclass(frozen=True)
 class Analysis:
     """Validated latency samples and aggregate trace counts."""
 
@@ -188,10 +222,162 @@ class Analysis:
     packet_count: int
     socket_count: int
     group_count: int
+    events: pl.DataFrame
+    steady_keys: tuple[tuple[int, int], ...]
+    selections: tuple[TimelineSelection, ...]
 
 
 class TraceError(RuntimeError):
     """A trace is malformed, incomplete, or does not match the workload."""
+
+
+def select_timeline_objects(samples: pl.DataFrame) -> tuple[TimelineSelection, ...]:
+    """Select real objects nearest mean, median, and p99 slowest-copy full span."""
+
+    objects = (
+        samples.filter(pl.col("metric") == "full_span")
+        .group_by("group_id", "object_id")
+        .agg(pl.col("latency_us").max().alias("actual_us"))
+        .sort("group_id", "object_id")
+    )
+    if objects.is_empty():
+        raise TraceError("no steady-state full-span samples for timeline selection")
+    targets = objects.select(
+        pl.col("actual_us").mean().alias("mean"),
+        pl.col("actual_us").quantile(0.50, interpolation="linear").alias("median"),
+        pl.col("actual_us").quantile(0.99, interpolation="linear").alias("p99"),
+    ).row(0, named=True)
+    rows = list(objects.iter_rows(named=True))
+    selected = []
+    for statistic in ("mean", "median", "p99"):
+        target = float(targets[statistic])
+        nearest = min(
+            rows,
+            key=lambda row: (
+                abs(float(row["actual_us"]) - target),
+                int(row["group_id"]),
+                int(row["object_id"]),
+            ),
+        )
+        selected.append(
+            TimelineSelection(
+                statistic=statistic,
+                target_us=target,
+                group_id=int(nearest["group_id"]),
+                object_id=int(nearest["object_id"]),
+                actual_us=float(nearest["actual_us"]),
+            )
+        )
+    return tuple(selected)
+
+
+def extract_object_timeline(events: pl.DataFrame, selection: TimelineSelection) -> ObjectTimeline:
+    """Pair every lifecycle boundary for one selected object."""
+
+    selected = events.filter(
+        pl.col("type").str.starts_with("moq_object_")
+        & (pl.col("group_id") == selection.group_id)
+        & (pl.col("object_id") == selection.object_id)
+    )
+    if selected.is_empty():
+        raise TraceError(f"selected object ({selection.group_id}, {selection.object_id}) has no events")
+    required = selected.filter(
+        pl.any_horizontal(
+            pl.col("timestamp_ns").is_null(),
+            pl.col("direction").is_null(),
+            pl.col("session_id").is_null(),
+        )
+    )
+    if not required.is_empty():
+        raise TraceError(f"selected object ({selection.group_id}, {selection.object_id}) has missing timeline identity")
+
+    rows = list(selected.iter_rows(named=True))
+    grouped: dict[tuple[str, int], list[dict]] = {}
+    for row in rows:
+        key = (str(row["direction"]), int(row["session_id"]))
+        grouped.setdefault(key, []).append(row)
+
+    raw_intervals: list[tuple[str, int, str, int, int, int]] = []
+    for (direction, session_id), session_rows in sorted(grouped.items()):
+        lifecycle_starts = sorted(
+            int(row["timestamp_ns"]) for row in session_rows if row["type"] == "moq_object_start"
+        )
+        lifecycle_ends = sorted(
+            int(row["timestamp_ns"]) for row in session_rows if row["type"] == "moq_object_end"
+        )
+        if len(lifecycle_starts) != len(lifecycle_ends):
+            raise TraceError(
+                f"{direction} session {session_id} object has "
+                f"{len(lifecycle_starts)} starts and {len(lifecycle_ends)} completions"
+            )
+        for occurrence, (start, end) in enumerate(zip(lifecycle_starts, lifecycle_ends, strict=True)):
+            if end < start:
+                raise TraceError(f"{direction} session {session_id} object completes before it starts")
+            raw_intervals.append((direction, session_id, "object", occurrence, start, end))
+
+        phases = sorted({str(row["phase"]) for row in session_rows if row["type"] == "moq_object_phase"})
+        for phase in phases:
+            starts = sorted(
+                int(row["timestamp_ns"])
+                for row in session_rows
+                if row["type"] == "moq_object_phase" and row["phase"] == phase and row["edge"] == "start"
+            )
+            ends = sorted(
+                int(row["timestamp_ns"])
+                for row in session_rows
+                if row["type"] == "moq_object_phase" and row["phase"] == phase and row["edge"] == "done"
+            )
+            if len(starts) != len(ends):
+                raise TraceError(
+                    f"{direction} session {session_id} {phase} has "
+                    f"{len(starts)} starts and {len(ends)} completions"
+                )
+            for occurrence, (start, end) in enumerate(zip(starts, ends, strict=True)):
+                if end < start:
+                    raise TraceError(f"{direction} session {session_id} {phase} completes before it starts")
+                raw_intervals.append((direction, session_id, phase, occurrence, start, end))
+
+    rx_objects = [interval for interval in raw_intervals if interval[0] == "rx" and interval[2] == "object"]
+    if len(rx_objects) != 1:
+        raise TraceError(
+            f"selected object ({selection.group_id}, {selection.object_id}) has {len(rx_objects)} RX lifecycles"
+        )
+    rx_start = rx_objects[0][4]
+    phase_order = {
+        "object": 0,
+        "header_parse": 1,
+        "create": 2,
+        "payload_read": 3,
+        "clone": 1,
+        "header_encode": 2,
+        "payload_write": 3,
+    }
+    intervals = tuple(
+        sorted(
+            (
+                TimelineInterval(
+                    direction=direction,
+                    session_id=session_id,
+                    phase=phase,
+                    occurrence=occurrence,
+                    start_us=(start - rx_start) / 1_000,
+                    end_us=(end - rx_start) / 1_000,
+                )
+                for direction, session_id, phase, occurrence, start, end in raw_intervals
+            ),
+            key=lambda interval: (
+                0 if interval.direction == "rx" else 1,
+                interval.session_id,
+                phase_order.get(interval.phase, 99),
+                interval.occurrence,
+            ),
+        )
+    )
+    tx_objects = [interval for interval in intervals if interval.direction == "tx" and interval.phase == "object"]
+    if not tx_objects:
+        raise TraceError(f"selected object ({selection.group_id}, {selection.object_id}) has no TX lifecycle")
+    slowest = min(tx_objects, key=lambda interval: (-interval.end_us, interval.session_id))
+    return ObjectTimeline(selection=selection, intervals=intervals, slowest_session_id=slowest.session_id)
 
 
 def _read_trace(path: pathlib.Path) -> pl.DataFrame:
@@ -378,6 +564,9 @@ def analyze_trace(
         packet_count=packet_count,
         socket_count=socket_count,
         group_count=len(groups),
+        events=events,
+        steady_keys=tuple(keys),
+        selections=select_timeline_objects(samples),
     )
 
 
@@ -393,6 +582,7 @@ def write_summary(
     config: ExperimentConfig,
     analysis: Analysis,
     commands: dict[str, list[str]],
+    timelines: tuple[ObjectTimeline, ...],
 ) -> None:
     """Write experiment configuration, commands, counts, and statistics."""
 
@@ -421,6 +611,17 @@ def write_summary(
             "socket_operations": analysis.socket_count,
         },
         "statistics_us": analysis.statistics,
+        "timeline_objects": [
+            {
+                "statistic": timeline.selection.statistic,
+                "target_us": timeline.selection.target_us,
+                "group_id": timeline.selection.group_id,
+                "object_id": timeline.selection.object_id,
+                "actual_us": timeline.selection.actual_us,
+                "slowest_session_id": timeline.slowest_session_id,
+            }
+            for timeline in timelines
+        ],
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
@@ -491,6 +692,95 @@ def plot_analysis(path: pathlib.Path, config: ExperimentConfig, analysis: Analys
     plt.close(fig)
 
 
+def plot_object_timelines(
+    path: pathlib.Path,
+    config: ExperimentConfig,
+    timelines: tuple[ObjectTimeline, ...],
+) -> None:
+    """Render aligned lifecycle timelines for representative objects."""
+
+    if not timelines:
+        raise ValueError("cannot plot an empty object timeline selection")
+    phase_order = {
+        "object": 0,
+        "header_parse": 1,
+        "create": 2,
+        "payload_read": 3,
+        "clone": 1,
+        "header_encode": 2,
+        "payload_write": 3,
+    }
+
+    def row_keys(timeline: ObjectTimeline) -> list[tuple[str, int, str]]:
+        return sorted(
+            {(interval.direction, interval.session_id, interval.phase) for interval in timeline.intervals},
+            key=lambda key: (
+                0 if key[0] == "rx" else 1,
+                key[1],
+                phase_order.get(key[2], 99),
+                key[2],
+            ),
+        )
+
+    rows_by_timeline = [row_keys(timeline) for timeline in timelines]
+    max_rows = max(len(rows) for rows in rows_by_timeline)
+    figure_height = max(11.0, len(timelines) * max_rows * 0.28 + 2.5)
+    fig, axes = plt.subplots(len(timelines), 1, figsize=(15, figure_height), sharex=True, squeeze=False)
+    axes = axes[:, 0]
+    maximum = max(interval.end_us for timeline in timelines for interval in timeline.intervals)
+    x_limit = max(1.0, maximum * 1.05)
+    colors = {"rx": "#2563EB", "tx": "#D97706"}
+    lifecycle_color = "#64748B"
+
+    for axis, timeline, keys in zip(axes, timelines, rows_by_timeline, strict=True):
+        positions = {key: index for index, key in enumerate(keys)}
+        for interval in timeline.intervals:
+            key = (interval.direction, interval.session_id, interval.phase)
+            y = positions[key]
+            color = lifecycle_color if interval.phase == "object" else colors[interval.direction]
+            axis.broken_barh(
+                [(interval.start_us, interval.end_us - interval.start_us)],
+                (y - 0.32, 0.64),
+                facecolors=color,
+                edgecolors="#334155",
+                linewidth=0.7,
+                alpha=0.88,
+            )
+            if interval.phase == "object":
+                axis.scatter(interval.start_us, y, marker=">", color="#0F172A", s=22, zorder=3)
+                axis.scatter(interval.end_us, y, marker="|", color="#0F172A", s=55, zorder=3)
+
+        labels = []
+        for direction, session_id, phase in keys:
+            prefix = "RX" if direction == "rx" else f"TX s{session_id}"
+            labels.append(f"{prefix} {phase}")
+        axis.set_yticks(range(len(keys)), labels, fontsize=8)
+        axis.set_ylim(len(keys) - 0.5, -0.5)
+        axis.set_xlim(0, x_limit)
+        axis.grid(axis="x", color="#CBD5E1", alpha=0.7, linewidth=0.7)
+        axis.set_axisbelow(True)
+        selected = timeline.selection
+        axis.set_title(
+            f"{selected.statistic} target {selected.target_us:.2f} µs | "
+            f"object ({selected.group_id}, {selected.object_id}) | "
+            f"actual {selected.actual_us:.2f} µs | slowest TX s{timeline.slowest_session_id}",
+            fontsize=10,
+            loc="left",
+        )
+
+    axes[-1].set_xlabel("Elapsed from RX object start (µs)")
+    fig.suptitle(
+        "MoQ relay object lifecycle timelines\n"
+        f"Slowest-copy mean, median, and p99 representatives | {config.object_size} bytes | "
+        f"{config.subscribers} subscriber(s) | {PROTOCOL}",
+        fontsize=14,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.965))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
 class ExperimentError(RuntimeError):
     """The experiment could not complete or validate successfully."""
 
@@ -516,6 +806,7 @@ def wait_for_log(
             contents = path.read_text(errors="replace")
         except FileNotFoundError:
             contents = ""
+        contents = ANSI_ESCAPE.sub("", contents)
         if pattern.search(contents):
             return
         status = process.poll()
@@ -661,9 +952,11 @@ def run_experiment(config: ExperimentConfig) -> pathlib.Path:
         config.warmup,
         config.cooldown,
     )
+    timelines = tuple(extract_object_timeline(analysis.events, selection) for selection in analysis.selections)
     write_csv(output / "objects.csv", analysis)
-    write_summary(output / "summary.json", config, analysis, commands)
+    write_summary(output / "summary.json", config, analysis, commands, timelines)
     plot_analysis(output / "latency.png", config, analysis)
+    plot_object_timelines(output / "object_timeline.png", config, timelines)
     return output
 
 
@@ -717,7 +1010,7 @@ def main(
         validate_cpu_affinity(config)
         result = run_experiment(config)
         summary = json.loads((result / "summary.json").read_text())
-    except (ExperimentError, OSError, ValidationError, ValueError) as error:
+    except (ExperimentError, OSError, TraceError, ValidationError, ValueError) as error:
         typer.echo(f"error: {error}", err=True)
         typer.echo(f"run directory: {output.resolve()}", err=True)
         raise typer.Exit(1) from error
@@ -729,7 +1022,7 @@ def main(
             f"{values['mean']:10.2f} {values['p50']:10.2f} "
             f"{values['p95']:10.2f} {values['p99']:10.2f}"
         )
-    for name in ("objects.csv", "summary.json", "latency.png"):
+    for name in ("objects.csv", "summary.json", "latency.png", "object_timeline.png"):
         typer.echo(f"{name}: {(result / name).resolve()}")
 
 

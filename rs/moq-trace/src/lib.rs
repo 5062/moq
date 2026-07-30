@@ -118,7 +118,7 @@ pub enum PacketSpace {
 pub struct ObjectEvent {
 	/// Monotonic timestamp in nanoseconds from the local process clock.
 	pub timestamp_ns: u64,
-	/// Quinn stable connection ID when available.
+	/// Process-local MoQ session ID when available.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub session_id: Option<u64>,
 	/// Whether this object is entering or leaving the relay.
@@ -455,6 +455,7 @@ pub fn object_interval_end(handle: &Handle, object: &ObjectEvent) -> bool {
 #[derive(Clone, Default)]
 pub struct Handle {
 	inner: Option<Arc<Inner>>,
+	session_id: Option<u64>,
 }
 
 enum WriterCommand {
@@ -492,12 +493,19 @@ impl Handle {
 			.map_err(Error::Spawn)?;
 		Ok(Self {
 			inner: Some(Arc::new(Inner::new(config, Some(sender), Some(writer), writer_failed))),
+			session_id: None,
 		})
 	}
 
 	/// Return a disabled handle.
 	pub fn disabled() -> Self {
 		Self::default()
+	}
+
+	/// Return a clone that stamps object events with this process-local session ID.
+	pub fn with_session_id(mut self, session_id: u64) -> Self {
+		self.session_id = Some(session_id);
+		self
 	}
 
 	fn object_sample_rate(&self, object_id: u64) -> Option<u64> {
@@ -517,7 +525,7 @@ impl Handle {
 		};
 		let object = ObjectEvent {
 			timestamp_ns: now_ns(),
-			session_id: context.session_id,
+			session_id: context.session_id.or(self.session_id),
 			direction: context.direction,
 			protocol: Protocol::MoqTransport,
 			track_alias: context.track_alias,
@@ -695,7 +703,10 @@ pub fn global() -> Handle {
 		.read()
 		.expect("trace global poisoned")
 		.upgrade();
-	Handle { inner }
+	Handle {
+		inner,
+		session_id: None,
+	}
 }
 
 /// Clear the process-global trace handle.
@@ -947,6 +958,33 @@ mod tests {
 	}
 
 	#[test]
+	fn session_scoped_handle_stamps_object_events() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			..Config::disabled()
+		})
+		.unwrap()
+		.with_session_id(7);
+
+		handle
+			.object(ObjectContext::new(Direction::Tx, ObjectIdentity::new(11, 12, 13)))
+			.finish();
+		drop(handle);
+
+		let events = std::fs::read_to_string(path)
+			.unwrap()
+			.lines()
+			.map(|line| serde_json::from_str::<Event>(line).unwrap())
+			.collect::<Vec<_>>();
+		assert!(events.iter().all(|event| match event {
+			Event::MoqObjectStart(object) | Event::MoqObjectEnd(object) => object.session_id == Some(7),
+			_ => false,
+		}));
+	}
+
+	#[test]
 	fn object_trace_samples_once_before_emitting_phases() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("trace.jsonl");
@@ -1076,6 +1114,7 @@ mod tests {
 		write_events(FailingWriter, receiver, failed.clone());
 		let handle = Handle {
 			inner: Some(Arc::new(Inner::new(Config::default(), None, None, failed))),
+			session_id: None,
 		};
 		assert!(handle.writer_failed());
 	}
@@ -1090,6 +1129,7 @@ mod tests {
 				None,
 				Arc::new(AtomicBool::new(false)),
 			))),
+			session_id: None,
 		};
 
 		assert!(handle.emit(object_event()));

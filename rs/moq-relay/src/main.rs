@@ -156,7 +156,7 @@ async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> 
 	anyhow::bail!("stopped accepting connections")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "trace"))]
 mod tests {
 	use super::*;
 
