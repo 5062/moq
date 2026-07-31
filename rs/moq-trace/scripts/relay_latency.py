@@ -15,12 +15,13 @@ import time
 from typing import Annotated, BinaryIO
 
 import matplotlib
+# The headless backend must be selected before importing pyplot.
+matplotlib.use("Agg")
+from matplotlib import pyplot as plt  # noqa: E402
 import polars as pl
 import typer
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-matplotlib.use("Agg")
-from matplotlib import pyplot as plt  # noqa: E402
 
 PROTOCOL = "moq-transport-19"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -234,6 +235,8 @@ class TraceError(RuntimeError):
 def select_timeline_objects(samples: pl.DataFrame) -> tuple[TimelineSelection, ...]:
     """Select real objects nearest mean, median, and p99 slowest-copy full span."""
 
+    # Fanout produces one full-span sample per subscriber, so represent each
+    # logical object by the copy that finished last.
     objects = (
         samples.filter(pl.col("metric") == "full_span")
         .group_by("group_id", "object_id")
@@ -251,6 +254,7 @@ def select_timeline_objects(samples: pl.DataFrame) -> tuple[TimelineSelection, .
     selected = []
     for statistic in ("mean", "median", "p99"):
         target = float(targets[statistic])
+        # Object identity makes equal-distance selections reproducible.
         nearest = min(
             rows,
             key=lambda row: (
@@ -293,6 +297,8 @@ def extract_object_timeline(events: pl.DataFrame, selection: TimelineSelection) 
 
     rows = list(selected.iter_rows(named=True))
     grouped: dict[tuple[str, int], list[dict]] = {}
+    # Subscriber tasks run concurrently, so events must be separated by
+    # session before lifecycle boundaries can be paired safely.
     for row in rows:
         key = (str(row["direction"]), int(row["session_id"]))
         grouped.setdefault(key, []).append(row)
@@ -317,6 +323,8 @@ def extract_object_timeline(events: pl.DataFrame, selection: TimelineSelection) 
 
         phases = sorted({str(row["phase"]) for row in session_rows if row["type"] == "moq_object_phase"})
         for phase in phases:
+            # Repeated phase instances are sequential within one object session,
+            # making timestamp order their stable occurrence identity.
             starts = sorted(
                 int(row["timestamp_ns"])
                 for row in session_rows
@@ -342,6 +350,7 @@ def extract_object_timeline(events: pl.DataFrame, selection: TimelineSelection) 
         raise TraceError(
             f"selected object ({selection.group_id}, {selection.object_id}) has {len(rx_objects)} RX lifecycles"
         )
+    # A single RX start provides a shared zero point for every subscriber copy.
     rx_start = rx_objects[0][4]
     phase_order = {
         "object": 0,
@@ -376,6 +385,7 @@ def extract_object_timeline(events: pl.DataFrame, selection: TimelineSelection) 
     tx_objects = [interval for interval in intervals if interval.direction == "tx" and interval.phase == "object"]
     if not tx_objects:
         raise TraceError(f"selected object ({selection.group_id}, {selection.object_id}) has no TX lifecycle")
+    # Break equal completion times by session ID so summary metadata is stable.
     slowest = min(tx_objects, key=lambda interval: (-interval.end_us, interval.session_id))
     return ObjectTimeline(selection=selection, intervals=intervals, slowest_session_id=slowest.session_id)
 
@@ -421,6 +431,8 @@ def _validate_scopes(
     end_type: str,
     require_success: bool,
 ) -> int:
+    """Require one matching end record for every sampled start record."""
+
     start_events = events.filter(pl.col("type") == start_type)
     end_events = events.filter(pl.col("type") == end_type)
     if start_events["trace_id"].null_count() or end_events["trace_id"].null_count():
@@ -512,6 +524,7 @@ def analyze_trace(
 
     first_rx = min(object_index[key]["rx_starts"][0] for key in payload_keys)
     last_rx = max(object_index[key]["rx_starts"][0] for key in payload_keys)
+    # RX starts define the workload clock, independent of fanout completion.
     window_start = first_rx + int(warmup * 1_000_000_000)
     window_end = last_rx - int(cooldown * 1_000_000_000)
     keys = [key for key in payload_keys if window_start <= object_index[key]["rx_starts"][0] <= window_end]
@@ -545,6 +558,8 @@ def analyze_trace(
         }
         for metric in METRICS:
             origin, targets = metric_boundaries[metric]
+            # Ordinals describe timestamp order only. Session IDs are not
+            # available in this boundary-reduced table.
             for ordinal, target in enumerate(sorted(targets)):
                 rows.append(
                     {
@@ -806,6 +821,8 @@ def wait_for_log(
             contents = path.read_text(errors="replace")
         except FileNotFoundError:
             contents = ""
+        # tracing-subscriber can color redirected logs, which would split the
+        # word-boundary expressions used for readiness checks.
         contents = ANSI_ESCAPE.sub("", contents)
         if pattern.search(contents):
             return
@@ -868,8 +885,6 @@ def _launch(command: list[str], log: pathlib.Path) -> tuple[subprocess.Popen[byt
 
 
 def run_experiment(config: ExperimentConfig) -> pathlib.Path:
-    """Build, run, validate, analyze, and visualize one experiment."""
-
     commands = {
         "relay": build_relay_command(config),
         "publisher": build_publisher_command(config),
@@ -927,6 +942,8 @@ def run_experiment(config: ExperimentConfig) -> pathlib.Path:
         if subscriber_status != 0:
             raise ExperimentError(f"subscriber exited with status {subscriber_status}")
 
+        # Stop production first, then let the relay flush its JSONL writer
+        # during graceful shutdown before the trace is analyzed.
         _stop(publisher, "publisher", graceful=True)
         _stop(relay, "relay", graceful=True)
     except Exception:
