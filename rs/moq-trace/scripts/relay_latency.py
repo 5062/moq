@@ -18,6 +18,7 @@ import matplotlib
 # The headless backend must be selected before importing pyplot.
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
 import polars as pl
 import typer
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -716,61 +717,76 @@ def plot_object_timelines(
 
     if not timelines:
         raise ValueError("cannot plot an empty object timeline selection")
-    phase_order = {
-        "object": 0,
-        "header_parse": 1,
-        "create": 2,
-        "payload_read": 3,
-        "clone": 1,
-        "header_encode": 2,
-        "payload_write": 3,
-    }
+    phase_rows = (
+        ("rx", "header_parse", "RX Header Parse"),
+        ("rx", "create", "RX Create"),
+        ("rx", "payload_read", "RX Payload Read"),
+        ("tx", "clone", "TX Clone"),
+        ("tx", "header_encode", "TX Header Encode"),
+        ("tx", "payload_write", "TX Payload Write"),
+    )
+    positions = {(direction, phase): index for index, (direction, phase, _label) in enumerate(phase_rows)}
+    labels = [label for _direction, _phase, label in phase_rows]
 
-    def row_keys(timeline: ObjectTimeline) -> list[tuple[str, int, str]]:
-        return sorted(
-            {(interval.direction, interval.session_id, interval.phase) for interval in timeline.intervals},
-            key=lambda key: (
-                0 if key[0] == "rx" else 1,
-                key[1],
-                phase_order.get(key[2], 99),
-                key[2],
-            ),
-        )
-
-    rows_by_timeline = [row_keys(timeline) for timeline in timelines]
-    max_rows = max(len(rows) for rows in rows_by_timeline)
-    figure_height = max(11.0, len(timelines) * max_rows * 0.28 + 2.5)
+    figure_height = max(11.0, len(timelines) * len(phase_rows) * 0.28 + 2.5)
     fig, axes = plt.subplots(len(timelines), 1, figsize=(15, figure_height), sharex=True, squeeze=False)
     axes = axes[:, 0]
     maximum = max(interval.end_us for timeline in timelines for interval in timeline.intervals)
     x_limit = max(1.0, maximum * 1.05)
-    colors = {"rx": "#2563EB", "tx": "#D97706"}
-    lifecycle_color = "#64748B"
+    rx_color = "#2563EB"
+    tx_palette = plt.get_cmap("Oranges")
 
-    for axis, timeline, keys in zip(axes, timelines, rows_by_timeline, strict=True):
-        positions = {key: index for index, key in enumerate(keys)}
+    for axis, timeline in zip(axes, timelines, strict=True):
+        tx_sessions = sorted(
+            {interval.session_id for interval in timeline.intervals if interval.direction == "tx"}
+        )
+        tx_colors = {
+            session_id: tx_palette(0.5 + 0.4 * index / max(1, len(tx_sessions) - 1))
+            for index, session_id in enumerate(tx_sessions)
+        }
+        lane_height = min(0.52, 0.62 / max(1, len(tx_sessions)))
+        tx_offsets = {
+            session_id: (index - (len(tx_sessions) - 1) / 2) * lane_height
+            for index, session_id in enumerate(tx_sessions)
+        }
+
         for interval in timeline.intervals:
-            key = (interval.direction, interval.session_id, interval.phase)
+            color = rx_color if interval.direction == "rx" else tx_colors[interval.session_id]
+            if interval.phase == "object":
+                axis.axvline(interval.start_us, color=color, linestyle=":", linewidth=0.9, alpha=0.55)
+                axis.axvline(interval.end_us, color=color, linestyle="--", linewidth=0.9, alpha=0.55)
+                continue
+
+            key = (interval.direction, interval.phase)
+            if key not in positions:
+                raise TraceError(f"unsupported timeline phase {interval.direction} {interval.phase}")
             y = positions[key]
-            color = lifecycle_color if interval.phase == "object" else colors[interval.direction]
+            height = 0.52
+            if interval.direction == "tx":
+                y += tx_offsets[interval.session_id]
+                height = lane_height * 0.82
             axis.broken_barh(
                 [(interval.start_us, interval.end_us - interval.start_us)],
-                (y - 0.32, 0.64),
+                (y - height / 2, height),
                 facecolors=color,
                 edgecolors="#334155",
                 linewidth=0.7,
                 alpha=0.88,
             )
-            if interval.phase == "object":
-                axis.scatter(interval.start_us, y, marker=">", color="#0F172A", s=22, zorder=3)
-                axis.scatter(interval.end_us, y, marker="|", color="#0F172A", s=55, zorder=3)
 
-        labels = []
-        for direction, session_id, phase in keys:
-            prefix = "RX" if direction == "rx" else f"TX s{session_id}"
-            labels.append(f"{prefix} {phase}")
-        axis.set_yticks(range(len(keys)), labels, fontsize=8)
-        axis.set_ylim(len(keys) - 0.5, -0.5)
+        legend_handles = [Line2D([0], [0], color=rx_color, linewidth=5, label="RX")]
+        legend_handles.extend(
+            Line2D([0], [0], color=tx_colors[session_id], linewidth=5, label=f"TX s{session_id}")
+            for session_id in tx_sessions
+        )
+        axis.legend(
+            handles=legend_handles,
+            loc="upper right",
+            fontsize=7,
+            ncols=min(4, len(legend_handles)),
+        )
+        axis.set_yticks(range(len(phase_rows)), labels, fontsize=8)
+        axis.set_ylim(len(phase_rows) - 0.5, -0.5)
         axis.set_xlim(0, x_limit)
         axis.grid(axis="x", color="#CBD5E1", alpha=0.7, linewidth=0.7)
         axis.set_axisbelow(True)
