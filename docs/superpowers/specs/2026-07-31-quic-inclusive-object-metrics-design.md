@@ -4,8 +4,8 @@
 
 Measure relay latency at both the MoQ object layer and the QUIC packet layer
 without inferring relationships from timestamps or connection creation order.
-Keep the existing MoQ metrics as diagnostics, add a QUIC-inclusive object
-outcome metric, and report QUIC packet and crypto costs separately.
+Keep MoQ `full_span` as the application-layer baseline, add QUIC-inclusive
+object outcome metrics, and report QUIC packet and crypto costs separately.
 
 This work spans three checkouts:
 
@@ -156,8 +156,11 @@ boundaries for that direction.
 
 ### Existing MoQ Metrics
 
-Preserve `forward_start`, `model_handoff`, `drain_gap`, and `full_span` plus
-their current artifacts. They remain application-layer diagnostics.
+Retain only `full_span` as the application-layer baseline and as the source
+for the existing representative-object timeline. Remove `forward_start`,
+`model_handoff`, and `drain_gap` from analysis, `objects.csv`, `latency.png`,
+`summary.json`, console output, tests, and documentation. They are superseded
+by the QUIC-inclusive boundary metrics and are not kept as hidden diagnostics.
 
 ### QUIC-Inclusive Object Metrics
 
@@ -200,7 +203,8 @@ because packet and object work can overlap.
 
 ## Artifacts
 
-Keep the existing MoQ artifacts unchanged:
+Keep the existing MoQ artifact filenames, with their contents narrowed to
+`full_span`:
 
 - `objects.csv`;
 - `latency.png`;
@@ -235,7 +239,8 @@ Use test-driven development in both repositories.
 identity, complete numeric stream IDs, raw offset zero, exact HTTP/3 prefix
 offsets, and matching bidirectional stream halves.
 
-`moq-trace` and `moq-net` tests cover connection serialization and stamping,
+`moq-trace` and `moq-net` tests cover removal of the three retired MoQ metrics,
+connection serialization and stamping,
 stream identity propagation, deterministic object identity, interval-union
 coverage, shared packets, retransmitted ranges, invalid sampling, incomplete
 coverage, exact multi-subscriber metric boundaries, repeated packet phases,
