@@ -225,7 +225,7 @@ impl ObjectContext {
 		}
 	}
 
-	/// Attach the stable transport session identifier.
+	/// Attach a process-local trace session identifier.
 	pub fn with_session_id(mut self, session_id: u64) -> Self {
 		self.session_id = Some(session_id);
 		self
@@ -458,6 +458,8 @@ pub struct Handle {
 	session_id: Option<u64>,
 }
 
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
 enum WriterCommand {
 	Event(Event),
 	Flush(std::sync::mpsc::SyncSender<bool>),
@@ -505,6 +507,14 @@ impl Handle {
 	/// Return a clone that stamps object events with this process-local session ID.
 	pub fn with_session_id(mut self, session_id: u64) -> Self {
 		self.session_id = Some(session_id);
+		self
+	}
+
+	/// Return a clone that stamps object events with the next process-local session ID.
+	pub fn with_new_session_id(mut self) -> Self {
+		if self.inner.is_some() {
+			self.session_id = Some(NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed));
+		}
 		self
 	}
 
@@ -982,6 +992,39 @@ mod tests {
 			Event::MoqObjectStart(object) | Event::MoqObjectEnd(object) => object.session_id == Some(7),
 			_ => false,
 		}));
+	}
+
+	#[test]
+	fn sequential_session_ids_start_at_one() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			..Config::disabled()
+		})
+		.unwrap();
+		let first = handle.clone().with_new_session_id();
+		let second = handle.with_new_session_id();
+
+		first
+			.object(ObjectContext::new(Direction::Tx, ObjectIdentity::new(11, 12, 13)))
+			.finish();
+		second
+			.object(ObjectContext::new(Direction::Tx, ObjectIdentity::new(21, 22, 23)))
+			.finish();
+		drop(first);
+		drop(second);
+
+		let session_ids = std::fs::read_to_string(path)
+			.unwrap()
+			.lines()
+			.map(|line| serde_json::from_str::<Event>(line).unwrap())
+			.filter_map(|event| match event {
+				Event::MoqObjectStart(object) => object.session_id,
+				_ => None,
+			})
+			.collect::<Vec<_>>();
+		assert_eq!(session_ids, vec![1, 2]);
 	}
 
 	#[test]

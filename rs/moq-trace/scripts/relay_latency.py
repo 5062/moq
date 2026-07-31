@@ -207,12 +207,23 @@ class TimelineInterval:
 
 
 @dataclasses.dataclass(frozen=True)
+class TimelineCopy:
+    """One subscriber copy and its creation order and full-span latency."""
+
+    session_id: int
+    subscriber_ordinal: int
+    full_span_us: float
+
+
+@dataclasses.dataclass(frozen=True)
 class ObjectTimeline:
     """All traced intervals for one selected logical object."""
 
     selection: TimelineSelection
     intervals: tuple[TimelineInterval, ...]
-    slowest_session_id: int
+    first_copy: TimelineCopy
+    last_copy: TimelineCopy
+    slowest_copy: TimelineCopy
 
 
 @dataclasses.dataclass(frozen=True)
@@ -383,12 +394,25 @@ def extract_object_timeline(events: pl.DataFrame, selection: TimelineSelection) 
             ),
         )
     )
-    tx_objects = [interval for interval in intervals if interval.direction == "tx" and interval.phase == "object"]
+    tx_objects = sorted(
+        (interval for interval in intervals if interval.direction == "tx" and interval.phase == "object"),
+        key=lambda interval: interval.session_id,
+    )
     if not tx_objects:
         raise TraceError(f"selected object ({selection.group_id}, {selection.object_id}) has no TX lifecycle")
+    copies = tuple(
+        TimelineCopy(interval.session_id, ordinal, interval.end_us)
+        for ordinal, interval in enumerate(tx_objects, start=1)
+    )
     # Break equal completion times by session ID so summary metadata is stable.
-    slowest = min(tx_objects, key=lambda interval: (-interval.end_us, interval.session_id))
-    return ObjectTimeline(selection=selection, intervals=intervals, slowest_session_id=slowest.session_id)
+    slowest = min(copies, key=lambda copy: (-copy.full_span_us, copy.session_id))
+    return ObjectTimeline(
+        selection=selection,
+        intervals=intervals,
+        first_copy=copies[0],
+        last_copy=copies[-1],
+        slowest_copy=slowest,
+    )
 
 
 def _read_trace(path: pathlib.Path) -> pl.DataFrame:
@@ -634,7 +658,11 @@ def write_summary(
                 "group_id": timeline.selection.group_id,
                 "object_id": timeline.selection.object_id,
                 "actual_us": timeline.selection.actual_us,
-                "slowest_session_id": timeline.slowest_session_id,
+                "copies": {
+                    "first": dataclasses.asdict(timeline.first_copy),
+                    "last": dataclasses.asdict(timeline.last_copy),
+                    "slowest": dataclasses.asdict(timeline.slowest_copy),
+                },
             }
             for timeline in timelines
         ],
@@ -737,9 +765,11 @@ def plot_object_timelines(
     tx_palette = plt.get_cmap("Oranges")
 
     for axis, timeline in zip(axes, timelines, strict=True):
-        tx_sessions = sorted(
-            {interval.session_id for interval in timeline.intervals if interval.direction == "tx"}
-        )
+        displayed_copies = (timeline.first_copy,)
+        if timeline.last_copy.session_id != timeline.first_copy.session_id:
+            displayed_copies += (timeline.last_copy,)
+        tx_sessions = [copy.session_id for copy in displayed_copies]
+        copy_by_session = {copy.session_id: copy for copy in displayed_copies}
         tx_colors = {
             session_id: tx_palette(0.5 + 0.4 * index / max(1, len(tx_sessions) - 1))
             for index, session_id in enumerate(tx_sessions)
@@ -751,6 +781,8 @@ def plot_object_timelines(
         }
 
         for interval in timeline.intervals:
+            if interval.direction == "tx" and interval.session_id not in copy_by_session:
+                continue
             color = rx_color if interval.direction == "rx" else tx_colors[interval.session_id]
             if interval.phase == "object":
                 axis.axvline(interval.start_us, color=color, linestyle=":", linewidth=0.9, alpha=0.55)
@@ -776,7 +808,13 @@ def plot_object_timelines(
 
         legend_handles = [Line2D([0], [0], color=rx_color, linewidth=5, label="RX")]
         legend_handles.extend(
-            Line2D([0], [0], color=tx_colors[session_id], linewidth=5, label=f"TX s{session_id}")
+            Line2D(
+                [0],
+                [0],
+                color=tx_colors[session_id],
+                linewidth=5,
+                label=f"TX #{copy_by_session[session_id].subscriber_ordinal}",
+            )
             for session_id in tx_sessions
         )
         axis.legend(
@@ -794,7 +832,9 @@ def plot_object_timelines(
         axis.set_title(
             f"{selected.statistic} target {selected.target_us:.2f} µs | "
             f"object ({selected.group_id}, {selected.object_id}) | "
-            f"actual {selected.actual_us:.2f} µs | slowest TX s{timeline.slowest_session_id}",
+            f"actual {selected.actual_us:.2f} µs | "
+            f"selected by TX #{timeline.slowest_copy.subscriber_ordinal}: "
+            f"{timeline.slowest_copy.full_span_us:.2f} µs",
             fontsize=10,
             loc="left",
         )

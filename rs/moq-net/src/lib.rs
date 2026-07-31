@@ -227,6 +227,11 @@ pub mod trace {
 			self
 		}
 
+		/// Ignore allocation of a process-local session identifier.
+		pub fn with_new_session_id(self) -> Self {
+			self
+		}
+
 		/// Return a no-op trace token for one object.
 		pub fn object(&self, _context: ObjectContext) -> ObjectTrace {
 			ObjectTrace
