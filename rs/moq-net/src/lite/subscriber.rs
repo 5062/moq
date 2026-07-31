@@ -874,7 +874,7 @@ struct SubStream<S: web_transport_trait::Session> {
 
 enum Sub<S: web_transport_trait::Session> {
 	None,
-	Active(SubStream<S>),
+	Active(Box<SubStream<S>>),
 }
 
 /// The source created for one received announce, remembering the publisher
@@ -1329,7 +1329,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			}
 		}
 
-		*sub = Sub::Active(SubStream {
+		*sub = Sub::Active(Box::new(SubStream {
 			stream,
 			id,
 			paused: false,
@@ -1338,7 +1338,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			start_group: subscription.group_start,
 			priority: subscription.priority,
 			_broadcast_sub: broadcast_sub,
-		});
+		}));
 
 		Ok(())
 	}

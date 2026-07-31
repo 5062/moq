@@ -16,7 +16,9 @@ are built with the `trace` feature.
 Build the relay with tracing enabled:
 
 ```sh
-cargo run -p moq-relay --features trace -- --trace-path /tmp/moq.trace.jsonl
+cargo run -p moq-relay --features trace -- \
+  demo/relay/localhost.toml \
+  --trace-path /tmp/moq.trace.jsonl
 ```
 
 The relay accepts the same settings through TOML, CLI flags, or environment
@@ -103,9 +105,22 @@ are `success`, `failed`, and `abandoned`. Object identity is:
 (session_id, track_alias, group_id, object_id)
 ```
 
-Offline tooling can correlate objects with `quic_stream_frame` records by
-connection or session, direction, stream ID when available, and overlapping
-stream byte ranges.
+`session_id` is sequential trace metadata that distinguishes subscriber copies.
+It is not a MoQ or QUIC wire identifier. `connection_id` is Quinn's
+process-local stable connection identity. The WebTransport adapter also exposes
+a transport stream ID and the underlying QUIC offset corresponding to
+application offset zero. That base accounts for the HTTP/3 WebTransport stream
+prefix.
+
+Completed object records use half-open transport-coordinate ranges:
+
+```text
+[stream_offset_start, stream_offset_end)
+```
+
+Offline packet correlation requires the same direction, `connection_id`, and
+`stream_id`, plus a non-empty overlap with the STREAM frame's half-open range.
+The analyzer does not infer connections from session order or timestamps.
 
 ## Sampling and backpressure
 
@@ -120,6 +135,63 @@ queue increments `Handle::dropped`; instrumentation never waits for disk I/O.
 `Handle::writer_failed` reports terminal serialization or I/O failure.
 `Handle::flush` is an explicit writer barrier for consumers that need to read a
 live trace file while cached handle clones still exist.
+
+## Relay latency analysis
+
+Run the local publisher, relay, and subscriber experiment with:
+
+```sh
+python rs/moq-trace/scripts/relay_latency.py
+```
+
+Correlated object analysis requires `packet_sample = 1`, complete packet
+lifecycles, transport identity on every completed object, and complete STREAM
+frame coverage. Validation fails when any requirement is missing instead of
+guessing a join.
+
+Frames are ordered by packet completion. The analyzer accumulates their clipped
+interval union and stops at the first packet completion that fully covers the
+object. Later retransmissions do not extend the measured latency.
+
+The MoQ baseline is:
+
+```text
+full_span = TX object end - RX object start
+```
+
+Each outbound subscriber copy also has three QUIC-inclusive metrics:
+
+```text
+quic_forward_start = first outbound covering packet end
+                   - first inbound covering packet start
+
+quic_tail_gap = first complete outbound coverage end
+              - first complete inbound coverage end
+
+quic_full_span = first complete outbound coverage end
+               - first inbound covering packet start
+```
+
+`quic_full_span` includes inbound QUIC parsing, header unprotection, decryption,
+frame processing, MoQ relay work, outbound frame encoding, encryption, and
+header protection. It ends when Quinn completes the first packet set covering
+the outbound object. It excludes UDP socket completion and peer acknowledgement.
+
+Packet diagnostics report RX and TX packet spans plus each successful packet
+phase occurrence. They are kept separate from object metrics because packet and
+object work can overlap.
+
+The experiment writes:
+
+- `objects.csv`: MoQ `full_span` samples.
+- `quic_objects.csv`: the three QUIC-inclusive metrics per subscriber copy.
+- `quic_packets.csv`: packet-span and packet-phase samples.
+- `summary.json`: workload metadata, counts, and all three statistics sections.
+- `latency.png`: MoQ latency distributions, percentiles, and time series.
+- `quic_latency.png`: QUIC-inclusive object plots.
+- `packet_latency.png`: packet-span and packet-phase plots.
+- `object_timeline.png`: MoQ RX phases plus the first-created and last-created
+  subscriber sessions for representative objects.
 
 ## Quinn patch
 
