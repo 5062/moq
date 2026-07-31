@@ -39,6 +39,11 @@ the selected object's RX object start and display elapsed microseconds. The
 chart therefore compares in-process durations without implying synchronized
 wall clocks or network latency.
 
+The MoQ session driver assigns one process-local `session_id` before cloning
+its trace handle into the session halves. Object scopes inherit that ID unless
+an event supplies a more specific one. This makes each subscriber forwarding
+copy distinguishable in the trace without changing MoQ or QUIC wire data.
+
 Reject a selected object if a phase start cannot be paired with its completion
 within the same direction, session, and phase. Existing analysis validation
 continues to reject incomplete object lifecycles before plotting.
@@ -55,12 +60,15 @@ Use three vertically stacked panels with one shared elapsed-microseconds x-axis:
 
 Within each panel:
 
-- show RX lifecycle and phases first;
-- show one TX lifecycle and phase group per outbound session;
+- use exactly six y-axis rows in `ObjectPhase` declaration order:
+  `RX Header Parse`, `RX Create`, `RX Payload Read`, `TX Clone`,
+  `TX Header Encode`, and `TX Payload Write`;
 - draw phase durations as horizontal intervals;
-- draw object start/end boundaries with distinct marker shapes;
-- directly label phase rows so the chart does not depend on color;
-- use restrained blue for RX, orange for TX, and neutral lifecycle guides;
+- offset outbound sessions within each TX phase row and identify them in a
+  legend instead of adding session-specific y-axis rows;
+- draw object lifecycle start/end boundaries as vertical guides because
+  lifecycle is not an `ObjectPhase` variant;
+- use restrained blue for RX and an orange palette for TX sessions;
 - retain repeated payload intervals rather than merging away scheduling gaps.
 
 All panels use the same x-axis limit, starting at zero, so typical and tail
