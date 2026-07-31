@@ -121,6 +121,9 @@ pub struct ObjectEvent {
 	/// Process-local MoQ session ID when available.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub session_id: Option<u64>,
+	/// Process-local transport connection ID when available.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub connection_id: Option<u64>,
 	/// Whether this object is entering or leaving the relay.
 	pub direction: Direction,
 	/// MoQ protocol family for this object.
@@ -201,6 +204,7 @@ impl ObjectIdentity {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectContext {
 	session_id: Option<u64>,
+	connection_id: Option<u64>,
 	direction: Direction,
 	track_alias: u64,
 	group_id: u64,
@@ -215,6 +219,7 @@ impl ObjectContext {
 	pub fn new(direction: Direction, identity: ObjectIdentity) -> Self {
 		Self {
 			session_id: None,
+			connection_id: None,
 			direction,
 			track_alias: identity.track_alias,
 			group_id: identity.group_id,
@@ -228,6 +233,12 @@ impl ObjectContext {
 	/// Attach a process-local trace session identifier.
 	pub fn with_session_id(mut self, session_id: u64) -> Self {
 		self.session_id = Some(session_id);
+		self
+	}
+
+	/// Attach a process-local transport connection identifier.
+	pub fn with_connection_id(mut self, connection_id: u64) -> Self {
+		self.connection_id = Some(connection_id);
 		self
 	}
 
@@ -456,6 +467,7 @@ pub fn object_interval_end(handle: &Handle, object: &ObjectEvent) -> bool {
 pub struct Handle {
 	inner: Option<Arc<Inner>>,
 	session_id: Option<u64>,
+	connection_id: Option<u64>,
 }
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -496,6 +508,7 @@ impl Handle {
 		Ok(Self {
 			inner: Some(Arc::new(Inner::new(config, Some(sender), Some(writer), writer_failed))),
 			session_id: None,
+			connection_id: None,
 		})
 	}
 
@@ -507,6 +520,12 @@ impl Handle {
 	/// Return a clone that stamps object events with this process-local session ID.
 	pub fn with_session_id(mut self, session_id: u64) -> Self {
 		self.session_id = Some(session_id);
+		self
+	}
+
+	/// Return a clone that stamps object events with this transport connection ID.
+	pub fn with_connection_id(mut self, connection_id: u64) -> Self {
+		self.connection_id = Some(connection_id);
 		self
 	}
 
@@ -536,6 +555,7 @@ impl Handle {
 		let object = ObjectEvent {
 			timestamp_ns: now_ns(),
 			session_id: context.session_id.or(self.session_id),
+			connection_id: context.connection_id.or(self.connection_id),
 			direction: context.direction,
 			protocol: Protocol::MoqTransport,
 			track_alias: context.track_alias,
@@ -716,6 +736,7 @@ pub fn global() -> Handle {
 	Handle {
 		inner,
 		session_id: None,
+		connection_id: None,
 	}
 }
 
@@ -745,6 +766,7 @@ mod tests {
 		Event::MoqObjectEnd(ObjectEvent {
 			timestamp_ns: 42,
 			session_id: Some(7),
+			connection_id: Some(42),
 			direction: Direction::Tx,
 			protocol: Protocol::MoqTransport,
 			track_alias: 11,
@@ -799,6 +821,7 @@ mod tests {
 		let json = serde_json::to_string(&object_event()).unwrap();
 		assert!(json.contains(r#""type":"moq_object_end""#));
 		assert!(json.contains(r#""session_id":7"#));
+		assert!(json.contains(r#""connection_id":42"#));
 		assert!(json.contains(r#""protocol":"moq_transport""#));
 	}
 
@@ -811,6 +834,7 @@ mod tests {
 			object: ObjectEvent {
 				timestamp_ns: 42,
 				session_id: Some(7),
+				connection_id: None,
 				direction: Direction::Rx,
 				protocol: Protocol::MoqTransport,
 				track_alias: 11,
@@ -845,6 +869,7 @@ mod tests {
 		let object = ObjectEvent {
 			timestamp_ns: u64::MAX,
 			session_id: Some(7),
+			connection_id: None,
 			direction: Direction::Tx,
 			protocol: Protocol::MoqTransport,
 			track_alias: 11,
@@ -992,6 +1017,38 @@ mod tests {
 			Event::MoqObjectStart(object) | Event::MoqObjectEnd(object) => object.session_id == Some(7),
 			_ => false,
 		}));
+	}
+
+	#[test]
+	fn object_context_connection_id_overrides_handle() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			..Config::disabled()
+		})
+		.unwrap()
+		.with_connection_id(42);
+
+		handle
+			.clone()
+			.object(ObjectContext::new(Direction::Tx, ObjectIdentity::new(11, 12, 13)).with_connection_id(99))
+			.finish();
+		handle
+			.object(ObjectContext::new(Direction::Tx, ObjectIdentity::new(21, 22, 23)))
+			.finish();
+		drop(handle);
+
+		let connection_ids = std::fs::read_to_string(path)
+			.unwrap()
+			.lines()
+			.map(|line| serde_json::from_str::<Event>(line).unwrap())
+			.filter_map(|event| match event {
+				Event::MoqObjectStart(object) => object.connection_id,
+				_ => None,
+			})
+			.collect::<Vec<_>>();
+		assert_eq!(connection_ids, vec![99, 42]);
 	}
 
 	#[test]
@@ -1158,6 +1215,7 @@ mod tests {
 		let handle = Handle {
 			inner: Some(Arc::new(Inner::new(Config::default(), None, None, failed))),
 			session_id: None,
+			connection_id: None,
 		};
 		assert!(handle.writer_failed());
 	}
@@ -1173,6 +1231,7 @@ mod tests {
 				Arc::new(AtomicBool::new(false)),
 			))),
 			session_id: None,
+			connection_id: None,
 		};
 
 		assert!(handle.emit(object_event()));
