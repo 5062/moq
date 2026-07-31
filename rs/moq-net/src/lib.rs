@@ -154,6 +154,11 @@ pub mod trace {
 			self
 		}
 
+		/// Ignore an optional transport connection identifier.
+		pub fn with_connection_id(self, _connection_id: u64) -> Self {
+			self
+		}
+
 		/// Ignore an optional stream identifier.
 		pub fn with_stream_id(self, _stream_id: u64) -> Self {
 			self
@@ -224,6 +229,11 @@ pub mod trace {
 
 		/// Ignore a process-local session identifier.
 		pub fn with_session_id(self, _session_id: u64) -> Self {
+			self
+		}
+
+		/// Ignore a process-local transport connection identifier.
+		pub fn with_connection_id(self, _connection_id: u64) -> Self {
 			self
 		}
 

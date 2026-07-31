@@ -963,13 +963,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let Some(id_delta) = stream.decode_maybe::<u64>().await? else {
 				break;
 			};
-			let mut object = self.trace.object(
-				trace::ObjectContext::new(
-					trace::Direction::Rx,
-					trace::ObjectIdentity::new(group.track_alias, group.group_id, object_id),
-				)
-				.with_stream_offset_start(object_start),
-			);
+			let mut context = trace::ObjectContext::new(
+				trace::Direction::Rx,
+				trace::ObjectIdentity::new(group.track_alias, group.group_id, object_id),
+			)
+			.with_stream_offset_start(object_start);
+			if let Some(stream_id) = stream.stream_id() {
+				context = context.with_stream_id(stream_id);
+			}
+			let mut object = self.trace.object(context);
 			object_id += 1;
 			let mut header = object.phase(trace::ObjectPhase::HeaderParse);
 

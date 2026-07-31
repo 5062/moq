@@ -9,20 +9,28 @@ pub struct Reader<S: web_transport_trait::RecvStream, V> {
 	stream: S,
 	buffer: BytesMut,
 	version: V,
+	stream_id: Option<u64>,
 	offset: u64,
 }
 
 impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	pub fn new(stream: S, version: V) -> Self {
+		let identity = stream.stream_id();
 		Self {
 			stream,
 			buffer: Default::default(),
 			version,
-			offset: 0,
+			stream_id: identity.map(|identity| identity.id()),
+			offset: identity.map_or(0, |identity| identity.offset()),
 		}
 	}
 
-	/// Return the number of application stream bytes consumed by this reader.
+	/// Return the underlying transport stream ID, when available.
+	pub fn stream_id(&self) -> Option<u64> {
+		self.stream_id
+	}
+
+	/// Return the transport stream byte offset consumed by this reader.
 	pub fn offset(&self) -> u64 {
 		self.offset
 	}
@@ -176,6 +184,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 			stream: self.stream,
 			buffer: self.buffer,
 			version,
+			stream_id: self.stream_id,
 			offset: self.offset,
 		}
 	}
@@ -184,9 +193,20 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::coding::test;
 
 	#[allow(dead_code)]
 	fn offset_is_available_without_trace<S: web_transport_trait::RecvStream, V>() {
 		let _: fn(&Reader<S, V>) -> u64 = Reader::offset;
+	}
+
+	#[tokio::test]
+	async fn transport_identity_uses_transport_offset() {
+		let mut reader = Reader::new(test::RecvStream::new(b"hello"), ());
+
+		assert_eq!(reader.stream_id(), Some(17));
+		assert_eq!(reader.offset(), 3);
+		assert_eq!(reader.read_chunk(5).await.unwrap().unwrap(), b"hello"[..]);
+		assert_eq!(reader.offset(), 8);
 	}
 }

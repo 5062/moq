@@ -9,6 +9,9 @@ mod varint;
 mod version;
 mod writer;
 
+#[cfg(test)]
+mod test;
+
 pub use decode::*;
 pub use encode::*;
 pub use reader::*;

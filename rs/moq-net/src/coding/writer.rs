@@ -7,21 +7,29 @@ pub struct Writer<S: web_transport_trait::SendStream, V> {
 	stream: Option<S>,
 	buffer: bytes::BytesMut,
 	version: V,
+	stream_id: Option<u64>,
 	offset: u64,
 }
 
 impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 	/// Create a new writer for the given stream and version.
 	pub fn new(stream: S, version: V) -> Self {
+		let identity = stream.stream_id();
 		Self {
 			stream: Some(stream),
 			buffer: Default::default(),
 			version,
-			offset: 0,
+			stream_id: identity.map(|identity| identity.id()),
+			offset: identity.map_or(0, |identity| identity.offset()),
 		}
 	}
 
-	/// Return the number of application stream bytes written by this writer.
+	/// Return the underlying transport stream ID, when available.
+	pub fn stream_id(&self) -> Option<u64> {
+		self.stream_id
+	}
+
+	/// Return the transport stream byte offset written by this writer.
 	pub fn offset(&self) -> u64 {
 		self.offset
 	}
@@ -116,6 +124,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 			stream: self.stream.take(),
 			buffer: std::mem::take(&mut self.buffer),
 			version,
+			stream_id: self.stream_id,
 			offset: self.offset,
 		}
 	}
@@ -141,9 +150,20 @@ impl<S: web_transport_trait::SendStream, V> Drop for Writer<S, V> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::coding::test;
 
 	#[allow(dead_code)]
 	fn offset_is_available_without_trace<S: web_transport_trait::SendStream, V>() {
 		let _: fn(&Writer<S, V>) -> u64 = Writer::offset;
+	}
+
+	#[tokio::test]
+	async fn transport_identity_uses_transport_offset() {
+		let mut writer = Writer::new(test::SendStream, ());
+
+		assert_eq!(writer.stream_id(), Some(17));
+		assert_eq!(writer.offset(), 3);
+		writer.write_chunk(bytes::Bytes::from_static(b"hello")).await.unwrap();
+		assert_eq!(writer.offset(), 8);
 	}
 }
