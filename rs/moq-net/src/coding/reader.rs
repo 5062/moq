@@ -156,7 +156,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	}
 
 	/// Returns true if there is more data available in the buffer or stream.
-	async fn has_more(&mut self) -> Result<bool, Error> {
+	pub(crate) async fn has_more(&mut self) -> Result<bool, Error> {
 		if !self.buffer.is_empty() {
 			return Ok(true);
 		}
@@ -208,5 +208,19 @@ mod tests {
 		assert_eq!(reader.offset(), 3);
 		assert_eq!(reader.read_chunk(5).await.unwrap().unwrap(), b"hello"[..]);
 		assert_eq!(reader.offset(), 8);
+	}
+
+	#[tokio::test]
+	async fn has_more_buffers_without_advancing_offset() {
+		let mut reader = Reader::new(
+			test::RecvStream::new(b"\x07"),
+			crate::Version::Ietf(crate::ietf::Version::Draft19),
+		);
+
+		assert!(reader.has_more().await.unwrap());
+		assert_eq!(reader.offset(), 3);
+		assert_eq!(reader.decode::<u64>().await.unwrap(), 7);
+		assert_eq!(reader.offset(), 4);
+		assert!(!reader.has_more().await.unwrap());
 	}
 }

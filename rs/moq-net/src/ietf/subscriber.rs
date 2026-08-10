@@ -959,10 +959,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut object_id = 0;
 
 		loop {
-			let object_start = stream.offset();
-			let Some(id_delta) = stream.decode_maybe::<u64>().await? else {
+			if !stream.has_more().await? {
 				break;
-			};
+			}
+			let object_start = stream.offset();
 			let mut context = trace::ObjectContext::new(
 				trace::Direction::Rx,
 				trace::ObjectIdentity::new(group.track_alias, group.group_id, object_id),
@@ -974,6 +974,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut object = self.trace.object(context);
 			object_id += 1;
 			let mut header = object.phase(trace::ObjectPhase::HeaderParse);
+			let id_delta = stream.decode::<u64>().await?;
 
 			if id_delta != 0 {
 				header.finish(trace::ObjectOutcome::Failed);
