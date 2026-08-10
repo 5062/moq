@@ -268,6 +268,17 @@ class Packet:
 
 
 @dataclasses.dataclass(frozen=True)
+class PacketPhase:
+    """One successful phase interval within a QUIC packet."""
+
+    packet: Packet
+    phase: str
+    occurrence: int
+    start_ns: int
+    end_ns: int
+
+
+@dataclasses.dataclass(frozen=True)
 class StreamFrame:
     """One successful STREAM frame and its containing packet."""
 
@@ -351,7 +362,9 @@ def _pair_phase_scope(
     return tuple(intervals)
 
 
-def _parse_packets(events: pl.DataFrame) -> tuple[tuple[Packet, ...], tuple[StreamFrame, ...], pl.DataFrame]:
+def _parse_packets(
+    events: pl.DataFrame,
+) -> tuple[tuple[Packet, ...], tuple[StreamFrame, ...], tuple[PacketPhase, ...], pl.DataFrame]:
     """Parse successful packet lifecycles, STREAM frames, and phase samples."""
 
     packet_rows = [
@@ -424,6 +437,7 @@ def _parse_packets(events: pl.DataFrame) -> tuple[tuple[Packet, ...], tuple[Stre
         phases.setdefault((trace_id, phase), {"start": [], "done": []})[edge].append(row)
 
     first_packet_ns = min((packet.start_ns for packet in packets), default=0)
+    phase_intervals: list[PacketPhase] = []
     metric_rows: list[dict] = []
     phase_order = {
         "header_parse": 1,
@@ -458,6 +472,7 @@ def _parse_packets(events: pl.DataFrame) -> tuple[tuple[Packet, ...], tuple[Stre
                 raise TraceError(f"packet {packet.trace_id} has invalid {packet.direction} phase {phase}")
             intervals = _pair_phase_scope(scope, f"packet {packet.trace_id} {phase}")
             for occurrence, (start_ns, end_ns) in enumerate(intervals):
+                phase_intervals.append(PacketPhase(packet, phase, occurrence, start_ns, end_ns))
                 metric_rows.append(
                     {
                         "metric": f"{packet.direction}_{phase}",
@@ -471,7 +486,7 @@ def _parse_packets(events: pl.DataFrame) -> tuple[tuple[Packet, ...], tuple[Stre
                 )
 
     samples = pl.DataFrame(metric_rows, schema=PACKET_SAMPLE_SCHEMA)
-    return tuple(packets), tuple(frames), samples
+    return tuple(packets), tuple(frames), tuple(phase_intervals), samples
 
 
 def _merge_interval(intervals: list[tuple[int, int]], new: tuple[int, int]) -> list[tuple[int, int]]:
@@ -579,7 +594,59 @@ def select_timeline_objects(samples: pl.DataFrame) -> tuple[TimelineSelection, .
     return tuple(selected)
 
 
-def extract_object_timeline(events: pl.DataFrame, selection: TimelineSelection) -> ObjectTimeline:
+def _quic_timeline_intervals(
+    object_ranges: tuple[ObjectRange, ...],
+    packets: tuple[Packet, ...],
+    frames: tuple[StreamFrame, ...],
+    packet_phases: tuple[PacketPhase, ...],
+) -> tuple[tuple[str, int, str, int, int, int], ...]:
+    """Return packet and packet-phase intervals covering selected object copies."""
+
+    packet_by_id = {packet.trace_id: packet for packet in packets}
+    intervals: list[tuple[str, int, str, int, int, int]] = []
+    for object_range in sorted(object_ranges, key=lambda item: (item.direction, item.session_id)):
+        coverage = _first_complete_coverage(object_range, frames)
+        trace_ids = set(coverage.packet_trace_ids)
+        covered_packets = sorted(
+            (packet_by_id[trace_id] for trace_id in trace_ids),
+            key=lambda packet: (packet.start_ns, packet.trace_id),
+        )
+        for occurrence, packet in enumerate(covered_packets):
+            intervals.append(
+                (
+                    object_range.direction,
+                    object_range.session_id,
+                    "quic_packet",
+                    occurrence,
+                    packet.start_ns,
+                    packet.end_ns,
+                )
+            )
+        covered_phases = sorted(
+            (phase for phase in packet_phases if phase.packet.trace_id in trace_ids),
+            key=lambda phase: (phase.start_ns, phase.packet.trace_id, phase.phase, phase.occurrence),
+        )
+        for phase in covered_phases:
+            intervals.append(
+                (
+                    object_range.direction,
+                    object_range.session_id,
+                    f"quic_{phase.phase}",
+                    phase.occurrence,
+                    phase.start_ns,
+                    phase.end_ns,
+                )
+            )
+    return tuple(intervals)
+
+
+def extract_object_timeline(
+    events: pl.DataFrame,
+    selection: TimelineSelection,
+    packets: tuple[Packet, ...],
+    frames: tuple[StreamFrame, ...],
+    packet_phases: tuple[PacketPhase, ...],
+) -> ObjectTimeline:
     """Pair every lifecycle boundary for one selected object."""
 
     selected = events.filter(
@@ -628,6 +695,11 @@ def extract_object_timeline(events: pl.DataFrame, selection: TimelineSelection) 
             for occurrence, (start, end) in enumerate(intervals):
                 raw_intervals.append((direction, session_id, phase, occurrence, start, end))
 
+    object_ranges = tuple(
+        _object_range(row) for row in rows if row["type"] == "moq_object_end"
+    )
+    raw_intervals.extend(_quic_timeline_intervals(object_ranges, packets, frames, packet_phases))
+
     rx_objects = [interval for interval in raw_intervals if interval[0] == "rx" and interval[2] == "object"]
     # A single RX start provides a shared zero point for every subscriber copy.
     rx_start = rx_objects[0][4]
@@ -638,6 +710,13 @@ def extract_object_timeline(events: pl.DataFrame, selection: TimelineSelection) 
         if direction == "tx" and phase == "object" and start > rx_end:
             raw_intervals.append((direction, session_id, "scheduling", occurrence, rx_end, start))
     phase_order = {
+        "quic_packet": 0,
+        "quic_header_parse": 1,
+        "quic_header_unprotect": 2,
+        "quic_payload_decrypt": 3,
+        "quic_frame_process": 4,
+        "quic_frame_encode": 1,
+        "quic_packet_encrypt": 2,
         "object": 0,
         "header_parse": 1,
         "create": 2,
@@ -843,7 +922,7 @@ def analyze_trace(
     """Parse, validate, trim, and summarize a relay JSONL trace."""
 
     events = _read_trace(path)
-    packets, frames, packet_samples = _parse_packets(events)
+    packets, frames, packet_phases, packet_samples = _parse_packets(events)
     packet_count = len(packets)
     objects = _group_objects(events, config.object_size)
     if objects.is_empty():
@@ -904,7 +983,9 @@ def analyze_trace(
         first_rx,
     )
     selections = select_timeline_objects(samples)
-    timelines = tuple(extract_object_timeline(events, selection) for selection in selections)
+    timelines = tuple(
+        extract_object_timeline(events, selection, packets, frames, packet_phases) for selection in selections
+    )
     return Analysis(
         samples=samples,
         statistics=summarize(samples),
@@ -1105,7 +1186,14 @@ def plot_object_timelines(
 
     if not timelines:
         raise ValueError("cannot plot an empty object timeline selection")
-    phase_rows = (
+    rx_quic_rows = (
+        ("rx", "quic_packet", "RX QUIC Packet"),
+        ("rx", "quic_header_parse", "RX QUIC Header Parse"),
+        ("rx", "quic_header_unprotect", "RX QUIC Header Unprotect"),
+        ("rx", "quic_payload_decrypt", "RX QUIC Payload Decrypt"),
+        ("rx", "quic_frame_process", "RX QUIC Frame Process"),
+    )
+    moq_rows = (
         ("rx", "header_parse", "RX Header Parse"),
         ("rx", "create", "RX Create"),
         ("rx", "payload_read", "RX Payload Read"),
@@ -1114,14 +1202,30 @@ def plot_object_timelines(
         ("tx", "header_encode", "TX Header Encode"),
         ("tx", "payload_write", "TX Payload Write"),
     )
+    tx_quic_rows = (
+        ("tx", "quic_frame_encode", "TX QUIC Frame Encode"),
+        ("tx", "quic_packet_encrypt", "TX QUIC Packet Encrypt"),
+        ("tx", "quic_packet", "TX QUIC Packet"),
+    )
+    present = {
+        (interval.direction, interval.phase)
+        for timeline in timelines
+        for interval in timeline.intervals
+    }
+    rx_quic_rows = tuple(row for row in rx_quic_rows if row[:2] in present)
+    tx_quic_rows = tuple(row for row in tx_quic_rows if row[:2] in present)
+    phase_rows = rx_quic_rows + moq_rows + tx_quic_rows
     positions = {(direction, phase): index for index, (direction, phase, _label) in enumerate(phase_rows)}
     labels = [label for _direction, _phase, label in phase_rows]
 
     figure_height = max(11.0, len(timelines) * len(phase_rows) * 0.28 + 2.5)
     fig, axes = plt.subplots(len(timelines), 1, figsize=(15, figure_height), sharex=True, squeeze=False)
     axes = axes[:, 0]
+    minimum = min(interval.start_us for timeline in timelines for interval in timeline.intervals)
     maximum = max(interval.end_us for timeline in timelines for interval in timeline.intervals)
-    x_limit = max(1.0, maximum * 1.05)
+    padding = max(1.0, (maximum - minimum) * 0.03)
+    x_min = min(0.0, minimum - padding)
+    x_max = max(1.0, maximum + padding)
     rx_color = "#2563EB"
     tx_palette = plt.get_cmap("Oranges")
 
@@ -1158,14 +1262,22 @@ def plot_object_timelines(
             if interval.direction == "tx":
                 y += tx_offsets[interval.session_id]
                 height = lane_height * 0.82
+            packet_span = interval.phase == "quic_packet"
             axis.broken_barh(
                 [(interval.start_us, interval.end_us - interval.start_us)],
                 (y - height / 2, height),
-                facecolors=color,
-                edgecolors="#334155",
-                linewidth=0.7,
-                alpha=0.88,
+                facecolors="none" if packet_span else color,
+                edgecolors=color if packet_span else "#334155",
+                linewidth=0.9 if packet_span else 0.7,
+                alpha=0.72 if packet_span else 0.88,
             )
+
+        section_boundaries = (
+            len(rx_quic_rows) - 0.5,
+            len(rx_quic_rows) + len(moq_rows) - 0.5,
+        )
+        for boundary in section_boundaries:
+            axis.axhline(boundary, color="#94A3B8", linewidth=0.8, alpha=0.8)
 
         legend_handles = [Line2D([0], [0], color=rx_color, linewidth=5, label="RX")]
         legend_handles.extend(
@@ -1186,7 +1298,7 @@ def plot_object_timelines(
         )
         axis.set_yticks(range(len(phase_rows)), labels, fontsize=8)
         axis.set_ylim(len(phase_rows) - 0.5, -0.5)
-        axis.set_xlim(0, x_limit)
+        axis.set_xlim(x_min, x_max)
         axis.grid(axis="x", color="#CBD5E1", alpha=0.7, linewidth=0.7)
         axis.set_axisbelow(True)
         selected = timeline.selection
@@ -1197,9 +1309,9 @@ def plot_object_timelines(
             loc="left",
         )
 
-    axes[-1].set_xlabel("Elapsed from RX object start (µs)")
+    axes[-1].set_xlabel("Elapsed from RX MoQ object start (µs)")
     fig.suptitle(
-        f"Mean, median, and p99 of per-object latency | {config.object_size} bytes | "
+        f"QUIC packet and MoQ object timelines | {config.object_size} bytes | "
         f"{config.subscribers} subscriber(s) | {PROTOCOL}",
         fontsize=14,
     )

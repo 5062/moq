@@ -190,8 +190,12 @@ The experiment writes:
 - `latency.png`: MoQ latency distributions, percentiles, and time series.
 - `quic_latency.png`: QUIC-inclusive object plots.
 - `packet_latency.png`: packet-span and packet-phase plots.
-- `object_timeline.png`: MoQ RX phases plus the first-created and last-created
-  subscriber sessions for representative objects.
+- `object_timeline.png`: correlated QUIC packet phases and MoQ phases for the
+  first-created and last-created subscriber sessions of representative objects.
+
+Object timelines use the RX MoQ object start as zero. Correlated RX QUIC packet
+work therefore appears at negative elapsed times, while TX QUIC work can extend
+beyond the TX MoQ object end.
 
 ## Quinn patch
 
