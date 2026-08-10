@@ -107,6 +107,7 @@ class ExperimentConfig(BaseModel):
     output: pathlib.Path
     relay_bin: pathlib.Path
     bench_bin: pathlib.Path
+    quinn_path: pathlib.Path | None = None
     relay_cpu: int | None = Field(default=None, ge=0)
     subscribers: int = Field(default=1, gt=0)
     fps: int = Field(default=30, gt=0)
@@ -213,6 +214,38 @@ def build_subscriber_command(config: ExperimentConfig) -> list[str]:
         "--duration",
         f"{total:g}s",
     ]
+
+
+def build_workspace_command(config: ExperimentConfig) -> list[str]:
+    """Build the experiment binaries, optionally using a local Quinn checkout."""
+
+    command = ["cargo", "build"]
+    if config.release:
+        command.append("--release")
+    command.extend(["-p", "moq-relay", "--features", "trace", "-p", "moq-bench"])
+    if config.quinn_path is not None:
+        for crate in ("quinn", "quinn-proto"):
+            path = (config.quinn_path / crate).resolve()
+            command.extend(
+                [
+                    "--config",
+                    f"patch.crates-io.{crate}.path={json.dumps(str(path))}",
+                ]
+            )
+    return command
+
+
+def validate_quinn_path(config: ExperimentConfig) -> None:
+    """Validate an optional local Quinn workspace override."""
+
+    if config.quinn_path is None:
+        return
+    if config.skip_build:
+        raise ValueError("--quinn-path cannot be combined with --skip-build")
+    for crate in ("quinn", "quinn-proto"):
+        manifest = config.quinn_path / crate / "Cargo.toml"
+        if not manifest.is_file():
+            raise ValueError(f"local Quinn checkout is missing {manifest}")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1203,7 +1236,6 @@ def plot_object_timelines(
         ("rx", "quic_packet", "RX QUIC Packet"),
         ("rx", "quic_header_parse", "RX QUIC Header Parse"),
         ("rx", "quic_routing", "RX QUIC Routing"),
-        ("rx", "quic_scheduling", "RX QUIC Scheduling"),
         ("rx", "quic_header_unprotect", "RX QUIC Header Unprotect"),
         ("rx", "quic_payload_decrypt", "RX QUIC Payload Decrypt"),
         ("rx", "quic_frame_process", "RX QUIC Frame Process"),
@@ -1413,6 +1445,7 @@ def _launch(command: list[str], log: pathlib.Path) -> tuple[subprocess.Popen[byt
 
 def run_experiment(config: ExperimentConfig) -> pathlib.Path:
     commands = {
+        "build": build_workspace_command(config),
         "relay": build_relay_command(config),
         "publisher": build_publisher_command(config),
         "subscriber": build_subscriber_command(config),
@@ -1421,18 +1454,21 @@ def run_experiment(config: ExperimentConfig) -> pathlib.Path:
     output.mkdir(parents=True, exist_ok=False)
     build_log = output / "build.log"
     if not config.skip_build:
-        build_command = ["cargo", "build"]
-        if config.release:
-            build_command.append("--release")
-        build_command.extend(["-p", "moq-relay", "--features", "trace", "-p", "moq-bench"])
-        with build_log.open("wb") as log:
-            result = subprocess.run(
-                build_command,
-                cwd=config.repo,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
+        lock_path = config.repo / "Cargo.lock"
+        lock_contents = lock_path.read_bytes() if config.quinn_path is not None else None
+        try:
+            with build_log.open("wb") as log:
+                result = subprocess.run(
+                    commands["build"],
+                    cwd=config.repo,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+        finally:
+            # A path override changes Cargo's source identity. Keep it local to this build.
+            if lock_contents is not None:
+                lock_path.write_bytes(lock_contents)
         if result.returncode != 0:
             raise ExperimentError(f"build failed with status {result.returncode}; see {build_log}")
 
@@ -1481,6 +1517,11 @@ def run_experiment(config: ExperimentConfig) -> pathlib.Path:
 
     trace_path = output / "relay.jsonl"
     analysis = analyze_trace(trace_path, config)
+    if config.quinn_path is not None:
+        required = {"rx_routing", "rx_scheduling"}
+        missing = sorted(required - analysis.packet_statistics.keys())
+        if missing:
+            raise TraceError(f"local Quinn trace is missing packet metrics: {', '.join(missing)}")
     write_samples(
         output / "objects.csv",
         analysis.samples,
@@ -1541,6 +1582,10 @@ def main(
         pathlib.Path | None,
         typer.Option("--bench-bin", help="Override the benchmark binary path."),
     ] = None,
+    quinn_path: Annotated[
+        pathlib.Path | None,
+        typer.Option("--quinn-path", help="Build with a local Quinn checkout."),
+    ] = None,
 ) -> None:
     """Parse arguments, run the experiment, and report artifacts."""
 
@@ -1553,6 +1598,7 @@ def main(
             output=output,
             relay_bin=relay_bin or repo / "target" / profile / "moq-relay",
             bench_bin=bench_bin or repo / "target" / profile / "moq-bench",
+            quinn_path=quinn_path,
             relay_cpu=relay_cpu,
             subscribers=subscribers,
             fps=fps,
@@ -1565,6 +1611,7 @@ def main(
             skip_build=skip_build,
         )
         validate_cpu_affinity(config)
+        validate_quinn_path(config)
         result = run_experiment(config)
         summary = json.loads((result / "summary.json").read_text())
     except (ExperimentError, OSError, TraceError, ValidationError, ValueError) as error:

@@ -146,6 +146,15 @@ Run the local publisher, relay, and subscriber experiment with:
 python rs/moq-trace/scripts/relay_latency.py
 ```
 
+To test uncommitted instrumentation in a local Quinn checkout, override the
+workspace's pinned fork revision:
+
+```sh
+python rs/moq-trace/scripts/relay_latency.py --quinn-path ~/quinn
+```
+
+The selected build command is stored in `summary.json`.
+
 Correlated object analysis requires `packet_sample = 1`, complete packet
 lifecycles, transport identity on every completed object, and complete STREAM
 frame coverage. Validation fails when any requirement is missing instead of
@@ -199,7 +208,9 @@ Object timelines use the RX MoQ object start as zero. Correlated RX QUIC packet
 work therefore appears at negative elapsed times, while TX QUIC work can extend
 beyond the TX MoQ object end. On RX, `routing` spans from endpoint header parsing
 completion through the connection channel handoff. `scheduling` spans from that
-handoff until the connection task begins handling the datagram.
+handoff until the connection task begins handling the datagram. This queue wait
+never overlaps later phases of the same packet, but it can overlap processing of
+earlier packets on the same connection.
 
 ## Quinn patch
 

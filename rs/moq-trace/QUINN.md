@@ -28,7 +28,8 @@ same trace crate instance and the same process-global trace handle.
 The RX packet envelope starts before Quinn's initial protected-header parse.
 `routing` covers the remainder of endpoint processing through the connection
 channel send. `scheduling` covers the channel wait until the connection task
-enters the datagram handler.
+enters the datagram handler. It can overlap QUIC processing for earlier packets
+queued to the same connection.
 
 To update Quinn:
 
