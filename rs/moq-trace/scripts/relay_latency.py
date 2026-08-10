@@ -745,8 +745,14 @@ def extract_object_timeline(
     raw_intervals.extend(_quic_timeline_intervals(object_ranges, packets, frames, packet_phases))
 
     rx_objects = [interval for interval in raw_intervals if interval[0] == "rx" and interval[2] == "object"]
-    # A single RX start provides a shared zero point for every subscriber copy.
-    rx_start = rx_objects[0][4]
+    rx_object_start = rx_objects[0][4]
+    rx_packets = [
+        interval for interval in raw_intervals if interval[0] == "rx" and interval[2] == "quic_packet"
+    ]
+    # The first contributing RX packet provides a shared origin for the full
+    # QUIC-to-MoQ lifecycle while the latency metric still starts at the object.
+    timeline_start = min(interval[4] for interval in rx_packets)
+    rx_object_start_us = (rx_object_start - timeline_start) / 1_000
     phase_order = {
         "quic_packet": 0,
         "quic_header_parse": 1,
@@ -773,8 +779,8 @@ def extract_object_timeline(
                     session_id=session_id,
                     phase=phase,
                     occurrence=occurrence,
-                    start_us=(start - rx_start) / 1_000,
-                    end_us=(end - rx_start) / 1_000,
+                    start_us=(start - timeline_start) / 1_000,
+                    end_us=(end - timeline_start) / 1_000,
                 )
                 for direction, session_id, phase, occurrence, start, end in raw_intervals
             ),
@@ -791,7 +797,7 @@ def extract_object_timeline(
         key=lambda interval: interval.session_id,
     )
     copies = tuple(
-        TimelineCopy(interval.session_id, ordinal, interval.end_us)
+        TimelineCopy(interval.session_id, ordinal, interval.end_us - rx_object_start_us)
         for ordinal, interval in enumerate(tx_objects, start=1)
     )
     # Break equal completion times by session ID so summary metadata is stable.
@@ -1262,7 +1268,8 @@ def plot_object_timelines(
     maximum = max(interval.end_us for timeline in timelines for interval in timeline.intervals)
     padding = max(1.0, (maximum - minimum) * 0.03)
     x_min = min(0.0, minimum - padding)
-    x_max = max(1.0, maximum + padding)
+    label_space = max(4.0, (maximum - minimum) * 0.12)
+    x_max = max(1.0, maximum + label_space)
     rx_color = "#2563EB"
     tx_palette = plt.get_cmap("Oranges")
 
@@ -1281,6 +1288,7 @@ def plot_object_timelines(
             session_id: (index - (len(tx_sessions) - 1) / 2) * lane_height
             for index, session_id in enumerate(tx_sessions)
         }
+        phase_labels: dict[tuple[str, int, str], tuple[float, float, float]] = {}
 
         for interval in timeline.intervals:
             if interval.direction == "tx" and interval.session_id not in copy_by_session:
@@ -1306,6 +1314,21 @@ def plot_object_timelines(
                 edgecolors="#334155",
                 linewidth=0.7,
                 alpha=0.88,
+            )
+            duration_us = interval.end_us - interval.start_us
+            label_key = (interval.direction, interval.session_id, interval.phase)
+            previous_total, previous_end, _ = phase_labels.get(label_key, (0.0, interval.end_us, y))
+            phase_labels[label_key] = (previous_total + duration_us, max(previous_end, interval.end_us), y)
+
+        for total_us, end_us, y in phase_labels.values():
+            axis.annotate(
+                f"{total_us:.2f}",
+                xy=(end_us, y),
+                xytext=(4, 0),
+                textcoords="offset points",
+                va="center",
+                fontsize=8,
+                color="#334155",
             )
 
         section_boundaries = (
@@ -1345,7 +1368,7 @@ def plot_object_timelines(
             loc="left",
         )
 
-    axes[-1].set_xlabel("Elapsed from RX MoQ object start (µs)")
+    axes[-1].set_xlabel("Elapsed from first RX QUIC packet start (µs)")
     fig.suptitle(
         f"QUIC packet and MoQ object timelines | {config.object_size} bytes | "
         f"{config.subscribers} subscriber(s) | {PROTOCOL}",
