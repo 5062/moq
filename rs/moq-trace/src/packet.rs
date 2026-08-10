@@ -28,6 +28,10 @@ pub enum PacketOutcome {
 pub enum PacketPhase {
 	/// Parse the protected packet header.
 	HeaderParse,
+	/// Route a decoded packet to its connection.
+	Routing,
+	/// Wait for the connection task to begin processing the packet.
+	Scheduling,
 	/// Remove QUIC header protection.
 	HeaderUnprotect,
 	/// Decrypt and authenticate the packet payload.
@@ -56,6 +60,7 @@ pub struct PacketContext {
 	packet_number: Option<u64>,
 	packet_space: Option<PacketSpace>,
 	byte_len: Option<usize>,
+	start_ns: Option<u64>,
 }
 
 impl PacketContext {
@@ -67,6 +72,7 @@ impl PacketContext {
 			packet_number: None,
 			packet_space: None,
 			byte_len: None,
+			start_ns: None,
 		}
 	}
 
@@ -85,6 +91,12 @@ impl PacketContext {
 	/// Attach the encoded packet length in bytes.
 	pub fn with_byte_len(mut self, byte_len: usize) -> Self {
 		self.byte_len = Some(byte_len);
+		self
+	}
+
+	/// Attach a packet start timestamp captured before the trace was created.
+	pub fn with_start_ns(mut self, start_ns: u64) -> Self {
+		self.start_ns = Some(start_ns);
 		self
 	}
 }
@@ -211,7 +223,7 @@ impl Handle {
 		}
 
 		let packet = PacketEvent {
-			timestamp_ns: now_ns(),
+			timestamp_ns: context.start_ns.unwrap_or_else(now_ns),
 			trace_id: inner.next_trace_id.fetch_add(1, Ordering::Relaxed),
 			connection_id: context.connection_id,
 			direction: context.direction,
@@ -257,11 +269,16 @@ impl PacketTrace {
 
 	/// Start a measured packet lifecycle phase.
 	pub fn phase(&self, phase: PacketPhase) -> PacketPhaseTrace {
+		self.phase_at(phase, now_ns())
+	}
+
+	/// Start a measured packet phase at a previously captured timestamp.
+	pub fn phase_at(&self, phase: PacketPhase, timestamp_ns: u64) -> PacketPhaseTrace {
 		let Some(state) = &self.0 else {
 			return PacketPhaseTrace::disabled();
 		};
 		let mut packet = state.packet.clone();
-		packet.timestamp_ns = now_ns();
+		packet.timestamp_ns = timestamp_ns;
 		state.handle.emit(Event::PacketPhase(PacketPhaseEvent {
 			packet: packet.clone(),
 			phase,
@@ -321,17 +338,27 @@ impl PacketPhaseTrace {
 	}
 
 	/// Finish the phase with an explicit result.
-	pub fn finish(mut self, outcome: PacketOutcome) {
+	pub fn finish(self, outcome: PacketOutcome) {
+		self.finish_at(outcome, now_ns());
+	}
+
+	/// Finish the phase at a previously captured timestamp.
+	pub fn finish_at(mut self, outcome: PacketOutcome, timestamp_ns: u64) {
 		if let Some(state) = self.0.take() {
-			state.emit_done(outcome);
+			state.emit_done_at(outcome, timestamp_ns);
 		}
 	}
 }
 
 impl PacketPhaseTraceState {
 	fn emit_done(self, outcome: PacketOutcome) {
+		self.emit_done_at(outcome, now_ns());
+	}
+
+	fn emit_done_at(self, outcome: PacketOutcome, timestamp_ns: u64) {
 		let mut packet = self.packet;
-		packet.timestamp_ns = now_ns();
+		debug_assert!(timestamp_ns >= packet.timestamp_ns);
+		packet.timestamp_ns = timestamp_ns;
 		self.handle.emit(Event::PacketPhase(PacketPhaseEvent {
 			packet,
 			phase: self.phase,

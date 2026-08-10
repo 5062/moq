@@ -1384,6 +1384,52 @@ mod tests {
 	}
 
 	#[test]
+	fn packet_trace_records_captured_timestamps() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("trace.jsonl");
+		let handle = Handle::new(Config {
+			path: Some(path.clone()),
+			..Config::default()
+		})
+		.unwrap();
+		let packet = handle.packet(PacketContext::new(Direction::Rx, 7).with_start_ns(10));
+
+		packet
+			.phase_at(PacketPhase::Routing, 20)
+			.finish_at(PacketOutcome::Success, 30);
+		packet.finish(PacketOutcome::Success);
+		drop(handle);
+
+		let events: Vec<Event> = std::fs::read_to_string(path)
+			.unwrap()
+			.lines()
+			.map(|line| serde_json::from_str(line).unwrap())
+			.collect();
+		assert!(matches!(
+			&events[0],
+			Event::PacketStart(PacketEvent { timestamp_ns: 10, .. })
+		));
+		assert!(matches!(
+			&events[1],
+			Event::PacketPhase(PacketPhaseEvent {
+				packet: PacketEvent { timestamp_ns: 20, .. },
+				phase: PacketPhase::Routing,
+				edge: PhaseEdge::Start,
+				outcome: None,
+			})
+		));
+		assert!(matches!(
+			&events[2],
+			Event::PacketPhase(PacketPhaseEvent {
+				packet: PacketEvent { timestamp_ns: 30, .. },
+				phase: PacketPhase::Routing,
+				edge: PhaseEdge::Done,
+				outcome: Some(PacketOutcome::Success),
+			})
+		));
+	}
+
+	#[test]
 	fn disabled_packet_trace_is_noop() {
 		let handle = Handle::new(Config::disabled()).unwrap();
 		let mut packet = handle.packet(PacketContext::new(Direction::Rx, 7));

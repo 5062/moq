@@ -6,8 +6,8 @@ Fork:
 
 ```text
 https://github.com/5062/quinn
-branch: moq-trace-0.11
-rev: 9b92255a960c3705d830bbdb7e50a272859e4e5a
+branch: moq-trace/quinn-0.11
+rev: 29d6d093c454a3759cd09ea94512c2e757f6827a
 ```
 
 Upstream base:
@@ -25,12 +25,17 @@ The fork declares an optional `moq-trace` dependency by version. This repository
 patches crates.io `moq-trace` back to `rs/moq-trace` so Quinn and MoQ share the
 same trace crate instance and the same process-global trace handle.
 
+The RX packet envelope starts before Quinn's initial protected-header parse.
+`routing` covers the remainder of endpoint processing through the connection
+channel send. `scheduling` covers the channel wait until the connection task
+enters the datagram handler.
+
 To update Quinn:
 
 ```sh
 cd ~/quinn
 git fetch upstream --tags
-git switch moq-trace-0.11
+git switch moq-trace/quinn-0.11
 git rebase <new-upstream-tag-or-commit>
 # resolve MoQ trace hook conflicts, then run tests from the MoQ Nix shell
 ```

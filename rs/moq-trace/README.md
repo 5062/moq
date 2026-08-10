@@ -80,6 +80,8 @@ Packet phases use a `phase` and `edge` pair. Done edges include an `outcome`.
 The phase values are:
 
 - `header_parse`
+- `routing`
+- `scheduling`
 - `header_unprotect`
 - `payload_decrypt`
 - `frame_process`
@@ -195,7 +197,9 @@ The experiment writes:
 
 Object timelines use the RX MoQ object start as zero. Correlated RX QUIC packet
 work therefore appears at negative elapsed times, while TX QUIC work can extend
-beyond the TX MoQ object end.
+beyond the TX MoQ object end. On RX, `routing` spans from endpoint header parsing
+completion through the connection channel handoff. `scheduling` spans from that
+handoff until the connection task begins handling the datagram.
 
 ## Quinn patch
 

@@ -40,6 +40,8 @@ QUIC_OBJECT_METRICS = {
 PACKET_METRICS = {
     "rx_packet_span": "RX packet span",
     "rx_header_parse": "RX header parse",
+    "rx_routing": "RX routing",
+    "rx_scheduling": "RX scheduling",
     "rx_header_unprotect": "RX header unprotect",
     "rx_payload_decrypt": "RX payload decrypt",
     "rx_frame_process": "RX frame process",
@@ -441,9 +443,11 @@ def _parse_packets(
     metric_rows: list[dict] = []
     phase_order = {
         "header_parse": 1,
-        "header_unprotect": 2,
-        "payload_decrypt": 3,
-        "frame_process": 4,
+        "routing": 2,
+        "scheduling": 3,
+        "header_unprotect": 4,
+        "payload_decrypt": 5,
+        "frame_process": 6,
         "frame_encode": 1,
         "packet_encrypt": 2,
     }
@@ -464,7 +468,14 @@ def _parse_packets(
             key=lambda item: (phase_order.get(item[0], 99), item[0]),
         )
         allowed = {
-            "rx": {"header_parse", "header_unprotect", "payload_decrypt", "frame_process"},
+            "rx": {
+                "header_parse",
+                "routing",
+                "scheduling",
+                "header_unprotect",
+                "payload_decrypt",
+                "frame_process",
+            },
             "tx": {"frame_encode", "packet_encrypt"},
         }[packet.direction]
         for phase, scope in packet_phases:
@@ -712,9 +723,11 @@ def extract_object_timeline(
     phase_order = {
         "quic_packet": 0,
         "quic_header_parse": 1,
-        "quic_header_unprotect": 2,
-        "quic_payload_decrypt": 3,
-        "quic_frame_process": 4,
+        "quic_routing": 2,
+        "quic_scheduling": 3,
+        "quic_header_unprotect": 4,
+        "quic_payload_decrypt": 5,
+        "quic_frame_process": 6,
         "quic_frame_encode": 1,
         "quic_packet_encrypt": 2,
         "object": 0,
@@ -1189,6 +1202,8 @@ def plot_object_timelines(
     rx_quic_rows = (
         ("rx", "quic_packet", "RX QUIC Packet"),
         ("rx", "quic_header_parse", "RX QUIC Header Parse"),
+        ("rx", "quic_routing", "RX QUIC Routing"),
+        ("rx", "quic_scheduling", "RX QUIC Scheduling"),
         ("rx", "quic_header_unprotect", "RX QUIC Header Unprotect"),
         ("rx", "quic_payload_decrypt", "RX QUIC Payload Decrypt"),
         ("rx", "quic_frame_process", "RX QUIC Frame Process"),
