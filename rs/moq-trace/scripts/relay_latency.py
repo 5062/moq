@@ -747,12 +747,6 @@ def extract_object_timeline(
     rx_objects = [interval for interval in raw_intervals if interval[0] == "rx" and interval[2] == "object"]
     # A single RX start provides a shared zero point for every subscriber copy.
     rx_start = rx_objects[0][4]
-    rx_end = rx_objects[0][5]
-    # Scheduling is the otherwise-unattributed handoff after inbound processing
-    # completes and before each independently scheduled outbound task starts.
-    for direction, session_id, phase, occurrence, start, _end in tuple(raw_intervals):
-        if direction == "tx" and phase == "object" and start > rx_end:
-            raw_intervals.append((direction, session_id, "scheduling", occurrence, rx_end, start))
     phase_order = {
         "quic_packet": 0,
         "quic_header_parse": 1,
@@ -767,7 +761,6 @@ def extract_object_timeline(
         "header_parse": 1,
         "create": 2,
         "payload_read": 3,
-        "scheduling": 0,
         "clone": 1,
         "header_encode": 2,
         "payload_write": 3,
@@ -1244,7 +1237,6 @@ def plot_object_timelines(
         ("rx", "header_parse", "RX Header Parse"),
         ("rx", "create", "RX Create"),
         ("rx", "payload_read", "RX Payload Read"),
-        ("tx", "scheduling", "Scheduling"),
         ("tx", "clone", "TX Clone"),
         ("tx", "header_encode", "TX Header Encode"),
         ("tx", "payload_write", "TX Payload Write"),
