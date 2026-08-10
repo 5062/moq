@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime
 import json
@@ -12,17 +13,18 @@ import re
 import signal
 import subprocess
 import time
-from typing import Annotated, BinaryIO
+from collections.abc import Iterator
+from typing import Annotated
 
 import matplotlib
+
 # The headless backend must be selected before importing pyplot.
 matplotlib.use("Agg")
-from matplotlib import pyplot as plt  # noqa: E402
-from matplotlib.lines import Line2D  # noqa: E402
 import polars as pl
 import typer
+from matplotlib import pyplot as plt  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-
 
 PROTOCOL = "moq-transport-19"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -403,16 +405,12 @@ def _parse_packets(
     """Parse successful packet lifecycles, STREAM frames, and phase samples."""
 
     packet_rows = [
-        row
-        for row in events.iter_rows(named=True)
-        if row.get("type") in {"quic_packet_start", "quic_packet_end"}
+        row for row in events.iter_rows(named=True) if row.get("type") in {"quic_packet_start", "quic_packet_end"}
     ]
     grouped: dict[int, dict[str, list[dict]]] = {}
     for row in packet_rows:
         trace_id = int(row["trace_id"])
-        grouped.setdefault(trace_id, {"quic_packet_start": [], "quic_packet_end": []})[
-            str(row["type"])
-        ].append(row)
+        grouped.setdefault(trace_id, {"quic_packet_start": [], "quic_packet_end": []})[str(row["type"])].append(row)
 
     packets: list[Packet] = []
     packet_by_id: dict[int, Packet] = {}
@@ -711,12 +709,8 @@ def extract_object_timeline(
 
     raw_intervals: list[tuple[str, int, str, int, int, int]] = []
     for (direction, session_id), session_rows in sorted(grouped.items()):
-        lifecycle_starts = sorted(
-            int(row["timestamp_ns"]) for row in session_rows if row["type"] == "moq_object_start"
-        )
-        lifecycle_ends = sorted(
-            int(row["timestamp_ns"]) for row in session_rows if row["type"] == "moq_object_end"
-        )
+        lifecycle_starts = sorted(int(row["timestamp_ns"]) for row in session_rows if row["type"] == "moq_object_start")
+        lifecycle_ends = sorted(int(row["timestamp_ns"]) for row in session_rows if row["type"] == "moq_object_end")
         if len(lifecycle_starts) != len(lifecycle_ends):
             raise TraceError(
                 f"{direction} session {session_id} object has "
@@ -739,16 +733,12 @@ def extract_object_timeline(
             for occurrence, (start, end) in enumerate(intervals):
                 raw_intervals.append((direction, session_id, phase, occurrence, start, end))
 
-    object_ranges = tuple(
-        _object_range(row) for row in rows if row["type"] == "moq_object_end"
-    )
+    object_ranges = tuple(_object_range(row) for row in rows if row["type"] == "moq_object_end")
     raw_intervals.extend(_quic_timeline_intervals(object_ranges, packets, frames, packet_phases))
 
     rx_objects = [interval for interval in raw_intervals if interval[0] == "rx" and interval[2] == "object"]
     rx_object_start = rx_objects[0][4]
-    rx_packets = [
-        interval for interval in raw_intervals if interval[0] == "rx" and interval[2] == "quic_packet"
-    ]
+    rx_packets = [interval for interval in raw_intervals if interval[0] == "rx" and interval[2] == "quic_packet"]
     # The first contributing RX packet provides a shared origin for the full
     # QUIC-to-MoQ lifecycle while the latency metric still starts at the object.
     timeline_start = min(interval[4] for interval in rx_packets)
@@ -1250,11 +1240,7 @@ def plot_object_timelines(
         ("tx", "quic_frame_encode", "TX QUIC Frame Encode"),
         ("tx", "quic_packet_encrypt", "TX QUIC Packet Encrypt"),
     )
-    present = {
-        (interval.direction, interval.phase)
-        for timeline in timelines
-        for interval in timeline.intervals
-    }
+    present = {(interval.direction, interval.phase) for timeline in timelines for interval in timeline.intervals}
     rx_quic_rows = tuple(row for row in rx_quic_rows if row[:2] in present)
     tx_quic_rows = tuple(row for row in tx_quic_rows if row[:2] in present)
     phase_rows = rx_quic_rows + moq_rows + tx_quic_rows
@@ -1362,8 +1348,7 @@ def plot_object_timelines(
         axis.set_axisbelow(True)
         selected = timeline.selection
         axis.set_title(
-            f"{selected.statistic} {selected.target_us:.2f} µs | "
-            f"object ({selected.group_id}, {selected.object_id}) ",
+            f"{selected.statistic} {selected.target_us:.2f} µs | object ({selected.group_id}, {selected.object_id}) ",
             fontsize=10,
             loc="left",
         )
@@ -1439,8 +1424,16 @@ def _stop(
         raise ExperimentError(f"{name} exited with status {status}")
 
 
-def _launch(command: list[str], log: pathlib.Path) -> tuple[subprocess.Popen[bytes], BinaryIO]:
+@contextlib.contextmanager
+def _managed_process(
+    command: list[str],
+    log: pathlib.Path,
+    name: str,
+) -> Iterator[subprocess.Popen[bytes]]:
+    """Launch one process and always release its process group and log handle."""
+
     handle = log.open("wb")
+    process: subprocess.Popen[bytes] | None = None
     try:
         process = subprocess.Popen(
             command,
@@ -1449,91 +1442,102 @@ def _launch(command: list[str], log: pathlib.Path) -> tuple[subprocess.Popen[byt
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-    except Exception:
-        handle.close()
-        raise
-    return process, handle
-
-
-def run_experiment(config: ExperimentConfig) -> pathlib.Path:
-    commands = {
-        "build": build_workspace_command(config),
-        "relay": build_relay_command(config),
-        "publisher": build_publisher_command(config),
-        "subscriber": build_subscriber_command(config),
-    }
-    output = config.output.resolve()
-    output.mkdir(parents=True, exist_ok=False)
-    build_log = output / "build.log"
-    if not config.skip_build:
-        lock_path = config.repo / "Cargo.lock"
-        lock_contents = lock_path.read_bytes() if config.quinn_path is not None else None
-        try:
-            with build_log.open("wb") as log:
-                result = subprocess.run(
-                    commands["build"],
-                    cwd=config.repo,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    check=False,
-                )
-        finally:
-            # A path override changes Cargo's source identity. Keep it local to this build.
-            if lock_contents is not None:
-                lock_path.write_bytes(lock_contents)
-        if result.returncode != 0:
-            raise ExperimentError(f"build failed with status {result.returncode}; see {build_log}")
-
-    relay = publisher = subscriber = None
-    handles = []
-    try:
-        relay, handle = _launch(commands["relay"], output / "relay.log")
-        handles.append(handle)
-        wait_for_log(output / "relay.log", re.compile(r"\blistening\b"), relay, 15)
-
-        publisher, handle = _launch(commands["publisher"], output / "publisher.log")
-        handles.append(handle)
-        wait_for_log(
-            output / "publisher.log",
-            re.compile(r"\bconnections=1\b"),
-            publisher,
-            15,
-        )
-
-        subscriber, handle = _launch(commands["subscriber"], output / "subscriber.log")
-        handles.append(handle)
-        subscriber_ready = re.compile(
-            rf"\bconnections={config.subscribers}\b.*"
-            rf"\bsubscriptions={config.subscribers}\b"
-        )
-        wait_for_log(output / "subscriber.log", subscriber_ready, subscriber, 20)
-        try:
-            subscriber_status = subscriber.wait(timeout=config.warmup + config.duration + config.cooldown + 15)
-        except subprocess.TimeoutExpired as error:
-            raise ExperimentError("subscriber did not finish on schedule") from error
-        if subscriber_status != 0:
-            raise ExperimentError(f"subscriber exited with status {subscriber_status}")
-
-        # Stop production first, then let the relay flush its JSONL writer
-        # during graceful shutdown before the trace is analyzed.
-        _stop(publisher, "publisher", graceful=True)
-        _stop(relay, "relay", graceful=True)
-    except Exception:
-        _stop(subscriber, "subscriber")
-        _stop(publisher, "publisher")
-        _stop(relay, "relay")
-        raise
+        yield process
     finally:
-        for handle in handles:
+        try:
+            _stop(process, name)
+        finally:
             handle.close()
 
-    trace_path = output / "relay.jsonl"
-    analysis = analyze_trace(trace_path, config)
-    if config.quinn_path is not None:
-        required = {"rx_routing", "rx_scheduling"}
-        missing = sorted(required - analysis.packet_statistics.keys())
-        if missing:
-            raise TraceError(f"local Quinn trace is missing packet metrics: {', '.join(missing)}")
+
+def _build_experiment(
+    config: ExperimentConfig,
+    command: list[str],
+    output: pathlib.Path,
+) -> None:
+    """Build the experiment binaries while keeping a local Quinn override isolated."""
+
+    if config.skip_build:
+        return
+
+    build_log = output / "build.log"
+    lock_path = config.repo / "Cargo.lock"
+    lock_contents = lock_path.read_bytes() if config.quinn_path is not None else None
+    try:
+        with build_log.open("wb") as log:
+            result = subprocess.run(
+                command,
+                cwd=config.repo,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+    finally:
+        # A path override changes Cargo's source identity. Keep it local to this build.
+        if lock_contents is not None:
+            lock_path.write_bytes(lock_contents)
+    if result.returncode != 0:
+        raise ExperimentError(f"build failed with status {result.returncode}; see {build_log}")
+
+
+def _capture_trace(
+    config: ExperimentConfig,
+    commands: dict[str, list[str]],
+    output: pathlib.Path,
+) -> pathlib.Path:
+    """Run the relay workload and return the flushed trace path."""
+
+    with _managed_process(commands["relay"], output / "relay.log", "relay") as relay:
+        wait_for_log(output / "relay.log", re.compile(r"\blistening\b"), relay, 15)
+
+        with _managed_process(commands["publisher"], output / "publisher.log", "publisher") as publisher:
+            wait_for_log(
+                output / "publisher.log",
+                re.compile(r"\bconnections=1\b"),
+                publisher,
+                15,
+            )
+
+            with _managed_process(commands["subscriber"], output / "subscriber.log", "subscriber") as subscriber:
+                subscriber_ready = re.compile(
+                    rf"\bconnections={config.subscribers}\b.*"
+                    rf"\bsubscriptions={config.subscribers}\b"
+                )
+                wait_for_log(output / "subscriber.log", subscriber_ready, subscriber, 20)
+                try:
+                    subscriber_status = subscriber.wait(timeout=config.warmup + config.duration + config.cooldown + 15)
+                except subprocess.TimeoutExpired as error:
+                    raise ExperimentError("subscriber did not finish on schedule") from error
+                if subscriber_status != 0:
+                    raise ExperimentError(f"subscriber exited with status {subscriber_status}")
+
+            # Stop production first, then let the relay flush its JSONL writer
+            # during graceful shutdown before the trace is analyzed.
+            _stop(publisher, "publisher", graceful=True)
+        _stop(relay, "relay", graceful=True)
+
+    return output / "relay.jsonl"
+
+
+def _validate_analysis(config: ExperimentConfig, analysis: Analysis) -> None:
+    """Validate analysis requirements specific to a local Quinn checkout."""
+
+    if config.quinn_path is None:
+        return
+    required = {"rx_routing", "rx_scheduling"}
+    missing = sorted(required - analysis.packet_statistics.keys())
+    if missing:
+        raise TraceError(f"local Quinn trace is missing packet metrics: {', '.join(missing)}")
+
+
+def _write_artifacts(
+    output: pathlib.Path,
+    config: ExperimentConfig,
+    analysis: Analysis,
+    commands: dict[str, list[str]],
+) -> None:
+    """Write every tabular, summary, and plot artifact for one analysis."""
+
     write_samples(
         output / "objects.csv",
         analysis.samples,
@@ -1554,6 +1558,24 @@ def run_experiment(config: ExperimentConfig) -> pathlib.Path:
     plot_quic_analysis(output / "quic_latency.png", config, analysis)
     plot_packet_analysis(output / "packet_latency.png", config, analysis)
     plot_object_timelines(output / "object_timeline.png", config, analysis.timelines)
+
+
+def run_experiment(config: ExperimentConfig) -> pathlib.Path:
+    """Build, capture, analyze, and report one relay latency experiment."""
+
+    commands = {
+        "build": build_workspace_command(config),
+        "relay": build_relay_command(config),
+        "publisher": build_publisher_command(config),
+        "subscriber": build_subscriber_command(config),
+    }
+    output = config.output.resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    _build_experiment(config, commands["build"], output)
+    trace_path = _capture_trace(config, commands, output)
+    analysis = analyze_trace(trace_path, config)
+    _validate_analysis(config, analysis)
+    _write_artifacts(output, config, analysis, commands)
     return output
 
 
