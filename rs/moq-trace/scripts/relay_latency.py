@@ -1226,7 +1226,6 @@ def plot_object_timelines(
     if not timelines:
         raise ValueError("cannot plot an empty object timeline selection")
     rx_quic_rows = (
-        ("rx", "quic_packet", "RX QUIC Packet"),
         ("rx", "quic_header_parse", "RX QUIC Header Parse"),
         ("rx", "quic_routing", "RX QUIC Routing"),
         ("rx", "quic_header_unprotect", "RX QUIC Header Unprotect"),
@@ -1244,7 +1243,6 @@ def plot_object_timelines(
     tx_quic_rows = (
         ("tx", "quic_frame_encode", "TX QUIC Frame Encode"),
         ("tx", "quic_packet_encrypt", "TX QUIC Packet Encrypt"),
-        ("tx", "quic_packet", "TX QUIC Packet"),
     )
     present = {
         (interval.direction, interval.phase)
@@ -1301,14 +1299,13 @@ def plot_object_timelines(
             if interval.direction == "tx":
                 y += tx_offsets[interval.session_id]
                 height = lane_height * 0.82
-            packet_span = interval.phase == "quic_packet"
             axis.broken_barh(
                 [(interval.start_us, interval.end_us - interval.start_us)],
                 (y - height / 2, height),
-                facecolors="none" if packet_span else color,
-                edgecolors=color if packet_span else "#334155",
-                linewidth=0.9 if packet_span else 0.7,
-                alpha=0.72 if packet_span else 0.88,
+                facecolors=color,
+                edgecolors="#334155",
+                linewidth=0.7,
+                alpha=0.88,
             )
 
         section_boundaries = (
