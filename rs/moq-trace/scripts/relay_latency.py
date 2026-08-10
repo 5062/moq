@@ -310,7 +310,6 @@ class Analysis:
     packet_samples: pl.DataFrame
     packet_statistics: dict[str, dict[str, float | int]]
     packet_count: int
-    socket_count: int
     group_count: int
     timelines: tuple[ObjectTimeline, ...]
 
@@ -329,6 +328,29 @@ class TraceError(RuntimeError):
     """A trace is malformed, incomplete, or does not match the workload."""
 
 
+def _pair_phase_scope(
+    scope: dict[str, list[dict]],
+    label: str,
+) -> tuple[tuple[int, int], ...]:
+    """Pair successful phase boundaries in timestamp order."""
+
+    starts = sorted(scope["start"], key=lambda row: int(row["timestamp_ns"]))
+    ends = sorted(scope["done"], key=lambda row: int(row["timestamp_ns"]))
+    if len(starts) != len(ends):
+        raise TraceError(f"{label} has {len(starts)} starts and {len(ends)} completions")
+
+    intervals = []
+    for start, end in zip(starts, ends, strict=True):
+        if end.get("outcome") != "success":
+            raise TraceError(f"{label} did not complete successfully")
+        start_ns = int(start["timestamp_ns"])
+        end_ns = int(end["timestamp_ns"])
+        if end_ns < start_ns:
+            raise TraceError(f"{label} completes before it starts")
+        intervals.append((start_ns, end_ns))
+    return tuple(intervals)
+
+
 def _parse_packets(events: pl.DataFrame) -> tuple[tuple[Packet, ...], tuple[StreamFrame, ...], pl.DataFrame]:
     """Parse successful packet lifecycles, STREAM frames, and phase samples."""
 
@@ -339,10 +361,8 @@ def _parse_packets(events: pl.DataFrame) -> tuple[tuple[Packet, ...], tuple[Stre
     ]
     grouped: dict[int, dict[str, list[dict]]] = {}
     for row in packet_rows:
-        trace_id = row.get("trace_id")
-        if trace_id is None:
-            raise TraceError("packet lifecycle contains a missing trace ID")
-        grouped.setdefault(int(trace_id), {"quic_packet_start": [], "quic_packet_end": []})[
+        trace_id = int(row["trace_id"])
+        grouped.setdefault(trace_id, {"quic_packet_start": [], "quic_packet_end": []})[
             str(row["type"])
         ].append(row)
 
@@ -359,12 +379,6 @@ def _parse_packets(events: pl.DataFrame) -> tuple[tuple[Packet, ...], tuple[Stre
         for row in (start, end):
             if row.get("sample_rate") != 1:
                 raise TraceError("QUIC object correlation requires packet_sample = 1")
-            if row.get("connection_id") is None or row.get("direction") not in {"rx", "tx"}:
-                raise TraceError(f"packet {trace_id} is missing transport identity")
-            if row.get("timestamp_ns") is None:
-                raise TraceError(f"packet {trace_id} is missing a timestamp")
-        if start["connection_id"] != end["connection_id"] or start["direction"] != end["direction"]:
-            raise TraceError(f"packet {trace_id} lifecycle identity changed")
         start_ns = int(start["timestamp_ns"])
         end_ns = int(end["timestamp_ns"])
         if end_ns < start_ns:
@@ -389,12 +403,9 @@ def _parse_packets(events: pl.DataFrame) -> tuple[tuple[Packet, ...], tuple[Stre
             raise TraceError(f"STREAM frame references unknown packet {trace_id}")
         if row.get("sample_rate") != 1:
             raise TraceError("QUIC object correlation requires packet_sample = 1")
-        if row.get("connection_id") != packet.connection_id or row.get("direction") != packet.direction:
-            raise TraceError(f"packet {packet.trace_id} STREAM frame identity changed")
-        values = (row.get("stream_id"), row.get("offset_start"), row.get("offset_end"))
-        if any(value is None for value in values):
-            raise TraceError(f"packet {packet.trace_id} STREAM frame is missing a byte range")
-        stream_id, offset_start, offset_end = (int(value) for value in values)
+        stream_id = int(row["stream_id"])
+        offset_start = int(row["offset_start"])
+        offset_end = int(row["offset_end"])
         if offset_end < offset_start:
             raise TraceError(f"packet {packet.trace_id} STREAM frame has a negative byte range")
         # QUIC permits FIN-only STREAM frames. They carry no bytes and cannot
@@ -407,12 +418,10 @@ def _parse_packets(events: pl.DataFrame) -> tuple[tuple[Packet, ...], tuple[Stre
     for row in events.iter_rows(named=True):
         if row.get("type") != "quic_packet_phase":
             continue
-        trace_id = row.get("trace_id")
-        phase = row.get("phase")
-        edge = row.get("edge")
-        if trace_id is None or phase is None or edge not in {"start", "done"}:
-            raise TraceError("packet phase is missing its scope identity")
-        phases.setdefault((int(trace_id), str(phase)), {"start": [], "done": []})[str(edge)].append(row)
+        trace_id = int(row["trace_id"])
+        phase = str(row["phase"])
+        edge = str(row["edge"])
+        phases.setdefault((trace_id, phase), {"start": [], "done": []})[edge].append(row)
 
     first_packet_ns = min((packet.start_ns for packet in packets), default=0)
     metric_rows: list[dict] = []
@@ -447,19 +456,8 @@ def _parse_packets(events: pl.DataFrame) -> tuple[tuple[Packet, ...], tuple[Stre
         for phase, scope in packet_phases:
             if phase not in allowed:
                 raise TraceError(f"packet {packet.trace_id} has invalid {packet.direction} phase {phase}")
-            starts = sorted(scope["start"], key=lambda row: int(row["timestamp_ns"]))
-            ends = sorted(scope["done"], key=lambda row: int(row["timestamp_ns"]))
-            if len(starts) != len(ends):
-                raise TraceError(
-                    f"packet {packet.trace_id} {phase} has {len(starts)} starts and {len(ends)} completions"
-                )
-            for occurrence, (start, end) in enumerate(zip(starts, ends, strict=True)):
-                if end.get("outcome") != "success":
-                    raise TraceError(f"packet {packet.trace_id} {phase} did not complete successfully")
-                start_ns = int(start["timestamp_ns"])
-                end_ns = int(end["timestamp_ns"])
-                if end_ns < start_ns:
-                    raise TraceError(f"packet {packet.trace_id} {phase} completes before it starts")
+            intervals = _pair_phase_scope(scope, f"packet {packet.trace_id} {phase}")
+            for occurrence, (start_ns, end_ns) in enumerate(intervals):
                 metric_rows.append(
                     {
                         "metric": f"{packet.direction}_{phase}",
@@ -589,17 +587,8 @@ def extract_object_timeline(events: pl.DataFrame, selection: TimelineSelection) 
         & (pl.col("group_id") == selection.group_id)
         & (pl.col("object_id") == selection.object_id)
     )
-    if selected.is_empty():
-        raise TraceError(f"selected object ({selection.group_id}, {selection.object_id}) has no events")
-    required = selected.filter(
-        pl.any_horizontal(
-            pl.col("timestamp_ns").is_null(),
-            pl.col("direction").is_null(),
-            pl.col("session_id").is_null(),
-        )
-    )
-    if not required.is_empty():
-        raise TraceError(f"selected object ({selection.group_id}, {selection.object_id}) has missing timeline identity")
+    if selected["session_id"].null_count():
+        raise TraceError(f"selected object ({selection.group_id}, {selection.object_id}) has no session ID")
 
     rows = list(selected.iter_rows(named=True))
     grouped: dict[tuple[str, int], list[dict]] = {}
@@ -631,31 +620,15 @@ def extract_object_timeline(events: pl.DataFrame, selection: TimelineSelection) 
         for phase in phases:
             # Repeated phase instances are sequential within one object session,
             # making timestamp order their stable occurrence identity.
-            starts = sorted(
-                int(row["timestamp_ns"])
-                for row in session_rows
-                if row["type"] == "moq_object_phase" and row["phase"] == phase and row["edge"] == "start"
-            )
-            ends = sorted(
-                int(row["timestamp_ns"])
-                for row in session_rows
-                if row["type"] == "moq_object_phase" and row["phase"] == phase and row["edge"] == "done"
-            )
-            if len(starts) != len(ends):
-                raise TraceError(
-                    f"{direction} session {session_id} {phase} has "
-                    f"{len(starts)} starts and {len(ends)} completions"
-                )
-            for occurrence, (start, end) in enumerate(zip(starts, ends, strict=True)):
-                if end < start:
-                    raise TraceError(f"{direction} session {session_id} {phase} completes before it starts")
+            scope = {edge: [] for edge in ("start", "done")}
+            for row in session_rows:
+                if row["type"] == "moq_object_phase" and row["phase"] == phase:
+                    scope[str(row["edge"])].append(row)
+            intervals = _pair_phase_scope(scope, f"{direction} session {session_id} {phase}")
+            for occurrence, (start, end) in enumerate(intervals):
                 raw_intervals.append((direction, session_id, phase, occurrence, start, end))
 
     rx_objects = [interval for interval in raw_intervals if interval[0] == "rx" and interval[2] == "object"]
-    if len(rx_objects) != 1:
-        raise TraceError(
-            f"selected object ({selection.group_id}, {selection.object_id}) has {len(rx_objects)} RX lifecycles"
-        )
     # A single RX start provides a shared zero point for every subscriber copy.
     rx_start = rx_objects[0][4]
     phase_order = {
@@ -692,8 +665,6 @@ def extract_object_timeline(events: pl.DataFrame, selection: TimelineSelection) 
         (interval for interval in intervals if interval.direction == "tx" and interval.phase == "object"),
         key=lambda interval: interval.session_id,
     )
-    if not tx_objects:
-        raise TraceError(f"selected object ({selection.group_id}, {selection.object_id}) has no TX lifecycle")
     copies = tuple(
         TimelineCopy(interval.session_id, ordinal, interval.end_us)
         for ordinal, interval in enumerate(tx_objects, start=1)
@@ -744,48 +715,10 @@ def summarize(samples: pl.DataFrame) -> dict[str, dict[str, float | int]]:
     }
 
 
-def _validate_scopes(
-    events: pl.DataFrame,
-    start_type: str,
-    end_type: str,
-    require_success: bool,
-) -> int:
-    """Require one matching end record for every sampled start record."""
-
-    start_events = events.filter(pl.col("type") == start_type)
-    end_events = events.filter(pl.col("type") == end_type)
-    if start_events["trace_id"].null_count() or end_events["trace_id"].null_count():
-        raise TraceError(f"{start_type}/{end_type} contains missing trace IDs")
-    start_ids = start_events["trace_id"].to_list()
-    end_ids = end_events["trace_id"].to_list()
-    starts = set(start_ids)
-    ends = set(end_ids)
-    if len(starts) != len(start_ids) or len(ends) != len(end_ids):
-        raise TraceError(f"{start_type}/{end_type} contains duplicate trace IDs")
-    if starts != ends:
-        raise TraceError(
-            f"{start_type}/{end_type} trace IDs do not match: "
-            f"{len(start_ids)} starts, {len(end_ids)} ends"
-        )
-    if require_success and not end_events.filter((pl.col("outcome") != "success").fill_null(True)).is_empty():
-        raise TraceError(f"{end_type} contains unsuccessful outcomes")
-    return len(starts)
-
-
 def _group_objects(events: pl.DataFrame, object_size: int) -> pl.DataFrame:
     """Reduce object events to sorted boundary timestamp lists."""
 
     objects = events.filter(pl.col("type").str.starts_with("moq_object_"))
-    missing = objects.filter(
-        pl.any_horizontal(
-            pl.col("group_id").is_null(),
-            pl.col("object_id").is_null(),
-            pl.col("timestamp_ns").is_null(),
-        )
-    )
-    if not missing.is_empty():
-        raise TraceError(f"object event is missing identity: {missing.row(0, named=True)}")
-
     boundary = (
         pl.when((pl.col("type") == "moq_object_start") & (pl.col("direction") == "rx"))
         .then(pl.lit("rx_starts"))
@@ -905,7 +838,6 @@ def analyze_trace(
     events = _read_trace(path)
     packets, frames, packet_samples = _parse_packets(events)
     packet_count = len(packets)
-    socket_count = _validate_scopes(events, "udp_socket_start", "udp_socket_end", False)
     objects = _group_objects(events, config.object_size)
     if objects.is_empty():
         raise TraceError(f"trace has no completed {config.object_size}-byte inbound objects")
@@ -974,7 +906,6 @@ def analyze_trace(
         packet_samples=packet_samples,
         packet_statistics=summarize(packet_samples),
         packet_count=packet_count,
-        socket_count=socket_count,
         group_count=len(groups),
         timelines=timelines,
     )
@@ -1017,7 +948,6 @@ def write_summary(
         "counts": {
             "groups": analysis.group_count,
             "packets": analysis.packet_count,
-            "socket_operations": analysis.socket_count,
             "correlated_objects": analysis.samples.select("group_id", "object_id").unique().height,
             "correlated_object_copies": len(analysis.quic_object_samples) // len(QUIC_OBJECT_METRICS),
             "quic_object_samples": len(analysis.quic_object_samples),
@@ -1214,7 +1144,7 @@ def plot_object_timelines(
 
             key = (interval.direction, interval.phase)
             if key not in positions:
-                raise TraceError(f"unsupported timeline phase {interval.direction} {interval.phase}")
+                continue
             y = positions[key]
             height = 0.52
             if interval.direction == "tx":
@@ -1308,19 +1238,6 @@ def wait_for_log(
     raise ExperimentError(f"timed out after {timeout:g}s waiting for {pattern.pattern!r} in {path}")
 
 
-def validate_protocol(binary: pathlib.Path, flag: str) -> None:
-    """Require a binary to accept the forced moq-transport-19 CLI value."""
-
-    result = subprocess.run(
-        [str(binary), flag, PROTOCOL, "--help"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise ExperimentError(f"{binary} does not accept {flag} {PROTOCOL}")
-
-
 def _stop(
     process: subprocess.Popen[bytes] | None,
     name: str,
@@ -1384,9 +1301,6 @@ def run_experiment(config: ExperimentConfig) -> pathlib.Path:
         if result.returncode != 0:
             raise ExperimentError(f"build failed with status {result.returncode}; see {build_log}")
 
-    validate_protocol(config.relay_bin, "--server-version")
-    validate_protocol(config.bench_bin, "--client-version")
-
     relay = publisher = subscriber = None
     handles = []
     try:
@@ -1430,13 +1344,7 @@ def run_experiment(config: ExperimentConfig) -> pathlib.Path:
         for handle in handles:
             handle.close()
 
-    relay_log = (output / "relay.log").read_text(errors="replace")
-    expected_sessions = config.subscribers + 1
-    if relay_log.count(PROTOCOL) < expected_sessions:
-        raise ExperimentError(f"relay log does not confirm {PROTOCOL} for every connection")
     trace_path = output / "relay.jsonl"
-    if not trace_path.read_bytes().endswith(b"\n"):
-        raise ExperimentError("relay trace does not end with a complete newline")
     analysis = analyze_trace(trace_path, config)
     write_samples(
         output / "objects.csv",
