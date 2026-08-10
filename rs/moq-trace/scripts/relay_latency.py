@@ -77,9 +77,6 @@ TRACE_SCHEMA = {
     "outcome": pl.String,
     "payload_bytes": pl.Int64,
     "connection_id": pl.UInt64,
-    "packet_number": pl.UInt64,
-    "packet_space": pl.String,
-    "byte_len": pl.UInt64,
     "sample_rate": pl.UInt64,
     "stream_id": pl.UInt64,
     "offset_start": pl.UInt64,
@@ -128,7 +125,8 @@ def validate_cpu_affinity(
 
     if config.relay_cpu is None:
         return
-    allowed_cpus = allowed_cpus or set(os.sched_getaffinity(0))
+    if allowed_cpus is None:
+        allowed_cpus = set(os.sched_getaffinity(0))
     if config.relay_cpu not in allowed_cpus:
         allowed = ", ".join(str(cpu) for cpu in sorted(allowed_cpus))
         raise ValueError(f"relay CPU {config.relay_cpu} is unavailable; allowed CPUs: {allowed}")
@@ -265,10 +263,8 @@ class Packet:
     trace_id: int
     connection_id: int
     direction: str
-    packet_number: int | None
     start_ns: int
     end_ns: int
-    byte_len: int | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -316,9 +312,17 @@ class Analysis:
     packet_count: int
     socket_count: int
     group_count: int
-    events: pl.DataFrame
-    steady_keys: tuple[tuple[int, int], ...]
-    selections: tuple[TimelineSelection, ...]
+    timelines: tuple[ObjectTimeline, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class MetricPlot:
+    """One metric layer and its plot presentation."""
+
+    samples: pl.DataFrame
+    statistics: dict[str, dict[str, float | int]]
+    labels: dict[str, str]
+    title: str
 
 
 class TraceError(RuntimeError):
@@ -365,20 +369,12 @@ def _parse_packets(events: pl.DataFrame) -> tuple[tuple[Packet, ...], tuple[Stre
         end_ns = int(end["timestamp_ns"])
         if end_ns < start_ns:
             raise TraceError(f"packet {trace_id} completes before it starts")
-        packet_number = end.get("packet_number")
-        if packet_number is None:
-            packet_number = start.get("packet_number")
-        byte_len = end.get("byte_len")
-        if byte_len is None:
-            byte_len = start.get("byte_len")
         packet = Packet(
             trace_id=trace_id,
             connection_id=int(start["connection_id"]),
             direction=str(start["direction"]),
-            packet_number=None if packet_number is None else int(packet_number),
             start_ns=start_ns,
             end_ns=end_ns,
-            byte_len=None if byte_len is None else int(byte_len),
         )
         packets.append(packet)
         packet_by_id[trace_id] = packet
@@ -760,10 +756,17 @@ def _validate_scopes(
     end_events = events.filter(pl.col("type") == end_type)
     if start_events["trace_id"].null_count() or end_events["trace_id"].null_count():
         raise TraceError(f"{start_type}/{end_type} contains missing trace IDs")
-    starts = set(start_events["trace_id"].to_list())
-    ends = set(end_events["trace_id"].to_list())
+    start_ids = start_events["trace_id"].to_list()
+    end_ids = end_events["trace_id"].to_list()
+    starts = set(start_ids)
+    ends = set(end_ids)
+    if len(starts) != len(start_ids) or len(ends) != len(end_ids):
+        raise TraceError(f"{start_type}/{end_type} contains duplicate trace IDs")
     if starts != ends:
-        raise TraceError(f"{start_type}/{end_type} trace IDs do not match: {len(starts)} starts, {len(ends)} ends")
+        raise TraceError(
+            f"{start_type}/{end_type} trace IDs do not match: "
+            f"{len(start_ids)} starts, {len(end_ids)} ends"
+        )
     if require_success and not end_events.filter((pl.col("outcome") != "success").fill_null(True)).is_empty():
         raise TraceError(f"{end_type} contains unsuccessful outcomes")
     return len(starts)
@@ -895,10 +898,7 @@ def _quic_object_samples(
 
 def analyze_trace(
     path: pathlib.Path,
-    subscribers: int,
-    object_size: int,
-    warmup: float,
-    cooldown: float,
+    config: ExperimentConfig,
 ) -> Analysis:
     """Parse, validate, trim, and summarize a relay JSONL trace."""
 
@@ -906,9 +906,9 @@ def analyze_trace(
     packets, frames, packet_samples = _parse_packets(events)
     packet_count = len(packets)
     socket_count = _validate_scopes(events, "udp_socket_start", "udp_socket_end", False)
-    objects = _group_objects(events, object_size)
+    objects = _group_objects(events, config.object_size)
     if objects.is_empty():
-        raise TraceError(f"trace has no completed {object_size}-byte inbound objects")
+        raise TraceError(f"trace has no completed {config.object_size}-byte inbound objects")
     object_index = {(int(row["group_id"]), int(row["object_id"])): row for row in objects.iter_rows(named=True)}
     payload_keys = sorted(object_index)
     for key in payload_keys:
@@ -919,8 +919,8 @@ def analyze_trace(
     first_rx = min(object_index[key]["rx_starts"][0] for key in payload_keys)
     last_rx = max(object_index[key]["rx_starts"][0] for key in payload_keys)
     # RX starts define the workload clock, independent of fanout completion.
-    window_start = first_rx + int(warmup * 1_000_000_000)
-    window_end = last_rx - int(cooldown * 1_000_000_000)
+    window_start = first_rx + int(config.warmup * 1_000_000_000)
+    window_end = last_rx - int(config.cooldown * 1_000_000_000)
     keys = [key for key in payload_keys if window_start <= object_index[key]["rx_starts"][0] <= window_end]
     if not keys:
         raise TraceError("steady-state window contains no complete objects")
@@ -929,8 +929,8 @@ def analyze_trace(
         if len(obj["rx_ends"]) != 1:
             raise TraceError(f"{key} has {len(obj['rx_ends'])} rx_ends")
         for name in ("tx_starts", "tx_ends"):
-            if len(obj[name]) != subscribers:
-                raise TraceError(f"{key} has {len(obj[name])} {name}, expected {subscribers}")
+            if len(obj[name]) != config.subscribers:
+                raise TraceError(f"{key} has {len(obj[name])} {name}, expected {config.subscribers}")
     groups = sorted({group for group, _object in keys})
     if groups != list(range(groups[0], groups[-1] + 1)):
         raise TraceError("steady-state groups are not contiguous")
@@ -960,10 +960,12 @@ def analyze_trace(
     quic_object_samples = _quic_object_samples(
         events,
         steady_keys,
-        subscribers,
+        config.subscribers,
         frames,
         first_rx,
     )
+    selections = select_timeline_objects(samples)
+    timelines = tuple(extract_object_timeline(events, selection) for selection in selections)
     return Analysis(
         samples=samples,
         statistics=summarize(samples),
@@ -974,16 +976,8 @@ def analyze_trace(
         packet_count=packet_count,
         socket_count=socket_count,
         group_count=len(groups),
-        events=events,
-        steady_keys=steady_keys,
-        selections=select_timeline_objects(samples),
+        timelines=timelines,
     )
-
-
-def write_csv(path: pathlib.Path, analysis: Analysis) -> None:
-    """Write deterministic long-form object latency samples."""
-
-    write_samples(path, analysis.samples, ("group_id", "object_id", "metric", "copy_ordinal"))
 
 
 def write_samples(path: pathlib.Path, samples: pl.DataFrame, sort_by: tuple[str, ...]) -> None:
@@ -998,7 +992,6 @@ def write_summary(
     config: ExperimentConfig,
     analysis: Analysis,
     commands: dict[str, list[str]],
-    timelines: tuple[ObjectTimeline, ...],
 ) -> None:
     """Write experiment configuration, commands, counts, and statistics."""
 
@@ -1025,7 +1018,8 @@ def write_summary(
             "groups": analysis.group_count,
             "packets": analysis.packet_count,
             "socket_operations": analysis.socket_count,
-            "correlated_objects": len(analysis.quic_object_samples) // len(QUIC_OBJECT_METRICS),
+            "correlated_objects": analysis.samples.select("group_id", "object_id").unique().height,
+            "correlated_object_copies": len(analysis.quic_object_samples) // len(QUIC_OBJECT_METRICS),
             "quic_object_samples": len(analysis.quic_object_samples),
             "quic_packet_samples": len(analysis.packet_samples),
         },
@@ -1045,7 +1039,7 @@ def write_summary(
                     "slowest": dataclasses.asdict(timeline.slowest_copy),
                 },
             }
-            for timeline in timelines
+            for timeline in analysis.timelines
         ],
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1058,10 +1052,7 @@ def plot_analysis(path: pathlib.Path, config: ExperimentConfig, analysis: Analys
     plot_metrics(
         path,
         config,
-        analysis.samples,
-        analysis.statistics,
-        METRICS,
-        "MoQ relay latency",
+        MetricPlot(analysis.samples, analysis.statistics, METRICS, "MoQ relay latency"),
     )
 
 
@@ -1071,10 +1062,12 @@ def plot_quic_analysis(path: pathlib.Path, config: ExperimentConfig, analysis: A
     plot_metrics(
         path,
         config,
-        analysis.quic_object_samples,
-        analysis.quic_object_statistics,
-        QUIC_OBJECT_METRICS,
-        "QUIC-inclusive relay latency",
+        MetricPlot(
+            analysis.quic_object_samples,
+            analysis.quic_object_statistics,
+            QUIC_OBJECT_METRICS,
+            "QUIC-inclusive relay latency",
+        ),
     )
 
 
@@ -1084,33 +1077,34 @@ def plot_packet_analysis(path: pathlib.Path, config: ExperimentConfig, analysis:
     plot_metrics(
         path,
         config,
-        analysis.packet_samples,
-        analysis.packet_statistics,
-        PACKET_METRICS,
-        "QUIC packet diagnostics",
+        MetricPlot(
+            analysis.packet_samples,
+            analysis.packet_statistics,
+            PACKET_METRICS,
+            "QUIC packet diagnostics",
+        ),
     )
 
 
 def plot_metrics(
     path: pathlib.Path,
     config: ExperimentConfig,
-    samples: pl.DataFrame,
-    statistics: dict[str, dict[str, float | int]],
-    labels: dict[str, str],
-    title: str,
+    plot: MetricPlot,
 ) -> None:
     """Render distribution, percentile, and time-series panels for one metric layer."""
 
     fig, axes = plt.subplots(1, 3, figsize=(17, 5.5))
     colors = plt.get_cmap("tab10").colors
 
-    present = [metric for metric in labels if metric in statistics]
+    present = [metric for metric in plot.labels if metric in plot.statistics]
+    if not present:
+        raise ValueError("cannot plot a metric layer without samples")
     for index, metric in enumerate(present):
-        metric_samples = samples.filter(pl.col("metric") == metric)
+        metric_samples = plot.samples.filter(pl.col("metric") == metric)
         values_ms = (metric_samples["latency_us"] / 1_000).to_numpy()
         axes[0].ecdf(
             values_ms,
-            label=labels.get(metric, metric),
+            label=plot.labels[metric],
             color=colors[index],
             linewidth=2,
         )
@@ -1121,16 +1115,16 @@ def plot_metrics(
     axes[0].legend(fontsize=8)
 
     percentiles = ("p50", "p95", "p99")
-    width = 0.8 / len(statistics)
+    width = 0.8 / len(present)
     x_positions = list(range(len(percentiles)))
     for index, metric in enumerate(present):
-        summary = statistics[metric]
-        offset = (index - (len(statistics) - 1) / 2) * width
+        summary = plot.statistics[metric]
+        offset = (index - (len(present) - 1) / 2) * width
         axes[1].bar(
             [position + offset for position in x_positions],
             [float(summary[name]) / 1_000 for name in percentiles],
             width=width,
-            label=labels.get(metric, metric),
+            label=plot.labels[metric],
             color=colors[index],
         )
     axes[1].set_xticks(x_positions, percentiles)
@@ -1139,11 +1133,11 @@ def plot_metrics(
     axes[1].grid(axis="y", alpha=0.25)
 
     for index, metric in enumerate(present):
-        metric_samples = samples.filter(pl.col("metric") == metric)
+        metric_samples = plot.samples.filter(pl.col("metric") == metric)
         axes[2].scatter(
             (metric_samples["elapsed_ms"] / 1_000).to_numpy(),
             (metric_samples["latency_us"] / 1_000).to_numpy(),
-            label=labels.get(metric, metric),
+            label=plot.labels[metric],
             color=colors[index],
             s=8,
             alpha=0.55,
@@ -1155,7 +1149,7 @@ def plot_metrics(
 
     affinity = "unpinned" if config.relay_cpu is None else f"pinned CPU {config.relay_cpu}"
     fig.suptitle(
-        f"{title} | "
+        f"{plot.title} | "
         f"{affinity} | {config.subscribers} subscriber(s) | "
         f"{config.object_size} bytes | {config.fps} fps | {PROTOCOL}"
     )
@@ -1259,18 +1253,14 @@ def plot_object_timelines(
         axis.set_axisbelow(True)
         selected = timeline.selection
         axis.set_title(
-            f"{selected.statistic} target {selected.target_us:.2f} µs | "
-            f"object ({selected.group_id}, {selected.object_id}) | "
-            f"actual {selected.actual_us:.2f} µs | "
-            f"selected by TX #{timeline.slowest_copy.subscriber_ordinal}: "
-            f"{timeline.slowest_copy.full_span_us:.2f} µs",
+            f"{selected.statistic} {selected.target_us:.2f} µs | "
+            f"object ({selected.group_id}, {selected.object_id}) ",
             fontsize=10,
             loc="left",
         )
 
     axes[-1].set_xlabel("Elapsed from RX object start (µs)")
     fig.suptitle(
-        "MoQ relay object lifecycle timelines\n"
         f"Mean, median, and p99 of per-object latency | {config.object_size} bytes | "
         f"{config.subscribers} subscriber(s) | {PROTOCOL}",
         fontsize=14,
@@ -1447,15 +1437,12 @@ def run_experiment(config: ExperimentConfig) -> pathlib.Path:
     trace_path = output / "relay.jsonl"
     if not trace_path.read_bytes().endswith(b"\n"):
         raise ExperimentError("relay trace does not end with a complete newline")
-    analysis = analyze_trace(
-        trace_path,
-        config.subscribers,
-        config.object_size,
-        config.warmup,
-        config.cooldown,
+    analysis = analyze_trace(trace_path, config)
+    write_samples(
+        output / "objects.csv",
+        analysis.samples,
+        ("group_id", "object_id", "metric", "copy_ordinal"),
     )
-    timelines = tuple(extract_object_timeline(analysis.events, selection) for selection in analysis.selections)
-    write_csv(output / "objects.csv", analysis)
     write_samples(
         output / "quic_objects.csv",
         analysis.quic_object_samples,
@@ -1466,11 +1453,11 @@ def run_experiment(config: ExperimentConfig) -> pathlib.Path:
         analysis.packet_samples,
         ("trace_id", "metric", "occurrence"),
     )
-    write_summary(output / "summary.json", config, analysis, commands, timelines)
+    write_summary(output / "summary.json", config, analysis, commands)
     plot_analysis(output / "latency.png", config, analysis)
     plot_quic_analysis(output / "quic_latency.png", config, analysis)
     plot_packet_analysis(output / "packet_latency.png", config, analysis)
-    plot_object_timelines(output / "object_timeline.png", config, timelines)
+    plot_object_timelines(output / "object_timeline.png", config, analysis.timelines)
     return output
 
 
