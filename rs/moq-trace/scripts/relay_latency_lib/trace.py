@@ -576,14 +576,13 @@ def _finish_packets(
 
     packets: list[Packet] = []
     packet_by_id: dict[int, Packet] = {}
+    unsuccessful_packet_ids: set[int] = set()
     for trace_id, scope in sorted(packet_scopes.items()):
         if len(scope.starts) != 1 or len(scope.completions) != 1:
             raise TraceError(
                 f"packet {trace_id} has {len(scope.starts)} starts and {len(scope.completions)} completions"
             )
         start, completion = scope.starts[0], scope.completions[0]
-        if completion.get("outcome") != "success":
-            raise TraceError(f"packet {trace_id} did not complete successfully")
         for row in (start, completion):
             if _required_int(row, "sample_rate", f"packet {trace_id}") != 1:
                 raise TraceError("QUIC object correlation requires packet_sample = 1")
@@ -600,6 +599,9 @@ def _finish_packets(
             _required_int(completion, "timestamp_ns", f"packet {trace_id}"),
             f"packet {trace_id}",
         )
+        if completion.get("outcome") != "success":
+            unsuccessful_packet_ids.add(trace_id)
+            continue
         packet = Packet(
             trace_id=trace_id,
             connection_id=connection_id,
@@ -617,6 +619,8 @@ def _finish_packets(
         trace_id = _required_int(row, "trace_id", "STREAM frame")
         packet = packet_by_id.get(trace_id)
         if packet is None:
+            if trace_id in unsuccessful_packet_ids:
+                raise TraceError(f"successful STREAM frame references unsuccessful packet {trace_id}")
             raise TraceError(f"STREAM frame references unknown packet {trace_id}")
         _validate_packet_identity(row, packet, f"packet {trace_id} STREAM frame")
         stream_id = _required_int(row, "stream_id", f"packet {trace_id} STREAM frame")
@@ -632,6 +636,8 @@ def _finish_packets(
 
     phases_by_packet: dict[int, list[tuple[PacketPhaseName, PhaseScope]]] = {}
     for (trace_id, phase), scope in phase_scopes.items():
+        if trace_id in unsuccessful_packet_ids:
+            continue
         if trace_id not in packet_by_id:
             raise TraceError(f"phase {phase} references unknown packet {trace_id}")
         phases_by_packet.setdefault(trace_id, []).append((phase, scope))

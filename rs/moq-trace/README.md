@@ -156,7 +156,9 @@ python rs/moq-trace/scripts/relay_latency.py --compare-subscribers 1,50,100
 The comparison directory contains one `subscribers-N` run directory per count,
 plus `per_copy_latency.csv`, `per_copy_latency_summary.json`, and
 `per_copy_latency_cdf.png`. Each CDF sample is one outbound delivery copy, so
-`n` scales with both logical objects and subscribers.
+`n` scales with both logical objects and subscribers. The runner scales the
+bounded trace queue to 4096 events per subscriber so connection bursts do not
+drop lifecycle records during high-fanout runs.
 
 To test uncommitted instrumentation in a local Quinn checkout, override the
 workspace's pinned fork revision:
@@ -201,7 +203,8 @@ header protection. It ends when Quinn completes the first packet set covering
 the outbound object. It excludes UDP socket completion and peer acknowledgement.
 
 Packet diagnostics report RX and TX packet spans plus each successful packet
-phase occurrence. They are kept separate from object metrics because packet and
+phase occurrence. Completed packets with non-success QUIC outcomes are validated and
+excluded because they cannot contribute STREAM data to object coverage. They are kept separate from object metrics because packet and
 object work can overlap.
 
 The experiment writes:

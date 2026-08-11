@@ -30,6 +30,7 @@ from .plot import (
 from .trace import TraceError, TraceIndex
 
 PROTOCOL = "moq-transport-19"
+TRACE_QUEUE_CAPACITY_PER_SUBSCRIBER = 4096
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -88,6 +89,8 @@ def build_relay_command(config: ExperimentConfig) -> list[str]:
         "",
         "--trace-path",
         str((config.output / "relay.jsonl").resolve()),
+        "--trace-queue-capacity",
+        str(TRACE_QUEUE_CAPACITY_PER_SUBSCRIBER * config.subscribers),
     ]
     if config.relay_cpu is not None:
         command[:0] = ["taskset", "-c", str(config.relay_cpu)]
