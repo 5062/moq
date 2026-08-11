@@ -17,12 +17,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .analysis import Analysis, AnalysisOptions, analyze
 from .plot import (
+    PerCopyCdfRun,
     PlotOptions,
     plot_analysis,
     plot_latency_cdf,
     plot_object_timelines,
     plot_packet_analysis,
     plot_packet_latency_cdf,
+    plot_per_copy_latency_cdf,
     plot_quic_analysis,
 )
 from .trace import TraceError, TraceIndex
@@ -449,6 +451,95 @@ def _write_artifacts(
     plot_latency_cdf(output / "latency_cdf.png", plot_options, analysis)
     plot_packet_latency_cdf(output / "packet_latency_cdf.png", plot_options, analysis)
     plot_object_timelines(output / "object_timeline.png", plot_options, analysis.timelines)
+
+
+def run_subscriber_comparison(
+    config: ExperimentConfig,
+    subscriber_counts: tuple[int, ...],
+) -> pathlib.Path:
+    """Run one workload per subscriber count and compare delivery-copy latency."""
+
+    if len(subscriber_counts) < 2:
+        raise ValueError("subscriber comparison requires at least two counts")
+    if len(set(subscriber_counts)) != len(subscriber_counts):
+        raise ValueError("subscriber comparison counts must be unique")
+    if any(count <= 0 for count in subscriber_counts):
+        raise ValueError("subscriber comparison counts must be positive")
+
+    output = config.output.resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    runs: list[PerCopyCdfRun] = []
+    combined_samples: list[pl.DataFrame] = []
+    run_summaries = []
+    for index, subscribers in enumerate(subscriber_counts):
+        run_config = config.model_copy(
+            update={
+                "output": output / f"subscribers-{subscribers}",
+                "subscribers": subscribers,
+                "skip_build": config.skip_build or index > 0,
+            }
+        )
+        run_output = run_experiment(run_config)
+        summary = json.loads((run_output / "summary.json").read_text())
+        object_samples = pl.read_csv(run_output / "objects.csv")
+        quic_object_samples = pl.read_csv(run_output / "quic_objects.csv")
+        runs.append(
+            PerCopyCdfRun(
+                subscribers=subscribers,
+                samples=object_samples,
+                quic_object_samples=quic_object_samples,
+                statistics=summary["statistics_us"],
+                quic_object_statistics=summary["quic_object_statistics_us"],
+            )
+        )
+        for layer, metric, samples in (
+            ("moq", "full_span", object_samples),
+            ("quic", "quic_full_span", quic_object_samples),
+        ):
+            combined_samples.append(
+                samples.filter(pl.col("metric") == metric).with_columns(
+                    pl.lit(subscribers).alias("subscribers"),
+                    pl.lit(layer).alias("layer"),
+                )
+            )
+        run_summaries.append(
+            {
+                "subscribers": subscribers,
+                "directory": run_output.name,
+                "delivery_copies": summary["counts"]["correlated_object_copies"],
+                "statistics_us": {
+                    "full_span": summary["statistics_us"]["full_span"],
+                    "quic_full_span": summary["quic_object_statistics_us"]["quic_full_span"],
+                },
+            }
+        )
+
+    samples = pl.concat(combined_samples)
+    write_samples(
+        output / "per_copy_latency.csv",
+        samples,
+        ("subscribers", "layer", "group_id", "object_id", "copy_ordinal"),
+    )
+    comparison_summary = {
+        "sample_unit": "delivery copy",
+        "subscriber_counts": list(subscriber_counts),
+        "runs": run_summaries,
+    }
+    (output / "per_copy_latency_summary.json").write_text(
+        json.dumps(comparison_summary, indent=2, sort_keys=True) + "\n"
+    )
+    plot_per_copy_latency_cdf(
+        output / "per_copy_latency_cdf.png",
+        PlotOptions(
+            relay_cpu=config.relay_cpu,
+            subscribers=subscriber_counts[0],
+            object_size=config.object_size,
+            fps=config.fps,
+            protocol=PROTOCOL,
+        ),
+        tuple(runs),
+    )
+    return output
 
 
 def run_experiment(config: ExperimentConfig) -> pathlib.Path:

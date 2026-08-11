@@ -72,6 +72,17 @@ class CdfSeries:
     annotation_lane: int
 
 
+@dataclasses.dataclass(frozen=True)
+class PerCopyCdfRun:
+    """Per-copy object latency samples for one subscriber count."""
+
+    subscribers: int
+    samples: pl.DataFrame
+    quic_object_samples: pl.DataFrame
+    statistics: dict[str, dict[str, float | int]]
+    quic_object_statistics: dict[str, dict[str, float | int]]
+
+
 def plot_analysis(path: pathlib.Path, options: PlotOptions, analysis: Analysis) -> None:
     """Render ECDF, percentile, and time-series latency panels."""
 
@@ -179,6 +190,61 @@ def plot_latency_cdf(path: pathlib.Path, options: PlotOptions, analysis: Analysi
     axis.set_ylabel("CDF")
     axis.grid(alpha=0.25)
     axis.legend(fontsize=8)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def plot_per_copy_latency_cdf(
+    path: pathlib.Path,
+    options: PlotOptions,
+    runs: tuple[PerCopyCdfRun, ...],
+) -> None:
+    """Compare per-copy object latency distributions across subscriber counts."""
+
+    if len(runs) < 2:
+        raise ValueError("per-copy latency comparison requires at least two subscriber counts")
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5), sharey=True)
+    panels = (
+        (axes[0], "full_span", "MoQ relay span", "samples", "statistics"),
+        (
+            axes[1],
+            "quic_full_span",
+            "QUIC-inclusive span",
+            "quic_object_samples",
+            "quic_object_statistics",
+        ),
+    )
+    line_styles = ("-", "--", ":", "-.")
+    for axis, metric, title, samples_field, statistics_field in panels:
+        for index, run in enumerate(runs):
+            subscriber_label = "subscriber" if run.subscribers == 1 else "subscribers"
+            _plot_cdf_series(
+                axis,
+                CdfSeries(
+                    metric,
+                    f"{run.subscribers} {subscriber_label}",
+                    getattr(run, samples_field),
+                    getattr(run, statistics_field),
+                    index,
+                    line_styles[index % len(line_styles)],
+                    index,
+                ),
+            )
+        axis.set_title(title)
+        axis.set_xlabel("Latency (µs)")
+        axis.grid(alpha=0.25)
+        axis.legend(fontsize=8)
+    axes[0].set_ylabel("CDF")
+
+    affinity = "unpinned" if options.relay_cpu is None else f"pinned CPU {options.relay_cpu}"
+    fig.suptitle(
+        f"Per-copy object latency CDF | "
+        f"{affinity} | {options.object_size} bytes | {options.fps} fps | "
+        f"{options.protocol} | n = delivery copies"
+    )
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160)

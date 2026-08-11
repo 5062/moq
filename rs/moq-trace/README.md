@@ -146,6 +146,18 @@ Run the local publisher, relay, and subscriber experiment with:
 python rs/moq-trace/scripts/relay_latency.py
 ```
 
+To compare delivery-copy latency across subscriber counts, run each workload in
+sequence with one shared build:
+
+```sh
+python rs/moq-trace/scripts/relay_latency.py --compare-subscribers 1,50,100
+```
+
+The comparison directory contains one `subscribers-N` run directory per count,
+plus `per_copy_latency.csv`, `per_copy_latency_summary.json`, and
+`per_copy_latency_cdf.png`. Each CDF sample is one outbound delivery copy, so
+`n` scales with both logical objects and subscribers.
+
 To test uncommitted instrumentation in a local Quinn checkout, override the
 workspace's pinned fork revision:
 

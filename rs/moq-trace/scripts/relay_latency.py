@@ -13,12 +13,22 @@ from relay_latency_lib.runner import (
     ExperimentError,
     default_output,
     run_experiment,
+    run_subscriber_comparison,
     validate_cpu_affinity,
     validate_quinn_path,
 )
 from relay_latency_lib.trace import TraceError
 
 app = typer.Typer(add_completion=False, help="Measure local MoQ relay processing latency.")
+
+
+def parse_subscriber_counts(value: str) -> tuple[int, ...]:
+    """Parse a comma-separated subscriber comparison."""
+
+    try:
+        return tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as error:
+        raise ValueError("--compare-subscribers must contain comma-separated integers") from error
 
 
 def print_statistics(title: str, statistics: dict[str, dict[str, float | int]]) -> None:
@@ -38,6 +48,13 @@ def print_statistics(title: str, statistics: dict[str, dict[str, float | int]]) 
 def main(
     relay_cpu: Annotated[int | None, typer.Option("--relay-cpu")] = None,
     subscribers: Annotated[int, typer.Option("--subscribers")] = 1,
+    compare_subscribers: Annotated[
+        str | None,
+        typer.Option(
+            "--compare-subscribers",
+            help="Run a per-copy latency comparison, for example 1,50,100.",
+        ),
+    ] = None,
     fps: Annotated[int, typer.Option("--fps")] = 30,
     object_size: Annotated[int, typer.Option("--object-size")] = 16 * 1024,
     duration: Annotated[float, typer.Option("--duration")] = 20,
@@ -85,12 +102,26 @@ def main(
         )
         validate_cpu_affinity(config)
         validate_quinn_path(config)
-        result = run_experiment(config)
-        summary = json.loads((result / "summary.json").read_text())
+        if compare_subscribers is not None:
+            counts = parse_subscriber_counts(compare_subscribers)
+            result = run_subscriber_comparison(config, counts)
+        else:
+            result = run_experiment(config)
+        summary_path = result / "summary.json"
+        summary = json.loads(summary_path.read_text()) if summary_path.is_file() else None
     except (ExperimentError, OSError, TraceError, ValidationError, ValueError) as error:
         typer.echo(f"error: {error}", err=True)
         typer.echo(f"run directory: {output.resolve()}", err=True)
         raise typer.Exit(1) from error
+
+    if summary is None:
+        for name in (
+            "per_copy_latency.csv",
+            "per_copy_latency_summary.json",
+            "per_copy_latency_cdf.png",
+        ):
+            typer.echo(f"{name}: {(result / name).resolve()}")
+        return
 
     print_statistics("MoQ object metrics", summary["statistics_us"])
     print_statistics("QUIC-inclusive object metrics", summary["quic_object_statistics_us"])
