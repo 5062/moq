@@ -16,7 +16,15 @@ import polars as pl
 from pydantic import BaseModel, ConfigDict, Field
 
 from .analysis import Analysis, AnalysisOptions, analyze
-from .plot import PlotOptions, plot_analysis, plot_object_timelines, plot_packet_analysis, plot_quic_analysis
+from .plot import (
+    PlotOptions,
+    plot_analysis,
+    plot_latency_cdf,
+    plot_object_timelines,
+    plot_packet_analysis,
+    plot_packet_latency_cdf,
+    plot_quic_analysis,
+)
 from .trace import TraceError, TraceIndex
 
 PROTOCOL = "moq-transport-19"
@@ -395,15 +403,13 @@ def _capture_trace(
     return output / "relay.jsonl"
 
 
-def _validate_analysis(config: ExperimentConfig, analysis: Analysis) -> None:
-    """Validate analysis requirements specific to a local Quinn checkout."""
+def _validate_analysis(analysis: Analysis) -> None:
+    """Validate that Quinn emitted every required packet metric."""
 
-    if config.quinn_path is None:
-        return
     required = {"rx_routing", "rx_scheduling"}
     missing = sorted(required - analysis.packet_statistics.keys())
     if missing:
-        raise TraceError(f"local Quinn trace is missing packet metrics: {', '.join(missing)}")
+        raise TraceError(f"Quinn trace is missing packet metrics: {', '.join(missing)}")
 
 
 def _write_artifacts(
@@ -440,6 +446,8 @@ def _write_artifacts(
     plot_analysis(output / "latency.png", plot_options, analysis)
     plot_quic_analysis(output / "quic_latency.png", plot_options, analysis)
     plot_packet_analysis(output / "packet_latency.png", plot_options, analysis)
+    plot_latency_cdf(output / "latency_cdf.png", plot_options, analysis)
+    plot_packet_latency_cdf(output / "packet_latency_cdf.png", plot_options, analysis)
     plot_object_timelines(output / "object_timeline.png", plot_options, analysis.timelines)
 
 
@@ -466,6 +474,6 @@ def run_experiment(config: ExperimentConfig) -> pathlib.Path:
             cooldown_seconds=config.cooldown,
         ),
     )
-    _validate_analysis(config, analysis)
+    _validate_analysis(analysis)
     _write_artifacts(output, config, analysis, commands)
     return output

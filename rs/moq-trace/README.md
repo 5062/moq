@@ -201,6 +201,10 @@ The experiment writes:
 - `latency.png`: MoQ latency distributions, percentiles, and time series.
 - `quic_latency.png`: QUIC-inclusive object plots.
 - `packet_latency.png`: packet-span and packet-phase plots.
+- `latency_cdf.png`: MoQ and QUIC-inclusive object latency empirical CDFs with
+  p50 and p99 markers.
+- `packet_latency_cdf.png`: separate RX and TX packet-span empirical CDFs with
+  packet-level sample counts, p50, and p99 markers.
 - `object_timeline.png`: correlated QUIC packet phases and MoQ phases for the
   first-created and last-created subscriber sessions of representative objects.
 

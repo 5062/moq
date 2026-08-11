@@ -9,6 +9,7 @@ import matplotlib
 matplotlib.use("Agg")
 import polars as pl
 from matplotlib import pyplot as plt  # noqa: E402
+from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 
 from .analysis import Analysis, ObjectTimeline
@@ -58,6 +59,19 @@ class MetricPlot:
     title: str
 
 
+@dataclasses.dataclass(frozen=True)
+class CdfSeries:
+    """One metric and its empirical CDF presentation."""
+
+    metric: str
+    label: str
+    samples: pl.DataFrame
+    statistics: dict[str, dict[str, float | int]]
+    color_index: int
+    line_style: str
+    annotation_lane: int
+
+
 def plot_analysis(path: pathlib.Path, options: PlotOptions, analysis: Analysis) -> None:
     """Render ECDF, percentile, and time-series latency panels."""
 
@@ -96,6 +110,122 @@ def plot_packet_analysis(path: pathlib.Path, options: PlotOptions, analysis: Ana
             "QUIC packet diagnostics",
         ),
     )
+
+
+def _plot_cdf_series(axis: Axes, series: CdfSeries) -> int:
+    """Render one empirical CDF and return its sample count."""
+
+    colors = cast(tuple[tuple[float, ...], ...], getattr(plt.get_cmap("tab10"), "colors"))
+    color = colors[series.color_index]
+    percentiles = (("p50", 0.50, "o"), ("p99", 0.99, "s"))
+    values_us = series.samples.filter(pl.col("metric") == series.metric)["latency_us"].to_numpy()
+    if len(values_us) == 0:
+        raise ValueError(f"cannot plot CDF without {series.metric} samples")
+    axis.ecdf(
+        values_us,
+        label=f"{series.label} (n={len(values_us)})",
+        color=color,
+        linestyle=series.line_style,
+        linewidth=2,
+    )
+    summary = series.statistics[series.metric]
+    for name, cumulative, marker in percentiles:
+        latency_us = float(summary[name])
+        axis.scatter(
+            [latency_us],
+            [cumulative],
+            color=color,
+            marker=marker,
+            s=52,
+            zorder=3,
+        )
+        vertical_offset = 8 + series.annotation_lane * 13 if name == "p50" else -16 - series.annotation_lane * 13
+        axis.annotate(
+            f"{name} {latency_us:.1f} µs",
+            (latency_us, cumulative),
+            xytext=(7, vertical_offset),
+            textcoords="offset points",
+            color=color,
+        )
+    return len(values_us)
+
+
+def plot_latency_cdf(path: pathlib.Path, options: PlotOptions, analysis: Analysis) -> None:
+    """Render the empirical distributions of MoQ and QUIC-inclusive object latency."""
+
+    series = (
+        CdfSeries("full_span", "MoQ", analysis.samples, analysis.statistics, 0, "-", 0),
+        CdfSeries(
+            "quic_full_span",
+            "QUIC",
+            analysis.quic_object_samples,
+            analysis.quic_object_statistics,
+            1,
+            "--",
+            1,
+        ),
+    )
+    fig, axis = plt.subplots(figsize=(9.5, 5.5))
+    for item in series:
+        _plot_cdf_series(axis, item)
+
+    affinity = "unpinned" if options.relay_cpu is None else f"pinned CPU {options.relay_cpu}"
+    fig.suptitle(
+        f"Object latency CDF | "
+        f"{affinity} | {options.subscribers} subscriber(s) | "
+        f"{options.object_size} bytes | {options.fps} fps | {options.protocol}"
+    )
+    axis.set_xlabel("Latency (µs)")
+    axis.set_ylabel("CDF")
+    axis.grid(alpha=0.25)
+    axis.legend(fontsize=8)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def plot_packet_latency_cdf(path: pathlib.Path, options: PlotOptions, analysis: Analysis) -> None:
+    """Render separate empirical distributions of RX and TX packet spans."""
+
+    series = (
+        CdfSeries(
+            "rx_packet_span",
+            "RX",
+            analysis.packet_samples,
+            analysis.packet_statistics,
+            0,
+            "-",
+            0,
+        ),
+        CdfSeries(
+            "tx_packet_span",
+            "TX",
+            analysis.packet_samples,
+            analysis.packet_statistics,
+            1,
+            "-",
+            0,
+        ),
+    )
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5), sharey=True)
+    for axis, item in zip(axes, series, strict=True):
+        count = _plot_cdf_series(axis, item)
+        axis.set_title(f"{item.label} (n={count})")
+        axis.set_xlabel("Latency (µs)")
+        axis.grid(alpha=0.25)
+    axes[0].set_ylabel("CDF")
+
+    affinity = "unpinned" if options.relay_cpu is None else f"pinned CPU {options.relay_cpu}"
+    fig.suptitle(
+        f"QUIC packet latency CDF | "
+        f"{affinity} | {options.subscribers} subscriber(s) | "
+        f"{options.object_size} bytes | {options.fps} fps | {options.protocol}"
+    )
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
 
 
 def plot_metrics(

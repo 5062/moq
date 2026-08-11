@@ -103,6 +103,8 @@ def main(
         "latency.png",
         "quic_latency.png",
         "packet_latency.png",
+        "latency_cdf.png",
+        "packet_latency_cdf.png",
         "object_timeline.png",
     ):
         typer.echo(f"{name}: {(result / name).resolve()}")
