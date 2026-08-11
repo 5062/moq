@@ -516,6 +516,15 @@ class Analysis:
 
 
 @dataclasses.dataclass(frozen=True)
+class SteadyState:
+    """Validated objects and workload origin for the analysis window."""
+
+    objects: dict[ObjectKey, ObjectBoundaries]
+    first_rx_ns: int
+    group_count: int
+
+
+@dataclasses.dataclass(frozen=True)
 class ParsedPackets:
     """Validated packets with reusable identity and phase indexes."""
 
@@ -1323,14 +1332,9 @@ def _quic_object_samples(
     return pl.DataFrame(rows, schema=SAMPLE_SCHEMA)
 
 
-def analyze_trace(
-    path: pathlib.Path,
-    config: ExperimentConfig,
-) -> Analysis:
-    """Index, validate, trim, and summarize a relay JSONL trace."""
+def _select_steady_state(trace: TraceIndex, config: ExperimentConfig) -> SteadyState:
+    """Select and validate payload objects inside the steady-state window."""
 
-    trace = TraceIndex.read(path)
-    packet_count = len(trace.packets.packets)
     object_index = {
         key: indexed_object.boundaries
         for key, indexed_object in trace.objects.items()
@@ -1366,12 +1370,20 @@ def analyze_trace(
     groups = sorted({key.group_id for key in keys})
     if groups != list(range(groups[0], groups[-1] + 1)):
         raise TraceError("steady-state groups are not contiguous")
+    return SteadyState(
+        objects={key: object_index[key] for key in keys},
+        first_rx_ns=first_rx,
+        group_count=len(groups),
+    )
+
+
+def _moq_object_samples(steady_state: SteadyState) -> pl.DataFrame:
+    """Build MoQ lifecycle samples for validated steady-state objects."""
 
     rows = []
-    for key in keys:
-        obj = object_index[key]
+    for key, obj in steady_state.objects.items():
         rx_start = obj.rx_starts[0]
-        elapsed_ms = (rx_start - first_rx) / 1_000_000
+        elapsed_ms = (rx_start - steady_state.first_rx_ns) / 1_000_000
         # Ordinals describe timestamp order only. Session IDs are not
         # available in this boundary-reduced table.
         for ordinal, target in enumerate(sorted(obj.tx_ends)):
@@ -1385,10 +1397,21 @@ def analyze_trace(
                     "latency_us": (target - rx_start) / 1_000,
                 }
             )
+    return pl.DataFrame(rows, schema=SAMPLE_SCHEMA)
 
-    samples = pl.DataFrame(rows, schema=SAMPLE_SCHEMA)
-    steady_keys = tuple(keys)
-    quic_object_samples = _quic_object_samples(trace, steady_keys, config.subscribers, first_rx)
+
+def _analyze_index(trace: TraceIndex, config: ExperimentConfig) -> Analysis:
+    """Calculate analysis outputs from one validated trace index."""
+
+    steady_state = _select_steady_state(trace, config)
+    samples = _moq_object_samples(steady_state)
+    steady_keys = tuple(steady_state.objects)
+    quic_object_samples = _quic_object_samples(
+        trace,
+        steady_keys,
+        config.subscribers,
+        steady_state.first_rx_ns,
+    )
     selections = select_timeline_objects(samples)
     timelines = tuple(extract_object_timeline(trace, selection) for selection in selections)
     return Analysis(
@@ -1398,10 +1421,19 @@ def analyze_trace(
         quic_object_statistics=summarize(quic_object_samples),
         packet_samples=trace.packets.samples,
         packet_statistics=summarize(trace.packets.samples),
-        packet_count=packet_count,
-        group_count=len(groups),
+        packet_count=len(trace.packets.packets),
+        group_count=steady_state.group_count,
         timelines=timelines,
     )
+
+
+def analyze_trace(
+    path: pathlib.Path,
+    config: ExperimentConfig,
+) -> Analysis:
+    """Read, index, and analyze a relay JSONL trace."""
+
+    return _analyze_index(TraceIndex.read(path), config)
 
 
 def write_samples(path: pathlib.Path, samples: pl.DataFrame, sort_by: tuple[str, ...]) -> None:
