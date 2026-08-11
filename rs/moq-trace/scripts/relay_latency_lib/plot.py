@@ -191,6 +191,7 @@ def plot_object_timelines(
         ("rx", "header_parse", "RX Header Parse"),
         ("rx", "create", "RX Create"),
         ("rx", "payload_read", "RX Payload Read"),
+        ("rx", "frame_commit", "RX Frame Commit"),
         ("tx", "clone", "TX Clone"),
         ("tx", "header_encode", "TX Header Encode"),
         ("tx", "payload_write", "TX Payload Write"),

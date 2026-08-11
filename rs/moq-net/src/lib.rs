@@ -109,6 +109,8 @@ pub mod trace {
 		Create,
 		/// Read an inbound object payload.
 		PayloadRead,
+		/// Commit an inbound frame to the relay model.
+		FrameCommit,
 		/// Clone or select an outbound object.
 		Clone,
 		/// Encode an outbound object header.

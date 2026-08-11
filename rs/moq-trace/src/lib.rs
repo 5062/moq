@@ -160,6 +160,8 @@ pub enum ObjectPhase {
 	Create,
 	/// Read an inbound object payload.
 	PayloadRead,
+	/// Commit an inbound frame to the relay model.
+	FrameCommit,
 	/// Clone or select an outbound object from the relay model.
 	Clone,
 	/// Encode an outbound object header.

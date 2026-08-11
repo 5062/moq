@@ -1046,7 +1046,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(err);
 				}
 
-				frame.finish()?;
+				let commit = object.phase(trace::ObjectPhase::FrameCommit);
+				match frame.finish() {
+					Ok(()) => commit.finish(trace::ObjectOutcome::Success),
+					Err(err) => {
+						commit.finish(trace::ObjectOutcome::Failed);
+						return Err(err);
+					}
+				}
 				object.set_stream_offset_end(stream.offset());
 				object.finish();
 			}

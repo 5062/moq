@@ -13,6 +13,7 @@ ObjectPhaseName = Literal[
     "header_parse",
     "create",
     "payload_read",
+    "frame_commit",
     "clone",
     "header_encode",
     "payload_write",
@@ -30,7 +31,7 @@ PacketPhaseName = Literal[
 ]
 
 OBJECT_PHASES: dict[Direction, frozenset[str]] = {
-    "rx": frozenset({"header_parse", "create", "payload_read"}),
+    "rx": frozenset({"header_parse", "create", "payload_read", "frame_commit"}),
     "tx": frozenset({"clone", "header_encode", "payload_write"}),
 }
 

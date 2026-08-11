@@ -100,8 +100,8 @@ packet number.
 
 MoQ object phases follow the same scoped shape: a `phase` and `edge` pair, with an
 `outcome` on done edges. The phase values are `header_parse`, `create`,
-`payload_read`, `clone`, `header_encode`, and `payload_write`. Object outcomes
-are `success`, `failed`, and `abandoned`. Object identity is:
+`payload_read`, `frame_commit`, `clone`, `header_encode`, and `payload_write`.
+Object outcomes are `success`, `failed`, and `abandoned`. Object identity is:
 
 ```text
 (session_id, track_alias, group_id, object_id)

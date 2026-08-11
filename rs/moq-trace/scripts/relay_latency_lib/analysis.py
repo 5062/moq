@@ -250,6 +250,7 @@ def extract_object_timeline(trace: TraceIndex, selection: TimelineSelection) -> 
         "header_parse": 1,
         "create": 2,
         "payload_read": 3,
+        "frame_commit": 4,
         "clone": 1,
         "header_encode": 2,
         "payload_write": 3,
