@@ -525,15 +525,63 @@ class SteadyState:
 
 
 @dataclasses.dataclass(frozen=True)
-class ParsedPackets:
-    """Validated packets with reusable identity and phase indexes."""
+class PacketIndex:
+    """Validated packet data exposed through identity-based queries."""
 
-    packets: tuple[Packet, ...]
-    by_id: dict[int, Packet]
-    frames: tuple[StreamFrame, ...]
-    phases: tuple[PacketPhase, ...]
-    phases_by_packet: dict[int, tuple[PacketPhase, ...]]
-    samples: pl.DataFrame
+    _by_id: dict[int, Packet]
+    _frames: tuple[StreamFrame, ...]
+    _phases_by_packet: dict[int, tuple[PacketPhase, ...]]
+    _samples: pl.DataFrame
+
+    @property
+    def count(self) -> int:
+        """Return the number of indexed packets."""
+
+        return len(self._by_id)
+
+    @property
+    def samples(self) -> pl.DataFrame:
+        """Return packet and packet-phase latency samples."""
+
+        return self._samples
+
+    def packet(self, trace_id: int) -> Packet:
+        """Return one packet by trace ID."""
+
+        packet = self._by_id.get(trace_id)
+        if packet is None:
+            raise TraceError(f"packet index has no packet {trace_id}")
+        return packet
+
+    def phases(self, trace_id: int) -> tuple[PacketPhase, ...]:
+        """Return the traced phases for one packet."""
+
+        return self._phases_by_packet.get(trace_id, ())
+
+    def stream_frames(self) -> Iterator[StreamFrame]:
+        """Iterate over validated STREAM frames."""
+
+        return iter(self._frames)
+
+    def covering_packets(self, trace_ids: tuple[int, ...]) -> tuple[Packet, ...]:
+        """Return covering packets in lifecycle order."""
+
+        return tuple(
+            sorted(
+                (self.packet(trace_id) for trace_id in trace_ids),
+                key=lambda packet: (packet.start_ns, packet.trace_id),
+            )
+        )
+
+    def covering_phases(self, trace_ids: tuple[int, ...]) -> tuple[PacketPhase, ...]:
+        """Return phases for covering packets in lifecycle order."""
+
+        return tuple(
+            sorted(
+                (phase for trace_id in trace_ids for phase in self.phases(trace_id)),
+                key=lambda phase: (phase.start_ns, phase.packet.trace_id, phase.phase, phase.occurrence),
+            )
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -765,7 +813,7 @@ def _finish_packets(
     packet_scopes: dict[int, PacketScope],
     phase_scopes: dict[tuple[int, PacketPhaseName], PhaseScope],
     stream_rows: list[TraceRow],
-) -> ParsedPackets:
+) -> PacketIndex:
     """Validate and freeze packet records collected during trace ingestion."""
 
     packets: list[Packet] = []
@@ -831,7 +879,6 @@ def _finish_packets(
         phases_by_packet.setdefault(trace_id, []).append((phase, scope))
 
     first_packet_ns = min((packet.start_ns for packet in packets), default=0)
-    phase_intervals: list[PacketPhase] = []
     indexed_phases: dict[int, list[PacketPhase]] = {}
     metric_rows: list[dict] = []
     for packet in sorted(packets, key=lambda item: (item.start_ns, item.trace_id)):
@@ -859,7 +906,6 @@ def _finish_packets(
             intervals = _pair_phase_scope(scope, label)
             for occurrence, interval in enumerate(intervals):
                 packet_phase = PacketPhase(packet, phase, occurrence, interval.start_ns, interval.end_ns)
-                phase_intervals.append(packet_phase)
                 indexed_phases.setdefault(packet.trace_id, []).append(packet_phase)
                 metric_rows.append(
                     {
@@ -873,13 +919,11 @@ def _finish_packets(
                     }
                 )
 
-    return ParsedPackets(
-        packets=tuple(packets),
-        by_id=packet_by_id,
-        frames=tuple(frames),
-        phases=tuple(phase_intervals),
-        phases_by_packet={trace_id: tuple(phases) for trace_id, phases in indexed_phases.items()},
-        samples=pl.DataFrame(metric_rows, schema=PACKET_SAMPLE_SCHEMA),
+    return PacketIndex(
+        _by_id=packet_by_id,
+        _frames=tuple(frames),
+        _phases_by_packet={trace_id: tuple(phases) for trace_id, phases in indexed_phases.items()},
+        _samples=pl.DataFrame(metric_rows, schema=PACKET_SAMPLE_SCHEMA),
     )
 
 
@@ -909,11 +953,11 @@ class CoverageIndex:
     cache: dict[ObjectRange, Coverage] = dataclasses.field(default_factory=dict)
 
     @classmethod
-    def from_frames(cls, frames: tuple[StreamFrame, ...]) -> CoverageIndex:
-        """Build one transport-stream index from validated STREAM frames."""
+    def from_packets(cls, packets: PacketIndex) -> CoverageIndex:
+        """Build one transport-stream index from validated packets."""
 
         grouped: dict[StreamKey, list[StreamFrame]] = {}
-        for frame in frames:
+        for frame in packets.stream_frames():
             key = StreamKey(frame.packet.direction, frame.packet.connection_id, frame.stream_id)
             grouped.setdefault(key, []).append(frame)
         indexed = {
@@ -985,7 +1029,7 @@ class CoverageIndex:
 class TraceIndex:
     """Validated packet, object, and stream indexes for one trace file."""
 
-    packets: ParsedPackets
+    packet_index: PacketIndex
     objects: dict[ObjectKey, IndexedObject]
     coverage: CoverageIndex
 
@@ -1025,12 +1069,12 @@ def _build_trace_index(events: pl.DataFrame) -> TraceIndex:
         elif isinstance(event_type, str) and (event_type.startswith("quic_") or event_type.startswith("moq_object_")):
             raise TraceError(f"unknown trace event type {event_type!r}")
 
-    packets = _finish_packets(packet_scopes, phase_scopes, stream_rows)
+    packet_index = _finish_packets(packet_scopes, phase_scopes, stream_rows)
     objects = {key: builder.finish(key) for key, builder in object_builders.items()}
     return TraceIndex(
-        packets=packets,
+        packet_index=packet_index,
         objects=objects,
-        coverage=CoverageIndex.from_frames(packets.frames),
+        coverage=CoverageIndex.from_packets(packet_index),
     )
 
 
@@ -1086,11 +1130,8 @@ def _quic_timeline_intervals(
     intervals: list[IntervalNs] = []
     for object_range in sorted(object_ranges, key=lambda item: (item.direction, item.session_id)):
         coverage = trace.coverage.first_complete(object_range)
-        trace_ids = set(coverage.packet_trace_ids)
-        covered_packets = sorted(
-            (trace.packets.by_id[trace_id] for trace_id in trace_ids),
-            key=lambda packet: (packet.start_ns, packet.trace_id),
-        )
+        trace_ids = coverage.packet_trace_ids
+        covered_packets = trace.packet_index.covering_packets(trace_ids)
         for occurrence, packet in enumerate(covered_packets):
             intervals.append(
                 IntervalNs(
@@ -1102,10 +1143,7 @@ def _quic_timeline_intervals(
                     end_ns=packet.end_ns,
                 )
             )
-        covered_phases = sorted(
-            (phase for trace_id in trace_ids for phase in trace.packets.phases_by_packet.get(trace_id, ())),
-            key=lambda phase: (phase.start_ns, phase.packet.trace_id, phase.phase, phase.occurrence),
-        )
+        covered_phases = trace.packet_index.covering_phases(trace_ids)
         for phase in covered_phases:
             intervals.append(
                 IntervalNs(
@@ -1419,9 +1457,9 @@ def _analyze_index(trace: TraceIndex, config: ExperimentConfig) -> Analysis:
         statistics=summarize(samples),
         quic_object_samples=quic_object_samples,
         quic_object_statistics=summarize(quic_object_samples),
-        packet_samples=trace.packets.samples,
-        packet_statistics=summarize(trace.packets.samples),
-        packet_count=len(trace.packets.packets),
+        packet_samples=trace.packet_index.samples,
+        packet_statistics=summarize(trace.packet_index.samples),
+        packet_count=trace.packet_index.count,
         group_count=steady_state.group_count,
         timelines=timelines,
     )
