@@ -13,6 +13,7 @@ from relay_latency_lib.runner import (
     ExperimentError,
     default_output,
     run_experiment,
+    run_object_size_comparison,
     run_subscriber_comparison,
     validate_cpu_affinity,
     validate_quinn_path,
@@ -29,6 +30,23 @@ def parse_subscriber_counts(value: str) -> tuple[int, ...]:
         return tuple(int(item.strip()) for item in value.split(",") if item.strip())
     except ValueError as error:
         raise ValueError("--compare-subscribers must contain comma-separated integers") from error
+
+
+def parse_object_sizes(value: str) -> tuple[int, ...]:
+    """Parse comma-separated byte sizes with optional binary suffixes."""
+
+    units = {"": 1, "b": 1, "k": 1024, "kb": 1024, "kib": 1024}
+    sizes = []
+    for item in value.split(","):
+        token = item.strip().lower()
+        if not token:
+            continue
+        suffix = next((unit for unit in ("kib", "kb", "k", "b") if token.endswith(unit)), "")
+        number = token[: -len(suffix)] if suffix else token
+        if not number.isdigit():
+            raise ValueError("--compare-object-sizes must contain comma-separated byte sizes")
+        sizes.append(int(number) * units[suffix])
+    return tuple(sizes)
 
 
 def print_statistics(title: str, statistics: dict[str, dict[str, float | int]]) -> None:
@@ -53,6 +71,13 @@ def main(
         typer.Option(
             "--compare-subscribers",
             help="Run a per-copy latency comparison, for example 1,50,100.",
+        ),
+    ] = None,
+    compare_object_sizes: Annotated[
+        str | None,
+        typer.Option(
+            "--compare-object-sizes",
+            help="Run a per-copy latency comparison, for example 16k,64k,256k.",
         ),
     ] = None,
     fps: Annotated[int, typer.Option("--fps")] = 30,
@@ -102,9 +127,14 @@ def main(
         )
         validate_cpu_affinity(config)
         validate_quinn_path(config)
+        if compare_subscribers is not None and compare_object_sizes is not None:
+            raise ValueError("comparison options are mutually exclusive")
         if compare_subscribers is not None:
             counts = parse_subscriber_counts(compare_subscribers)
             result = run_subscriber_comparison(config, counts)
+        elif compare_object_sizes is not None:
+            sizes = parse_object_sizes(compare_object_sizes)
+            result = run_object_size_comparison(config, sizes)
         else:
             result = run_experiment(config)
         summary_path = result / "summary.json"
@@ -115,10 +145,13 @@ def main(
         raise typer.Exit(1) from error
 
     if summary is None:
+        artifact_stem = (
+            "object_size_latency" if compare_object_sizes is not None else "per_copy_latency"
+        )
         for name in (
-            "per_copy_latency.csv",
-            "per_copy_latency_summary.json",
-            "per_copy_latency_cdf.png",
+            f"{artifact_stem}.csv",
+            f"{artifact_stem}_summary.json",
+            f"{artifact_stem}_cdf.png",
         ):
             typer.echo(f"{name}: {(result / name).resolve()}")
         return

@@ -6,6 +6,8 @@ import sys
 import tempfile
 import unittest
 
+import polars as pl
+
 SCRIPTS = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 
@@ -88,6 +90,32 @@ class PacketOutcomeTests(unittest.TestCase):
             "successful STREAM frame references unsuccessful packet 1",
         ):
             read_trace(events)
+
+
+class PacketProcessingTests(unittest.TestCase):
+    """Derived connection-processing packet metrics."""
+
+    def test_rx_processing_starts_when_scheduling_finishes(self) -> None:
+        events = [
+            packet_event("quic_packet_start", 1, 1_000),
+            {
+                **packet_event("quic_packet_phase", 1, 3_000),
+                "phase": "scheduling",
+                "edge": "start",
+            },
+            {
+                **packet_event("quic_packet_phase", 1, 7_000, "success"),
+                "phase": "scheduling",
+                "edge": "done",
+            },
+            packet_event("quic_packet_end", 1, 12_000, "success"),
+        ]
+
+        samples = read_trace(events).packet_index.samples
+        processing = samples.filter(pl.col("metric") == "rx_packet_processing_span")
+
+        self.assertEqual(processing.height, 1)
+        self.assertEqual(processing["latency_us"].item(), 5.0)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Iterator
+from typing import Literal
 
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,6 +32,8 @@ from .trace import TraceError, TraceIndex
 
 PROTOCOL = "moq-transport-19"
 TRACE_QUEUE_CAPACITY_PER_SUBSCRIBER = 4096
+
+ComparisonDimension = Literal["subscribers", "object_size"]
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -456,39 +459,95 @@ def _write_artifacts(
     plot_object_timelines(output / "object_timeline.png", plot_options, analysis.timelines)
 
 
+def _validate_comparison_values(
+    values: tuple[int, ...],
+    comparison: str,
+    noun: str,
+) -> None:
+    """Validate one ordered workload-comparison dimension."""
+
+    if len(values) < 2:
+        raise ValueError(f"{comparison} requires at least two {noun}")
+    if len(set(values)) != len(values):
+        raise ValueError(f"{comparison} {noun} must be unique")
+    if any(value <= 0 for value in values):
+        raise ValueError(f"{comparison} {noun} must be positive")
+
+
 def run_subscriber_comparison(
     config: ExperimentConfig,
     subscriber_counts: tuple[int, ...],
 ) -> pathlib.Path:
     """Run one workload per subscriber count and compare delivery-copy latency."""
 
-    if len(subscriber_counts) < 2:
-        raise ValueError("subscriber comparison requires at least two counts")
-    if len(set(subscriber_counts)) != len(subscriber_counts):
-        raise ValueError("subscriber comparison counts must be unique")
-    if any(count <= 0 for count in subscriber_counts):
-        raise ValueError("subscriber comparison counts must be positive")
+    _validate_comparison_values(subscriber_counts, "subscriber comparison", "counts")
+    return _run_per_copy_comparison(config, subscriber_counts, "subscribers")
+
+
+def run_object_size_comparison(
+    config: ExperimentConfig,
+    object_sizes: tuple[int, ...],
+) -> pathlib.Path:
+    """Run one workload per object size and compare delivery-copy latency."""
+
+    _validate_comparison_values(object_sizes, "object-size comparison", "sizes")
+    return _run_per_copy_comparison(config, object_sizes, "object_size")
+
+
+def _format_byte_size(value: int) -> str:
+    """Format an exact byte count using the largest integral binary unit."""
+
+    for divisor, suffix in ((1024 * 1024, "MiB"), (1024, "KiB")):
+        if value % divisor == 0:
+            return f"{value // divisor} {suffix}"
+    return f"{value} bytes"
+
+
+def _run_per_copy_comparison(
+    config: ExperimentConfig,
+    values: tuple[int, ...],
+    dimension: ComparisonDimension,
+) -> pathlib.Path:
+    """Run and report one per-copy object-latency workload comparison."""
+
+    if dimension == "subscribers":
+        directory_prefix = "subscribers"
+        value_column = "subscribers"
+        values_key = "subscriber_counts"
+        artifact_stem = "per_copy_latency"
+        comparison = f"{config.object_size} bytes"
+    else:
+        directory_prefix = "object-size"
+        value_column = "object_size_bytes"
+        values_key = "object_sizes_bytes"
+        artifact_stem = "object_size_latency"
+        subscriber_label = "subscriber" if config.subscribers == 1 else "subscribers"
+        comparison = f"{config.subscribers} {subscriber_label}"
 
     output = config.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     runs: list[PerCopyCdfRun] = []
     combined_samples: list[pl.DataFrame] = []
     run_summaries = []
-    for index, subscribers in enumerate(subscriber_counts):
-        run_config = config.model_copy(
-            update={
-                "output": output / f"subscribers-{subscribers}",
-                "subscribers": subscribers,
-                "skip_build": config.skip_build or index > 0,
-            }
-        )
+    for index, value in enumerate(values):
+        updates: dict[str, object] = {
+            "output": output / f"{directory_prefix}-{value}",
+            "skip_build": config.skip_build or index > 0,
+            dimension: value,
+        }
+        run_config = config.model_copy(update=updates)
         run_output = run_experiment(run_config)
         summary = json.loads((run_output / "summary.json").read_text())
         object_samples = pl.read_csv(run_output / "objects.csv")
         quic_object_samples = pl.read_csv(run_output / "quic_objects.csv")
+        if dimension == "subscribers":
+            label_noun = "subscriber" if value == 1 else "subscribers"
+            label = f"{value} {label_noun}"
+        else:
+            label = _format_byte_size(value)
         runs.append(
             PerCopyCdfRun(
-                subscribers=subscribers,
+                label=label,
                 samples=object_samples,
                 quic_object_samples=quic_object_samples,
                 statistics=summary["statistics_us"],
@@ -501,13 +560,13 @@ def run_subscriber_comparison(
         ):
             combined_samples.append(
                 samples.filter(pl.col("metric") == metric).with_columns(
-                    pl.lit(subscribers).alias("subscribers"),
+                    pl.lit(value).alias(value_column),
                     pl.lit(layer).alias("layer"),
                 )
             )
         run_summaries.append(
             {
-                "subscribers": subscribers,
+                value_column: value,
                 "directory": run_output.name,
                 "delivery_copies": summary["counts"]["correlated_object_copies"],
                 "statistics_us": {
@@ -519,28 +578,29 @@ def run_subscriber_comparison(
 
     samples = pl.concat(combined_samples)
     write_samples(
-        output / "per_copy_latency.csv",
+        output / f"{artifact_stem}.csv",
         samples,
-        ("subscribers", "layer", "group_id", "object_id", "copy_ordinal"),
+        (value_column, "layer", "group_id", "object_id", "copy_ordinal"),
     )
     comparison_summary = {
         "sample_unit": "delivery copy",
-        "subscriber_counts": list(subscriber_counts),
+        values_key: list(values),
         "runs": run_summaries,
     }
-    (output / "per_copy_latency_summary.json").write_text(
+    (output / f"{artifact_stem}_summary.json").write_text(
         json.dumps(comparison_summary, indent=2, sort_keys=True) + "\n"
     )
     plot_per_copy_latency_cdf(
-        output / "per_copy_latency_cdf.png",
+        output / f"{artifact_stem}_cdf.png",
         PlotOptions(
             relay_cpu=config.relay_cpu,
-            subscribers=subscriber_counts[0],
+            subscribers=config.subscribers,
             object_size=config.object_size,
             fps=config.fps,
             protocol=PROTOCOL,
         ),
         tuple(runs),
+        comparison,
     )
     return output
 

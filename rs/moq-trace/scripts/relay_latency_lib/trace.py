@@ -661,6 +661,7 @@ def _finish_packets(
             phases_by_packet.get(packet.trace_id, []),
             key=lambda item: (PACKET_PHASE_ORDER[item[0]], item[0]),
         )
+        rx_processing_start_ns = None
         for phase, scope in packet_phases:
             if phase not in PACKET_PHASES[packet.direction]:
                 raise TraceError(f"packet {packet.trace_id} has invalid {packet.direction} phase {phase}")
@@ -668,6 +669,12 @@ def _finish_packets(
             for row in (*scope.starts, *scope.completions):
                 _validate_packet_identity(row, packet, label)
             intervals = _pair_phase_scope(scope, label)
+            if packet.direction == "rx" and phase == "scheduling":
+                if len(intervals) != 1:
+                    raise TraceError(
+                        f"packet {packet.trace_id} scheduling has {len(intervals)} occurrences"
+                    )
+                rx_processing_start_ns = intervals[0].end_ns
             for occurrence, interval in enumerate(intervals):
                 packet_phase = PacketPhase(packet, phase, occurrence, interval.start_ns, interval.end_ns)
                 indexed_phases.setdefault(packet.trace_id, []).append(packet_phase)
@@ -682,6 +689,24 @@ def _finish_packets(
                         "latency_us": (interval.end_ns - interval.start_ns) / 1_000,
                     }
                 )
+
+        if rx_processing_start_ns is not None:
+            processing = _time_range(
+                rx_processing_start_ns,
+                packet.end_ns,
+                f"packet {packet.trace_id} RX processing",
+            )
+            metric_rows.append(
+                {
+                    "metric": "rx_packet_processing_span",
+                    "direction": packet.direction,
+                    "connection_id": packet.connection_id,
+                    "trace_id": packet.trace_id,
+                    "occurrence": 0,
+                    "elapsed_ms": (processing.start_ns - first_packet_ns) / 1_000_000,
+                    "latency_us": (processing.end_ns - processing.start_ns) / 1_000,
+                }
+            )
 
     return PacketIndex(
         _by_id=packet_by_id,

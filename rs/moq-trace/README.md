@@ -160,6 +160,17 @@ plus `per_copy_latency.csv`, `per_copy_latency_summary.json`, and
 bounded trace queue to 4096 events per subscriber so connection bursts do not
 drop lifecycle records during high-fanout runs.
 
+To compare per-copy latency across object sizes, use binary size suffixes:
+
+```sh
+python rs/moq-trace/scripts/relay_latency.py --compare-object-sizes 16k,64k,256k
+```
+
+This writes one `object-size-BYTES` run directory per size, plus
+`object_size_latency.csv`, `object_size_latency_summary.json`, and
+`object_size_latency_cdf.png`. The subscriber count and frame rate remain fixed,
+so larger objects also increase the offered byte rate.
+
 To test uncommitted instrumentation in a local Quinn checkout, override the
 workspace's pinned fork revision:
 
@@ -202,8 +213,10 @@ frame processing, MoQ relay work, outbound frame encoding, encryption, and
 header protection. It ends when Quinn completes the first packet set covering
 the outbound object. It excludes UDP socket completion and peer acknowledgement.
 
-Packet diagnostics report RX and TX packet spans plus each successful packet
-phase occurrence. Completed packets with non-success QUIC outcomes are validated and
+Packet diagnostics report RX and TX packet spans, RX connection-processing spans,
+and each successful packet phase occurrence. The RX connection-processing span
+starts when scheduling finishes and ends when packet processing completes.
+Completed packets with non-success QUIC outcomes are validated and
 excluded because they cannot contribute STREAM data to object coverage. They are kept separate from object metrics because packet and
 object work can overlap.
 
@@ -218,8 +231,8 @@ The experiment writes:
 - `packet_latency.png`: packet-span and packet-phase plots.
 - `latency_cdf.png`: MoQ and QUIC-inclusive object latency empirical CDFs with
   p50 and p99 markers.
-- `packet_latency_cdf.png`: separate RX and TX packet-span empirical CDFs with
-  packet-level sample counts, p50, and p99 markers.
+- `packet_latency_cdf.png`: separate RX and TX connection-processing empirical
+  CDFs with packet-level sample counts, p50, and p99 markers.
 - `object_timeline.png`: correlated QUIC packet phases and MoQ phases for the
   first-created and last-created subscriber sessions of representative objects.
 

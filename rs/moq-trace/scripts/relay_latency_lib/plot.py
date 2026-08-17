@@ -74,9 +74,9 @@ class CdfSeries:
 
 @dataclasses.dataclass(frozen=True)
 class PerCopyCdfRun:
-    """Per-copy object latency samples for one subscriber count."""
+    """Per-copy object latency samples for one comparison workload."""
 
-    subscribers: int
+    label: str
     samples: pl.DataFrame
     quic_object_samples: pl.DataFrame
     statistics: dict[str, dict[str, float | int]]
@@ -200,19 +200,20 @@ def plot_per_copy_latency_cdf(
     path: pathlib.Path,
     options: PlotOptions,
     runs: tuple[PerCopyCdfRun, ...],
+    comparison: str,
 ) -> None:
-    """Compare per-copy object latency distributions across subscriber counts."""
+    """Compare per-copy object latency distributions across workloads."""
 
     if len(runs) < 2:
-        raise ValueError("per-copy latency comparison requires at least two subscriber counts")
+        raise ValueError("per-copy latency comparison requires at least two workloads")
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5.5), sharey=True)
     panels = (
-        (axes[0], "full_span", "MoQ relay span", "samples", "statistics"),
+        (axes[0], "full_span", "MoQ", "samples", "statistics"),
         (
             axes[1],
             "quic_full_span",
-            "QUIC-inclusive span",
+            "QUIC+MoQ",
             "quic_object_samples",
             "quic_object_statistics",
         ),
@@ -220,12 +221,11 @@ def plot_per_copy_latency_cdf(
     line_styles = ("-", "--", ":", "-.")
     for axis, metric, title, samples_field, statistics_field in panels:
         for index, run in enumerate(runs):
-            subscriber_label = "subscriber" if run.subscribers == 1 else "subscribers"
             _plot_cdf_series(
                 axis,
                 CdfSeries(
                     metric,
-                    f"{run.subscribers} {subscriber_label}",
+                    run.label,
                     getattr(run, samples_field),
                     getattr(run, statistics_field),
                     index,
@@ -242,8 +242,8 @@ def plot_per_copy_latency_cdf(
     affinity = "unpinned" if options.relay_cpu is None else f"pinned CPU {options.relay_cpu}"
     fig.suptitle(
         f"Per-copy object latency CDF | "
-        f"{affinity} | {options.object_size} bytes | {options.fps} fps | "
-        f"{options.protocol} | n = delivery copies"
+        f"{affinity} | {comparison} | {options.fps} fps | {options.protocol} | "
+        f"n = copies"
     )
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -252,11 +252,11 @@ def plot_per_copy_latency_cdf(
 
 
 def plot_packet_latency_cdf(path: pathlib.Path, options: PlotOptions, analysis: Analysis) -> None:
-    """Render separate empirical distributions of RX and TX packet spans."""
+    """Compare RX and TX packet processing at the QUIC connection layer."""
 
     series = (
         CdfSeries(
-            "rx_packet_span",
+            "rx_packet_processing_span",
             "RX",
             analysis.packet_samples,
             analysis.packet_statistics,
@@ -284,7 +284,7 @@ def plot_packet_latency_cdf(path: pathlib.Path, options: PlotOptions, analysis: 
 
     affinity = "unpinned" if options.relay_cpu is None else f"pinned CPU {options.relay_cpu}"
     fig.suptitle(
-        f"QUIC packet latency CDF | "
+        f"QUIC packet processing latency CDF | "
         f"{affinity} | {options.subscribers} subscriber(s) | "
         f"{options.object_size} bytes | {options.fps} fps | {options.protocol}"
     )
