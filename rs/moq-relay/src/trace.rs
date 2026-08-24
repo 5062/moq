@@ -35,14 +35,34 @@ pub struct TraceConfig {
 	pub queue_capacity: Option<usize>,
 }
 
-impl TraceConfig {
-	/// Build the raw trace handle for this relay.
+/// Keeps the configured trace writer alive for the relay process lifetime.
+pub struct Trace {
 	#[cfg(feature = "trace")]
-	pub fn build(&self) -> anyhow::Result<moq_net::trace::Handle> {
+	handle: moq_trace::Handle,
+}
+
+impl Trace {
+	/// Flush every trace event accepted before this call.
+	#[cfg(feature = "trace")]
+	pub fn flush(&self) -> bool {
+		self.handle.flush()
+	}
+
+	/// Report success when tracing is not compiled in.
+	#[cfg(not(feature = "trace"))]
+	pub fn flush(&self) -> bool {
+		true
+	}
+}
+
+impl TraceConfig {
+	/// Configure the process-global trace destination.
+	#[cfg(feature = "trace")]
+	pub fn build(&self) -> anyhow::Result<Trace> {
 		let Some(path) = self.path.clone() else {
-			let handle = moq_net::trace::Handle::disabled();
-			moq_trace::set_global(handle.clone());
-			return Ok(handle);
+			let handle = moq_trace::Handle::disabled();
+			moq_trace::install_global(&handle)?;
+			return Ok(Trace { handle });
 		};
 
 		let mut config = moq_trace::Config::default();
@@ -54,8 +74,8 @@ impl TraceConfig {
 		let object_sample = config.object_sample;
 		let packet_sample = config.packet_sample;
 		let socket_sample = config.socket_sample;
-		let handle = moq_net::trace::Handle::new(config)?;
-		moq_trace::set_global(handle.clone());
+		let handle = moq_trace::Handle::new(config)?;
+		moq_trace::install_global(&handle)?;
 		tracing::info!(
 			path = %path.display(),
 			object_sample,
@@ -63,12 +83,12 @@ impl TraceConfig {
 			socket_sample,
 			"raw trace enabled"
 		);
-		Ok(handle)
+		Ok(Trace { handle })
 	}
 
-	/// Build a disabled trace handle when the relay is compiled without tracing.
+	/// Reject trace settings when the relay was built without tracing.
 	#[cfg(not(feature = "trace"))]
-	pub fn build(&self) -> anyhow::Result<moq_net::trace::Handle> {
+	pub fn build(&self) -> anyhow::Result<Trace> {
 		anyhow::ensure!(
 			self.path.is_none()
 				&& self.object_sample.is_none()
@@ -77,7 +97,7 @@ impl TraceConfig {
 				&& self.queue_capacity.is_none(),
 			"relay tracing requires building moq-relay with --features trace"
 		);
-		Ok(moq_net::trace::Handle::disabled())
+		Ok(Trace {})
 	}
 }
 

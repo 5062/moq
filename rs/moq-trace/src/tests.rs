@@ -155,6 +155,13 @@ fn disabled_handle_is_noop() {
 	assert_eq!(handle.emitted(), 0);
 }
 
+#[test]
+fn global_destination_is_install_once() {
+	let handle = Handle::disabled();
+	install_global(&handle).unwrap();
+	assert!(matches!(install_global(&handle), Err(Error::GlobalAlreadyInstalled)));
+}
+
 struct FailingWriter;
 
 impl Write for FailingWriter {

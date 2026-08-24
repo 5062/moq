@@ -258,12 +258,6 @@ impl Server {
 		self
 	}
 
-	/// Attach a [`moq_net::trace::Handle`] to all sessions accepted by this server.
-	pub fn with_trace(mut self, trace: moq_net::trace::Handle) -> Self {
-		self.moq = self.moq.with_trace(trace);
-		self
-	}
-
 	/// Accept sessions until the listener stops, serving `origin` to each subscriber.
 	///
 	/// Spawns a task per session and logs (rather than propagates) per-session
@@ -947,23 +941,6 @@ impl Request {
 			kind,
 		} = self;
 		let kind = request_map!(kind, request => request.with_stats(stats));
-		Request {
-			transport,
-			url,
-			identity,
-			kind,
-		}
-	}
-
-	/// Attach a [`moq_net::trace::Handle`] to this session.
-	pub fn with_trace(self, trace: moq_net::trace::Handle) -> Self {
-		let Request {
-			transport,
-			url,
-			identity,
-			kind,
-		} = self;
-		let kind = request_map!(kind, request => request.with_trace(trace));
 		Request {
 			transport,
 			url,

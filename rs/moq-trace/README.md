@@ -35,6 +35,12 @@ variables:
 A relay built without `--features trace` rejects trace configuration at
 startup instead of silently ignoring it.
 
+The relay installs one trace destination during startup and retains it until
+shutdown. MoQ, QUIC, and socket instrumentation all emit through that same
+process-global destination. Session, connection, and object identifiers remain
+per-event context, so the analyzer can separate sessions without splitting one
+cross-layer lifecycle across multiple files.
+
 ## Output
 
 The output is newline-delimited JSON. Every line has a `type` field. The first
@@ -104,6 +110,9 @@ packet number.
 MoQ object phases follow the same scoped shape: a `phase` and `edge` pair, with an
 `outcome` on done edges. The phase values are `header_parse`, `create`,
 `payload_read`, `frame_commit`, `clone`, `header_encode`, and `payload_write`.
+The `clone` phase measures creation of an outbound object representation from
+relay storage. This relay shares reference-counted payload storage, while another
+implementation may copy payload bytes during the same conceptual phase.
 Object outcomes are `success`, `failed`, and `abandoned`. Each lifecycle has a
 `trace_id`. Ingress and every outbound copy share a structured `logical_id`
 containing a process-unique group instance and the frame ordinal within that

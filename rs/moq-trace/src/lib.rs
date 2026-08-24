@@ -5,7 +5,7 @@ use std::hash::BuildHasher;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::thread::JoinHandle;
 
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,9 @@ pub enum Error {
 	/// The trace writer thread could not be spawned.
 	#[error("failed to spawn trace writer")]
 	Spawn(#[source] std::io::Error),
+	/// A process-global trace destination was already installed.
+	#[error("process-global trace destination already installed")]
+	GlobalAlreadyInstalled,
 }
 
 /// Trace event direction at the relay boundary.
@@ -796,36 +799,24 @@ fn write_events<W: Write>(writer: W, receiver: std::sync::mpsc::Receiver<WriterC
 	}
 }
 
-static GLOBAL: OnceLock<RwLock<Weak<Inner>>> = OnceLock::new();
+static GLOBAL: OnceLock<Weak<Inner>> = OnceLock::new();
 
-/// Replace the process-global trace handle used by vendored QUIC hooks.
+/// Install the process-global trace destination used by all instrumentation layers.
 ///
-/// The registry does not extend the handle lifetime, so the caller must retain a clone.
-pub fn set_global(handle: Handle) {
+/// The registry does not extend the handle lifetime, so the caller must retain the handle.
+pub fn install_global(handle: &Handle) -> Result<(), Error> {
 	let inner = handle.inner.as_ref().map(Arc::downgrade).unwrap_or_default();
-	*GLOBAL
-		.get_or_init(|| RwLock::new(Weak::new()))
-		.write()
-		.expect("trace global poisoned") = inner;
+	GLOBAL.set(inner).map_err(|_| Error::GlobalAlreadyInstalled)
 }
 
-/// Return the process-global trace handle used by vendored QUIC hooks.
+/// Return the process-global trace handle used by MoQ, QUIC, and socket hooks.
 pub fn global() -> Handle {
-	let inner = GLOBAL
-		.get_or_init(|| RwLock::new(Weak::new()))
-		.read()
-		.expect("trace global poisoned")
-		.upgrade();
+	let inner = GLOBAL.get().and_then(Weak::upgrade);
 	Handle {
 		inner,
 		session_id: None,
 		connection_id: None,
 	}
-}
-
-/// Clear the process-global trace handle.
-pub fn clear_global() {
-	set_global(Handle::disabled());
 }
 
 /// Return a monotonic timestamp in nanoseconds for trace events.

@@ -9,7 +9,7 @@ mod varint;
 mod version;
 mod writer;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "trace"))]
 mod test;
 
 pub use decode::*;

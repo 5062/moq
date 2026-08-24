@@ -64,8 +64,7 @@ async fn main() -> anyhow::Result<()> {
 	// the last clone drops. The cluster only needs the counter registry.
 	let stats = config.stats.build(cluster.origin.clone());
 	let trace = config.trace.build()?;
-	let cluster = cluster.with_stats(stats.registry().clone()).with_trace(trace.clone());
-	let server = server.with_trace(trace.clone());
+	let cluster = cluster.with_stats(stats.registry().clone());
 
 	// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 	// /metrics + /health, separate from the customer-facing web server. No-op
@@ -99,27 +98,24 @@ async fn main() -> anyhow::Result<()> {
 			else => Ok(()),
 		}
 	};
-	let shutdown = async {
-		if let Err(err) = tokio::signal::ctrl_c().await {
-			tracing::warn!(%err, "failed to listen for interrupt");
-		}
-	};
-	run_until_shutdown(trace, server_run, shutdown).await
-}
-
-fn flush_trace(trace: &moq_net::trace::Handle) -> bool {
 	#[cfg(feature = "trace")]
 	{
-		trace.flush()
+		let shutdown = async {
+			if let Err(err) = tokio::signal::ctrl_c().await {
+				tracing::warn!(%err, "failed to listen for interrupt");
+			}
+		};
+		run_until_shutdown(trace, server_run, shutdown).await
 	}
 	#[cfg(not(feature = "trace"))]
 	{
-		let _ = trace;
-		true
+		let _trace = trace;
+		server_run.await
 	}
 }
 
-async fn run_until_shutdown<F, S>(trace: moq_net::trace::Handle, server: F, shutdown: S) -> anyhow::Result<()>
+#[cfg(feature = "trace")]
+async fn run_until_shutdown<F, S>(trace: Trace, server: F, shutdown: S) -> anyhow::Result<()>
 where
 	F: std::future::Future<Output = anyhow::Result<()>>,
 	S: std::future::Future<Output = ()>,
@@ -130,7 +126,7 @@ where
 		result = &mut server => result,
 		() = &mut shutdown => Ok(()),
 	};
-	anyhow::ensure!(flush_trace(&trace), "failed to flush relay trace");
+	anyhow::ensure!(trace.flush(), "failed to flush relay trace");
 	result
 }
 
@@ -164,10 +160,10 @@ mod tests {
 	async fn shutdown_flushes_trace_writer() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("trace.jsonl");
-		let mut config = moq_trace::Config::default();
+		let mut config = TraceConfig::default();
 		config.path = Some(path.clone());
-		let trace = moq_trace::Handle::new(config).unwrap();
-		let object = trace.object(moq_trace::ObjectContext::new(
+		let trace = config.build().unwrap();
+		let object = moq_trace::global().object(moq_trace::ObjectContext::new(
 			moq_trace::Direction::Tx,
 			moq_trace::ObjectIdentity::new(1, 2, 3),
 			moq_trace::LogicalId::new(4, 5),

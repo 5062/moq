@@ -14,6 +14,7 @@ use crate::{Timescale, track};
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
+#[cfg(feature = "trace")]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Poll, ready};
 
@@ -25,6 +26,7 @@ use crate::{Error, IntoBytes, Result, Timestamp};
 /// larger declared size is refused before allocating), so one maximum-size frame can
 /// fill a group's cache.
 const MAX_GROUP_CACHE: u64 = 32 * 1024 * 1024; // 32 MB
+#[cfg(feature = "trace")]
 static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A group contains a sequence number because they can arrive out of order.
@@ -230,6 +232,7 @@ pub struct Producer {
 	track: track::Info,
 
 	// Process-unique identity shared with every consumer of this group.
+	#[cfg(feature = "trace")]
 	instance_id: u64,
 }
 
@@ -261,6 +264,7 @@ impl Producer {
 			info,
 			state,
 			track,
+			#[cfg(feature = "trace")]
 			instance_id: NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
 		}
 	}
@@ -275,11 +279,17 @@ impl Producer {
 		self.track.timescale
 	}
 
+	#[cfg(feature = "trace")]
 	pub(crate) fn next_frame_identity(&self) -> FrameIdentity {
 		FrameIdentity {
 			group: self.instance_id,
 			frame: self.frame_count() as u64,
 		}
+	}
+
+	#[cfg(not(feature = "trace"))]
+	pub(crate) fn next_frame_identity(&self) -> FrameIdentity {
+		FrameIdentity { group: 0, frame: 0 }
 	}
 
 	/// A helper method to write a frame from a single byte buffer.
@@ -425,6 +435,7 @@ impl Producer {
 			info: self.info,
 			state: self.state.consume(),
 			track: self.track.clone(),
+			#[cfg(feature = "trace")]
 			instance_id: self.instance_id,
 			index: 0,
 			prefetch: Prefetch::default(),
@@ -458,6 +469,7 @@ impl Clone for Producer {
 			info: self.info,
 			state: self.state.clone(),
 			track: self.track.clone(),
+			#[cfg(feature = "trace")]
 			instance_id: self.instance_id,
 		}
 	}
@@ -557,6 +569,7 @@ pub struct Consumer {
 	track: track::Info,
 
 	// Process-unique identity inherited from the group producer.
+	#[cfg(feature = "trace")]
 	instance_id: u64,
 
 	// The number of frames we've read.
@@ -575,6 +588,7 @@ impl Clone for Consumer {
 			state: self.state.clone(),
 			info: self.info,
 			track: self.track.clone(),
+			#[cfg(feature = "trace")]
 			instance_id: self.instance_id,
 			index: self.index,
 			prefetch: Prefetch::default(),
@@ -591,11 +605,17 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
+	#[cfg(feature = "trace")]
 	pub(crate) fn next_frame_identity(&self) -> FrameIdentity {
 		FrameIdentity {
 			group: self.instance_id,
 			frame: self.index as u64,
 		}
+	}
+
+	#[cfg(not(feature = "trace"))]
+	pub(crate) fn next_frame_identity(&self) -> FrameIdentity {
+		FrameIdentity { group: 0, frame: 0 }
 	}
 
 	/// The parent track's timescale.
@@ -964,6 +984,7 @@ mod test {
 		assert_eq!(state.frames[0].payload.len(), MAX_GROUP_CACHE as usize);
 	}
 
+	#[cfg(feature = "trace")]
 	#[test]
 	fn producer_and_consumers_derive_the_same_frame_identity() {
 		let mut producer = Info { sequence: 0 }.produce();

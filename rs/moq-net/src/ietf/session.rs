@@ -21,8 +21,6 @@ pub fn start<S: web_transport_trait::Session>(
 	subscribe: Option<origin::Producer>,
 	// Tier-scoped stats handle. Pass [`crate::stats::Handle::default`] to opt out.
 	stats: crate::stats::Handle,
-	// Trace handle. Pass [`crate::trace::Handle::default`] to opt out.
-	#[allow(unused_variables)] trace: crate::trace::Handle,
 	version: Version,
 	// The request path we advertise in our SETUP (draft-17+ clients on URL-less
 	// transports). A server passes `None`.
@@ -32,7 +30,7 @@ pub fn start<S: web_transport_trait::Session>(
 	// GOAWAY channel; `None` lets the uni loop read the SETUP itself.
 	peer_setup: Option<Reader<S::RecvStream, crate::Version>>,
 ) -> Result<MaybeSendBox<'static, Result<(), Error>>, Error> {
-	let trace = trace.with_new_session_id();
+	let trace = crate::trace::global().with_new_session_id();
 	let trace = match session.connection_id() {
 		Some(connection_id) => trace.with_connection_id(connection_id.into_inner()),
 		None => trace,

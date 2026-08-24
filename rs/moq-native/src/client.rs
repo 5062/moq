@@ -242,12 +242,6 @@ impl Client {
 		self
 	}
 
-	/// Attach a [`moq_net::trace::Handle`] to all sessions opened by this client.
-	pub fn with_trace(mut self, trace: moq_net::trace::Handle) -> Self {
-		self.moq = self.moq.with_trace(trace);
-		self
-	}
-
 	/// Start a background reconnect loop that connects to the given URL,
 	/// waits for the session to close, then reconnects with exponential backoff.
 	///

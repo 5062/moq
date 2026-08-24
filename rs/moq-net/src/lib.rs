@@ -86,11 +86,13 @@ mod version;
 
 pub mod stats;
 #[cfg(feature = "trace")]
-pub use moq_trace as trace;
+mod trace {
+	pub(crate) use moq_trace::*;
+}
 
 #[cfg(not(feature = "trace"))]
-/// No-op tracing types used when the `trace` feature is disabled.
-pub mod trace {
+#[allow(dead_code)]
+mod trace {
 	/// Whether an object is entering or leaving the relay.
 	#[derive(Clone, Copy)]
 	pub enum Direction {
@@ -111,7 +113,7 @@ pub mod trace {
 		PayloadRead,
 		/// Commit an inbound frame to the relay model.
 		FrameCommit,
-		/// Clone or select an outbound object.
+		/// Clone an outbound object.
 		Clone,
 		/// Encode an outbound object header.
 		HeaderEncode,
@@ -259,6 +261,10 @@ pub mod trace {
 		pub fn object(&self, _context: ObjectContext) -> ObjectTrace {
 			ObjectTrace
 		}
+	}
+
+	pub fn global() -> Handle {
+		Handle
 	}
 }
 

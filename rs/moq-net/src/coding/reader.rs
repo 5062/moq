@@ -1,3 +1,6 @@
+#[cfg(feature = "trace")]
+use std::num::NonZeroU64;
+
 use std::{cmp, fmt::Debug, io};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -9,30 +12,59 @@ pub struct Reader<S: web_transport_trait::RecvStream, V> {
 	stream: S,
 	buffer: BytesMut,
 	version: V,
-	stream_id: Option<u64>,
+	#[cfg(feature = "trace")]
+	stream_id: Option<NonZeroU64>,
+	#[cfg(feature = "trace")]
 	offset: u64,
 }
 
 impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	pub fn new(stream: S, version: V) -> Self {
+		#[cfg(feature = "trace")]
 		let identity = stream.stream_id();
 		Self {
 			stream,
 			buffer: Default::default(),
 			version,
-			stream_id: identity.map(|identity| identity.id()),
+			#[cfg(feature = "trace")]
+			stream_id: identity
+				.and_then(|identity| identity.id().checked_add(1))
+				.and_then(NonZeroU64::new),
+			#[cfg(feature = "trace")]
 			offset: identity.map_or(0, |identity| identity.offset()),
 		}
 	}
 
 	/// Return the underlying transport stream ID, when available.
-	pub fn stream_id(&self) -> Option<u64> {
-		self.stream_id
+	#[cfg(feature = "trace")]
+	pub(crate) fn stream_id(&self) -> Option<u64> {
+		self.stream_id.map(|stream_id| stream_id.get() - 1)
+	}
+
+	#[cfg(not(feature = "trace"))]
+	pub(crate) fn stream_id(&self) -> Option<u64> {
+		None
 	}
 
 	/// Return the transport stream byte offset consumed by this reader.
-	pub fn offset(&self) -> u64 {
+	#[cfg(feature = "trace")]
+	pub(crate) fn offset(&self) -> u64 {
 		self.offset
+	}
+
+	#[cfg(not(feature = "trace"))]
+	pub(crate) fn offset(&self) -> u64 {
+		0
+	}
+
+	#[inline]
+	fn advance(&mut self, amount: usize) {
+		#[cfg(feature = "trace")]
+		{
+			self.offset += amount as u64;
+		}
+		#[cfg(not(feature = "trace"))]
+		let _ = amount;
 	}
 
 	/// Decode the next message from the stream.
@@ -46,7 +78,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 				Ok(msg) => {
 					let consumed = cursor.position();
 					self.buffer.advance(consumed as usize);
-					self.offset += consumed;
+					self.advance(consumed as usize);
 					return Ok(msg);
 				}
 				Err(DecodeError::Short) => {
@@ -107,12 +139,12 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	pub async fn read_chunk(&mut self, max: usize) -> Result<Option<Bytes>, Error> {
 		if !self.buffer.is_empty() {
 			let n = cmp::min(self.buffer.len(), max);
-			self.offset += n as u64;
+			self.advance(n);
 			return Ok(Some(self.buffer.split_to(n).freeze()));
 		}
 		let chunk = self.stream.read_chunk(max).await.map_err(Error::from_transport)?;
 		if let Some(chunk) = &chunk {
-			self.offset += chunk.len() as u64;
+			self.advance(chunk.len());
 		}
 		Ok(chunk)
 	}
@@ -121,7 +153,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	pub async fn read_exact(&mut self, size: usize) -> Result<Bytes, Error> {
 		// An optimization to avoid a copy if we have enough data in the buffer
 		if self.buffer.len() >= size {
-			self.offset += size as u64;
+			self.advance(size);
 			return Ok(self.buffer.split_to(size).freeze());
 		}
 
@@ -130,13 +162,13 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 
 		let size = cmp::min(buf.remaining_mut(), self.buffer.len());
 		let data = self.buffer.split_to(size);
-		self.offset += size as u64;
+		self.advance(size);
 		buf.put(data);
 
 		while buf.has_remaining_mut() {
 			match self.stream.read_buf(&mut buf).await {
 				Ok(Some(n)) => {
-					self.offset += n as u64;
+					self.advance(n);
 				}
 				Ok(None) => return Err(DecodeError::Short.into()),
 				Err(e) => return Err(Error::from_transport(e)),
@@ -184,21 +216,18 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 			stream: self.stream,
 			buffer: self.buffer,
 			version,
+			#[cfg(feature = "trace")]
 			stream_id: self.stream_id,
+			#[cfg(feature = "trace")]
 			offset: self.offset,
 		}
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "trace"))]
 mod tests {
 	use super::*;
 	use crate::coding::test;
-
-	#[allow(dead_code)]
-	fn offset_is_available_without_trace<S: web_transport_trait::RecvStream, V>() {
-		let _: fn(&Reader<S, V>) -> u64 = Reader::offset;
-	}
 
 	#[tokio::test]
 	async fn transport_identity_uses_transport_offset() {
@@ -210,6 +239,7 @@ mod tests {
 		assert_eq!(reader.offset(), 8);
 	}
 
+	#[cfg(feature = "trace")]
 	#[tokio::test]
 	async fn has_more_buffers_without_advancing_offset() {
 		let mut reader = Reader::new(

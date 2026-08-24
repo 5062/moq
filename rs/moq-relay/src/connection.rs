@@ -115,7 +115,7 @@ impl Connection {
 		//
 		// moq-net defaults the unset side to a fresh no-op origin, which is fine for a
 		// publish-only or subscribe-only session.
-		let mut request = self.request.with_stats(stats).with_trace(self.cluster.trace.clone());
+		let mut request = self.request.with_stats(stats);
 		if let Some(subscribe) = subscribe {
 			request = request.with_publisher(&subscribe);
 		}
