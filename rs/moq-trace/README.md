@@ -146,6 +146,20 @@ Run the local publisher, relay, and subscriber experiment with:
 python rs/moq-trace/scripts/relay_latency.py
 ```
 
+The experiment uses the feature-gated Rust analyzer in this package for trace
+validation, packet correlation, and metric calculation. Python only orchestrates
+the workload and renders plots. Analyze an existing trace directly with:
+
+```sh
+cargo run -p moq-trace --features analyze -- analyze relay.jsonl \
+  --output target/moq-trace/analysis \
+  --object-size 16384 \
+  --subscribers 1
+```
+
+The analyzer writes `objects.csv`, `quic_objects.csv`, `quic_packets.csv`, and
+`analysis.json` to the output directory.
+
 To compare delivery-copy latency across subscriber counts, run each workload in
 sequence with one shared build:
 
@@ -225,6 +239,7 @@ The experiment writes:
 - `objects.csv`: MoQ `full_span` samples.
 - `quic_objects.csv`: the three QUIC-inclusive metrics per subscriber copy.
 - `quic_packets.csv`: packet-span and packet-phase samples.
+- `analysis.json`: typed analyzer metadata consumed by the plotting layer.
 - `summary.json`: workload metadata, counts, and all three statistics sections.
 - `latency.png`: MoQ latency distributions, percentiles, and time series.
 - `quic_latency.png`: QUIC-inclusive object plots.

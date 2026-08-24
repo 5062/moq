@@ -18,7 +18,7 @@ from relay_latency_lib.runner import (
     validate_cpu_affinity,
     validate_quinn_path,
 )
-from relay_latency_lib.trace import TraceError
+from relay_latency_lib.analysis import AnalysisError
 
 app = typer.Typer(add_completion=False, help="Measure local MoQ relay processing latency.")
 
@@ -139,7 +139,7 @@ def main(
             result = run_experiment(config)
         summary_path = result / "summary.json"
         summary = json.loads(summary_path.read_text()) if summary_path.is_file() else None
-    except (ExperimentError, OSError, TraceError, ValidationError, ValueError) as error:
+    except (AnalysisError, ExperimentError, OSError, ValidationError, ValueError) as error:
         typer.echo(f"error: {error}", err=True)
         typer.echo(f"run directory: {output.resolve()}", err=True)
         raise typer.Exit(1) from error
@@ -163,6 +163,7 @@ def main(
         "objects.csv",
         "quic_objects.csv",
         "quic_packets.csv",
+        "analysis.json",
         "summary.json",
         "latency.png",
         "quic_latency.png",

@@ -16,7 +16,7 @@ from typing import Literal
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field
 
-from .analysis import Analysis, AnalysisOptions, analyze
+from .analysis import Analysis, AnalysisError, load_analysis
 from .plot import (
     PerCopyCdfRun,
     PlotOptions,
@@ -28,7 +28,6 @@ from .plot import (
     plot_per_copy_latency_cdf,
     plot_quic_analysis,
 )
-from .trace import TraceError, TraceIndex
 
 PROTOCOL = "moq-transport-19"
 TRACE_QUEUE_CAPACITY_PER_SUBSCRIBER = 4096
@@ -58,6 +57,13 @@ class ExperimentConfig(BaseModel):
     port: int = Field(default=4443, ge=1, le=65535)
     release: bool = True
     skip_build: bool = False
+
+    @property
+    def analyzer_bin(self) -> pathlib.Path:
+        """Return the analyzer binary built in the selected Cargo profile."""
+
+        profile = "release" if self.release else "debug"
+        return self.repo / "target" / profile / "moq-trace"
 
 
 def validate_cpu_affinity(
@@ -164,7 +170,20 @@ def build_workspace_command(config: ExperimentConfig) -> list[str]:
     command = ["cargo", "build"]
     if config.release:
         command.append("--release")
-    command.extend(["-p", "moq-relay", "--features", "trace", "-p", "moq-bench"])
+    command.extend(
+        [
+            "-p",
+            "moq-relay",
+            "--features",
+            "trace",
+            "-p",
+            "moq-bench",
+            "-p",
+            "moq-trace",
+            "--features",
+            "moq-trace/analyze",
+        ]
+    )
     if config.quinn_path is not None:
         for crate in ("quinn", "quinn-proto"):
             path = (config.quinn_path / crate).resolve()
@@ -411,13 +430,29 @@ def _capture_trace(
     return output / "relay.jsonl"
 
 
-def _validate_analysis(analysis: Analysis) -> None:
-    """Validate that Quinn emitted every required packet metric."""
+def _analyze_trace(config: ExperimentConfig, trace: pathlib.Path, output: pathlib.Path) -> Analysis:
+    """Run the typed Rust analyzer and load its artifact bundle."""
 
-    required = {"rx_routing", "rx_scheduling"}
-    missing = sorted(required - analysis.packet_statistics.keys())
-    if missing:
-        raise TraceError(f"Quinn trace is missing packet metrics: {', '.join(missing)}")
+    command = [
+        str(config.analyzer_bin),
+        "analyze",
+        str(trace),
+        "--output",
+        str(output),
+        "--object-size",
+        str(config.object_size),
+        "--subscribers",
+        str(config.subscribers),
+        "--warmup",
+        str(config.warmup),
+        "--cooldown",
+        str(config.cooldown),
+    ]
+    with (output / "analyze.log").open("wb") as log:
+        result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False)
+    if result.returncode != 0:
+        raise AnalysisError(f"trace analyzer exited with status {result.returncode}; see {output / 'analyze.log'}")
+    return load_analysis(output)
 
 
 def _write_artifacts(
@@ -618,16 +653,6 @@ def run_experiment(config: ExperimentConfig) -> pathlib.Path:
     output.mkdir(parents=True, exist_ok=False)
     _build_experiment(config, commands["build"], output)
     trace_path = _capture_trace(config, commands, output)
-    trace = TraceIndex.read(trace_path)
-    analysis = analyze(
-        trace,
-        AnalysisOptions(
-            object_size=config.object_size,
-            subscribers=config.subscribers,
-            warmup_seconds=config.warmup,
-            cooldown_seconds=config.cooldown,
-        ),
-    )
-    _validate_analysis(analysis)
+    analysis = _analyze_trace(config, trace_path, output)
     _write_artifacts(output, config, analysis, commands)
     return output
