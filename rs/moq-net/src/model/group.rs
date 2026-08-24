@@ -82,6 +82,19 @@ impl From<u16> for Info {
 pub(crate) struct Partial {
 	timestamp: Timestamp,
 	buf: FrameBuf,
+	logical_id: Option<u64>,
+}
+
+#[derive(Clone)]
+struct StoredFrame {
+	frame: Frame,
+	logical_id: Option<u64>,
+}
+
+struct FrameSource {
+	info: frame::Info,
+	source: frame::Source,
+	logical_id: Option<u64>,
 }
 
 /// Shared group state. `pub(crate)` so [`frame`] handles can observe the abort flag
@@ -90,7 +103,7 @@ pub(crate) struct Partial {
 pub(crate) struct GroupState {
 	// Completed frames, each a contiguous payload. Evicted frames are popped from the
 	// front; `offset` tracks how many.
-	pub(crate) frames: VecDeque<Frame>,
+	frames: VecDeque<StoredFrame>,
 
 	// The single in-flight frame, if one is open.
 	pub(crate) partial: Option<Partial>,
@@ -115,7 +128,7 @@ pub(crate) struct GroupState {
 impl GroupState {
 	/// Resolve the source for the frame at `index`: a completed frame (whole) or the
 	/// in-flight tail (streamed). Used by [`Consumer::poll_next_frame`].
-	fn poll_frame_source(&self, index: usize) -> Poll<Result<Option<(frame::Info, frame::Source)>>> {
+	fn poll_frame_source(&self, index: usize) -> Poll<Result<Option<FrameSource>>> {
 		if index < self.offset {
 			return Poll::Ready(Err(Error::Lagged));
 		}
@@ -123,10 +136,14 @@ impl GroupState {
 		if let Some(f) = self.frames.get(local) {
 			self.charge.touch();
 			let info = frame::Info {
-				size: f.payload.len() as u64,
-				timestamp: f.timestamp,
+				size: f.frame.payload.len() as u64,
+				timestamp: f.frame.timestamp,
 			};
-			return Poll::Ready(Ok(Some((info, frame::Source::Complete(f.payload.clone())))));
+			return Poll::Ready(Ok(Some(FrameSource {
+				info,
+				source: frame::Source::Complete(f.frame.payload.clone()),
+				logical_id: f.logical_id,
+			})));
 		}
 		if local == self.frames.len()
 			&& let Some(p) = &self.partial
@@ -136,7 +153,11 @@ impl GroupState {
 				size: p.buf.capacity() as u64,
 				timestamp: p.timestamp,
 			};
-			return Poll::Ready(Ok(Some((info, frame::Source::Partial(p.buf.clone())))));
+			return Poll::Ready(Ok(Some(FrameSource {
+				info,
+				source: frame::Source::Partial(p.buf.clone()),
+				logical_id: p.logical_id,
+			})));
 		}
 		// `abort` is checked before `fin`: an evicted group is both finished and
 		// aborted with its frames cleared, and the reader must see the abort rather
@@ -168,7 +189,7 @@ impl GroupState {
 			let Some(frame) = self.frames.pop_front() else {
 				break;
 			};
-			let size = frame.payload.len() as u64;
+			let size = frame.frame.payload.len() as u64;
 			self.cache -= size;
 			self.charge.sub(size);
 			self.offset += 1;
@@ -283,7 +304,10 @@ impl Producer {
 		let size = payload.len() as u64;
 		state.cache += size;
 		state.charge.add(size);
-		state.frames.push_back(Frame { timestamp, payload });
+		state.frames.push_back(StoredFrame {
+			frame: Frame { timestamp, payload },
+			logical_id: None,
+		});
 		state.evict();
 
 		// The pool evicts other groups' state, so trigger it only after releasing our
@@ -302,6 +326,14 @@ impl Producer {
 	/// if the declared size exceeds the group's byte budget (refused before allocating)
 	/// or [`Error::TimestampMismatch`] if the timestamp can't be converted (overflow).
 	pub fn create_frame(&mut self, frame: frame::Info) -> Result<frame::Producer<'_>> {
+		self.create_frame_inner(frame, None)
+	}
+
+	pub(crate) fn create_frame_traced(&mut self, frame: frame::Info, logical_id: u64) -> Result<frame::Producer<'_>> {
+		self.create_frame_inner(frame, Some(logical_id))
+	}
+
+	fn create_frame_inner(&mut self, frame: frame::Info, logical_id: Option<u64>) -> Result<frame::Producer<'_>> {
 		let timestamp = frame
 			.timestamp
 			.convert(self.track.timescale)
@@ -321,6 +353,7 @@ impl Producer {
 		state.partial = Some(Partial {
 			timestamp,
 			buf: buf.clone(),
+			logical_id,
 		});
 		state.evict();
 
@@ -347,8 +380,8 @@ impl Producer {
 		let mut state = modify(&self.state)?;
 		// Bytes were already counted against the cache (and the pool charge) when the
 		// frame was created; committing just moves the tail into the completed set.
-		state.partial = None;
-		state.frames.push_back(frame);
+		let logical_id = state.partial.take().and_then(|partial| partial.logical_id);
+		state.frames.push_back(StoredFrame { frame, logical_id });
 		Ok(())
 	}
 
@@ -469,7 +502,7 @@ impl Drop for Producer {
 /// reads whole frames, or drains through a higher-level buffer, pays nothing.
 struct Prefetch {
 	// Initialized, not-yet-taken frames are `frames[pos..len]`; the rest are uninitialized.
-	frames: [MaybeUninit<Frame>; Self::CAP],
+	frames: [MaybeUninit<StoredFrame>; Self::CAP],
 	pos: usize,
 	len: usize,
 }
@@ -478,7 +511,7 @@ impl Prefetch {
 	const CAP: usize = 8;
 
 	/// Take the next buffered frame, or `None` if the batch is drained.
-	fn pop(&mut self) -> Option<Frame> {
+	fn pop(&mut self) -> Option<StoredFrame> {
 		if self.pos == self.len {
 			return None;
 		}
@@ -489,7 +522,7 @@ impl Prefetch {
 	}
 
 	/// Refill with up to `CAP` frames. Must be drained first (`pop` returned `None`).
-	fn fill(&mut self, frames: impl Iterator<Item = Frame>) {
+	fn fill(&mut self, frames: impl Iterator<Item = StoredFrame>) {
 		debug_assert_eq!(self.pos, self.len, "fill on a non-empty batch would leak frames");
 		self.pos = 0;
 		self.len = 0;
@@ -588,10 +621,14 @@ impl Consumer {
 	///
 	/// Returns None if the group is finished and the index is out of range.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
-		let Some((info, source)) = ready!(self.poll_next_frame_source(waiter)?) else {
+		let Some(source) = ready!(self.poll_next_frame_source(waiter)?) else {
 			return Poll::Ready(Ok(None));
 		};
-		Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))))
+		Poll::Ready(Ok(Some(frame::Consumer::new(
+			self.state.clone(),
+			source.info,
+			source.source,
+		))))
 	}
 
 	pub(crate) fn poll_next_frame_traced(
@@ -600,25 +637,34 @@ impl Consumer {
 		trace: &crate::trace::Handle,
 		context: &crate::trace::ObjectContext,
 	) -> Poll<Result<Option<(frame::Consumer, crate::trace::ObjectTrace)>>> {
-		let Some((info, source)) = ready!(self.poll_next_frame_source(waiter)?) else {
+		let Some(source) = ready!(self.poll_next_frame_source(waiter)?) else {
 			return Poll::Ready(Ok(None));
 		};
-		let mut object = trace.object(context.clone().with_payload_bytes(info.size));
+		let context = context.clone().with_payload_bytes(source.info.size);
+		let context = match source.logical_id {
+			Some(logical_id) => context.with_logical_id(logical_id),
+			None => context,
+		};
+		let mut object = trace.object(context);
 		let clone = object.phase(crate::trace::ObjectPhase::Clone);
-		let frame = frame::Consumer::new(self.state.clone(), info, source);
+		let frame = frame::Consumer::new(self.state.clone(), source.info, source.source);
 		clone.finish(crate::trace::ObjectOutcome::Success);
 		Poll::Ready(Ok(Some((frame, object))))
 	}
 
-	fn poll_next_frame_source(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<(frame::Info, frame::Source)>>> {
+	fn poll_next_frame_source(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<FrameSource>>> {
 		// Hand out any frames a prior read_frame prefetched before touching the tail.
 		if let Some(frame) = self.prefetch.pop() {
 			self.index += 1;
 			let info = frame::Info {
-				size: frame.payload.len() as u64,
-				timestamp: frame.timestamp,
+				size: frame.frame.payload.len() as u64,
+				timestamp: frame.frame.timestamp,
 			};
-			return Poll::Ready(Ok(Some((info, frame::Source::Complete(frame.payload)))));
+			return Poll::Ready(Ok(Some(FrameSource {
+				info,
+				source: frame::Source::Complete(frame.frame.payload),
+				logical_id: frame.logical_id,
+			})));
 		}
 
 		let index = self.index;
@@ -635,7 +681,7 @@ impl Consumer {
 		// Fast path: serve from the prefetched batch without locking or allocating a waker.
 		if let Some(frame) = self.prefetch.pop() {
 			self.index += 1;
-			return Poll::Ready(Ok(Some(frame)));
+			return Poll::Ready(Ok(Some(frame.frame)));
 		}
 
 		// The batch is drained: refill it under a single lock, registering the waiter if
@@ -676,7 +722,7 @@ impl Consumer {
 			Err(state) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
 		}
 
-		Poll::Ready(Ok(self.prefetch.pop().inspect(|_| {
+		Poll::Ready(Ok(self.prefetch.pop().map(|frame| frame.frame).inspect(|_| {
 			self.index += 1;
 		})))
 	}
@@ -686,7 +732,7 @@ impl Consumer {
 		// Serve from the prefetched batch without building a future or allocating a waker.
 		if let Some(frame) = self.prefetch.pop() {
 			self.index += 1;
-			return Ok(Some(frame));
+			return Ok(Some(frame.frame));
 		}
 		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
@@ -925,7 +971,24 @@ mod test {
 		let state = producer.state.read();
 		assert_eq!(state.offset, 1);
 		assert_eq!(state.frames.len(), 1);
-		assert_eq!(state.frames[0].payload.len(), MAX_GROUP_CACHE as usize);
+		assert_eq!(state.frames[0].frame.payload.len(), MAX_GROUP_CACHE as usize);
+	}
+
+	#[test]
+	fn traced_frame_keeps_logical_identity_after_commit() {
+		let mut producer = Info { sequence: 0 }.produce();
+		let frame = producer
+			.create_frame_traced(
+				frame::Info {
+					size: 0,
+					timestamp: Timestamp::ZERO,
+				},
+				42,
+			)
+			.unwrap();
+		frame.finish().unwrap();
+
+		assert_eq!(producer.state.read().frames[0].logical_id, Some(42));
 	}
 
 	#[test]

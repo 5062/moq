@@ -15,15 +15,18 @@ path = "src/bin/moq-trace/main.rs"
 required-features = ["analyze"]
 
 [features]
-analyze = ["dep:anyhow", "dep:clap", "dep:csv"]
+analyze = ["dep:anyhow", "dep:clap", "dep:csv", "dep:humantime", "dep:rangemap", "dep:tempfile"]
 
 [dependencies]
 anyhow = { version = "1.0.104", optional = true }
 clap = { version = "4.6.6", features = ["derive"], optional = true }
 csv = { version = "1.4.0", optional = true }
+humantime = { workspace = true, optional = true }
+rangemap = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = "1"
 thiserror = "2"
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

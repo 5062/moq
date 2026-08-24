@@ -156,6 +156,11 @@ pub mod trace {
 			self
 		}
 
+		/// Ignore an identity shared by ingress and outbound copies.
+		pub fn with_logical_id(self, _logical_id: u64) -> Self {
+			self
+		}
+
 		/// Ignore an optional transport connection identifier.
 		pub fn with_connection_id(self, _connection_id: u64) -> Self {
 			self
@@ -242,6 +247,11 @@ pub mod trace {
 		/// Ignore allocation of a process-local session identifier.
 		pub fn with_new_session_id(self) -> Self {
 			self
+		}
+
+		/// Return the no-op logical object identity.
+		pub fn next_object_id(&self) -> u64 {
+			0
 		}
 
 		/// Return a no-op trace token for one object.

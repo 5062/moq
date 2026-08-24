@@ -963,11 +963,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				break;
 			}
 			let object_start = stream.offset();
+			let logical_id = self.trace.next_object_id();
 			let mut context = trace::ObjectContext::new(
 				trace::Direction::Rx,
 				trace::ObjectIdentity::new(group.track_alias, group.group_id, object_id),
 			)
-			.with_stream_offset_start(object_start);
+			.with_stream_offset_start(object_start)
+			.with_logical_id(logical_id);
 			if let Some(stream_id) = stream.stream_id() {
 				context = context.with_stream_id(stream_id);
 			}
@@ -1006,7 +1008,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				if status == 0 {
 					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
 					let create = object.phase(trace::ObjectPhase::Create);
-					let frame = match producer.create_frame(frame::Info { size: 0, timestamp }) {
+					let frame = match producer.create_frame_traced(frame::Info { size: 0, timestamp }, logical_id) {
 						Ok(frame) => {
 							create.finish(trace::ObjectOutcome::Success);
 							frame
@@ -1029,7 +1031,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				// `create_frame` rejects an oversized `size` before allocating.
 				let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
 				let create = object.phase(trace::ObjectPhase::Create);
-				let mut frame = match producer.create_frame(frame::Info { size, timestamp }) {
+				let mut frame = match producer.create_frame_traced(frame::Info { size, timestamp }, logical_id) {
 					Ok(frame) => {
 						create.finish(trace::ObjectOutcome::Success);
 						frame

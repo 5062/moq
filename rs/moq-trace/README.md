@@ -37,12 +37,14 @@ startup instead of silently ignoring it.
 
 ## Output
 
-The output is newline-delimited JSON. Every line has a `type` field. Monotonic
-`timestamp_ns` timestamps are useful for latency deltas inside one process, not for
-wall-clock comparison between hosts.
+The output is newline-delimited JSON. Every line has a `type` field. The first
+record is an exact schema and clock header. Readers reject any other revision.
+Monotonic `timestamp_ns` timestamps are useful for latency deltas inside one
+process, not for wall-clock comparison between hosts.
 
 The record types are:
 
+- `trace_header`
 - `moq_object_start`, `moq_object_phase`, and `moq_object_end`
 - `quic_packet_start`, `quic_packet_phase`, and `quic_packet_end`
 - `quic_stream_frame`
@@ -51,18 +53,19 @@ The record types are:
 Example packet lifecycle:
 
 ```json
+{"type":"trace_header","revision":1,"clock":"monotonic_ns"}
 {"type":"quic_packet_start","timestamp_ns":123456700,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","sample_rate":1}
-{"type":"quic_packet_phase","timestamp_ns":123456710,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","byte_len":1232,"sample_rate":1,"phase":"packet_encrypt","edge":"start"}
-{"type":"quic_packet_phase","timestamp_ns":123456760,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","byte_len":1232,"sample_rate":1,"phase":"packet_encrypt","edge":"done","outcome":"success"}
-{"type":"quic_stream_frame","timestamp_ns":123456770,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","byte_len":1232,"sample_rate":1,"stream_id":16,"offset_start":120,"offset_end":520,"outcome":"success"}
-{"type":"quic_packet_end","timestamp_ns":123456780,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","byte_len":1232,"sample_rate":1,"outcome":"success"}
+{"type":"quic_packet_phase","timestamp_ns":123456710,"trace_id":17,"phase":"packet_encrypt","edge":"start"}
+{"type":"quic_packet_phase","timestamp_ns":123456760,"trace_id":17,"phase":"packet_encrypt","edge":"done","outcome":"success"}
+{"type":"quic_stream_frame","timestamp_ns":123456770,"trace_id":17,"stream_id":16,"offset_start":120,"offset_end":520,"outcome":"success"}
+{"type":"quic_packet_end","timestamp_ns":123456780,"trace_id":17,"packet_number":9901,"packet_space":"data","byte_len":1232,"outcome":"success"}
 ```
 
 Example receive socket operation with GRO:
 
 ```json
 {"type":"udp_socket_start","timestamp_ns":123456800,"trace_id":18,"direction":"rx","sample_rate":1}
-{"type":"udp_socket_end","timestamp_ns":123456850,"trace_id":18,"direction":"rx","sample_rate":1,"outcome":"success","buffers":2,"datagrams":5,"bytes":6144}
+{"type":"udp_socket_end","timestamp_ns":123456850,"trace_id":18,"outcome":"success","stats":{"buffers":2,"datagrams":5,"bytes":6144}}
 ```
 
 ## Event semantics
@@ -101,7 +104,10 @@ packet number.
 MoQ object phases follow the same scoped shape: a `phase` and `edge` pair, with an
 `outcome` on done edges. The phase values are `header_parse`, `create`,
 `payload_read`, `frame_commit`, `clone`, `header_encode`, and `payload_write`.
-Object outcomes are `success`, `failed`, and `abandoned`. Object identity is:
+Object outcomes are `success`, `failed`, and `abandoned`. Each lifecycle has a
+`trace_id`. Ingress and every outbound copy share a process-unique `logical_id`,
+so fan-out is joined directly instead of inferred from timestamps. Wire identity
+within one lifecycle is:
 
 ```text
 (session_id, track_alias, group_id, object_id)
@@ -157,8 +163,9 @@ cargo run -p moq-trace --features analyze -- analyze relay.jsonl \
   --subscribers 1
 ```
 
-The analyzer writes `objects.csv`, `quic_objects.csv`, `quic_packets.csv`, and
-`analysis.json` to the output directory.
+The analyzer atomically publishes `objects.csv`, `quic_objects.csv`,
+`quic_packets.csv`, and a versioned `manifest.json` to a new output directory.
+It refuses to replace an existing bundle.
 
 To compare delivery-copy latency across subscriber counts, run each workload in
 sequence with one shared build:
@@ -236,10 +243,10 @@ object work can overlap.
 
 The experiment writes:
 
-- `objects.csv`: MoQ `full_span` samples.
-- `quic_objects.csv`: the three QUIC-inclusive metrics per subscriber copy.
-- `quic_packets.csv`: packet-span and packet-phase samples.
-- `analysis.json`: typed analyzer metadata consumed by the plotting layer.
+- `analysis/objects.csv`: MoQ `full_span` samples.
+- `analysis/quic_objects.csv`: the three QUIC-inclusive metrics per subscriber copy.
+- `analysis/quic_packets.csv`: packet-span and packet-phase samples.
+- `analysis/manifest.json`: versioned typed metadata consumed by the plotting layer.
 - `summary.json`: workload metadata, counts, and all three statistics sections.
 - `latency.png`: MoQ latency distributions, percentiles, and time series.
 - `quic_latency.png`: QUIC-inclusive object plots.

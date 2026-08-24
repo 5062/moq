@@ -81,13 +81,29 @@ pub enum Error {
 }
 
 /// Trace event direction at the relay boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
 	/// Event was observed while receiving from the peer.
 	Rx,
 	/// Event was observed while transmitting to the peer.
 	Tx,
+}
+
+impl Direction {
+	/// Return the serialized direction name.
+	pub const fn as_str(self) -> &'static str {
+		match self {
+			Self::Rx => "rx",
+			Self::Tx => "tx",
+		}
+	}
+}
+
+impl std::fmt::Display for Direction {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		formatter.write_str(self.as_str())
+	}
 }
 
 /// MoQ protocol family represented by an object event.
@@ -113,11 +129,16 @@ pub enum PacketSpace {
 	Data,
 }
 
-/// MoQ object trace fields common to object start and end events.
+/// Metadata emitted once when a MoQ object lifecycle starts.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObjectEvent {
 	/// Monotonic timestamp in nanoseconds from the local process clock.
 	pub timestamp_ns: u64,
+	/// Process-unique lifecycle identifier used by child and completion records.
+	pub trace_id: u64,
+	/// Process-unique identity shared by ingress and every outbound copy.
+	pub logical_id: u64,
 	/// Process-local MoQ session ID when available.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub session_id: Option<u64>,
@@ -140,17 +161,27 @@ pub struct ObjectEvent {
 	/// Inclusive stream byte offset where this object starts, when known.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub stream_offset_start: Option<u64>,
+	/// Sampling rate active for this event.
+	pub sample_rate: u64,
+}
+
+/// Final metadata emitted when a MoQ object lifecycle completes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectEndEvent {
+	/// Monotonic completion timestamp in nanoseconds.
+	pub timestamp_ns: u64,
+	/// Object lifecycle identifier from [`ObjectEvent::trace_id`].
+	pub trace_id: u64,
 	/// Exclusive stream byte offset where this object ends, when known.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub stream_offset_end: Option<u64>,
 	/// Object payload size in bytes.
 	pub payload_bytes: u64,
-	/// Sampling rate active for this event.
-	pub sample_rate: u64,
 }
 
 /// A measured step in the moq-transport object lifecycle.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectPhase {
@@ -168,6 +199,21 @@ pub enum ObjectPhase {
 	HeaderEncode,
 	/// Write an outbound object payload.
 	PayloadWrite,
+}
+
+impl ObjectPhase {
+	/// Return the serialized phase name.
+	pub const fn as_str(self) -> &'static str {
+		match self {
+			Self::HeaderParse => "header_parse",
+			Self::Create => "create",
+			Self::PayloadRead => "payload_read",
+			Self::FrameCommit => "frame_commit",
+			Self::Clone => "clone",
+			Self::HeaderEncode => "header_encode",
+			Self::PayloadWrite => "payload_write",
+		}
+	}
 }
 
 /// Result of an object lifecycle phase.
@@ -205,6 +251,7 @@ impl ObjectIdentity {
 /// Stable metadata known before a moq-transport object trace starts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectContext {
+	logical_id: Option<u64>,
 	session_id: Option<u64>,
 	connection_id: Option<u64>,
 	direction: Direction,
@@ -220,6 +267,7 @@ impl ObjectContext {
 	/// Create metadata for one moq-transport object.
 	pub fn new(direction: Direction, identity: ObjectIdentity) -> Self {
 		Self {
+			logical_id: None,
 			session_id: None,
 			connection_id: None,
 			direction,
@@ -230,6 +278,12 @@ impl ObjectContext {
 			stream_offset_start: None,
 			payload_bytes: 0,
 		}
+	}
+
+	/// Attach the identity shared by ingress and outbound copies.
+	pub fn with_logical_id(mut self, logical_id: u64) -> Self {
+		self.logical_id = Some(logical_id);
+		self
 	}
 
 	/// Attach a process-local trace session identifier.
@@ -269,7 +323,9 @@ pub struct ObjectTrace(Option<ObjectTraceState>);
 
 struct ObjectTraceState {
 	handle: Handle,
-	object: ObjectEvent,
+	trace_id: u64,
+	payload_bytes: u64,
+	stream_offset_end: Option<u64>,
 }
 
 /// A scoped object phase whose completion consumes the token.
@@ -289,15 +345,14 @@ impl ObjectTrace {
 	/// Update the object payload size once it is known.
 	pub fn set_payload_bytes(&mut self, payload_bytes: u64) {
 		if let Some(state) = &mut self.0 {
-			let object = &mut state.object;
-			object.payload_bytes = payload_bytes;
+			state.payload_bytes = payload_bytes;
 		}
 	}
 
 	/// Update the exclusive stream byte offset reached by this object.
 	pub fn set_stream_offset_end(&mut self, stream_offset_end: u64) {
 		if let Some(state) = &mut self.0 {
-			state.object.stream_offset_end = Some(stream_offset_end);
+			state.stream_offset_end = Some(stream_offset_end);
 		}
 	}
 
@@ -315,23 +370,26 @@ impl ObjectTrace {
 		let Some(state) = &self.0 else {
 			return;
 		};
-		let mut object = state.object.clone();
-		object.timestamp_ns = now_ns();
 		state.handle.emit(Event::MoqObjectPhase(ObjectPhaseEvent {
+			timestamp_ns: now_ns(),
+			trace_id: state.trace_id,
 			phase,
 			edge,
 			outcome,
-			object,
 		}));
 	}
 
 	/// Finish the object interval with the latest metadata.
 	pub fn finish(mut self) {
-		let Some(mut state) = self.0.take() else {
+		let Some(state) = self.0.take() else {
 			return;
 		};
-		state.object.timestamp_ns = now_ns();
-		state.handle.emit(Event::MoqObjectEnd(state.object));
+		state.handle.emit(Event::MoqObjectEnd(ObjectEndEvent {
+			timestamp_ns: now_ns(),
+			trace_id: state.trace_id,
+			stream_offset_end: state.stream_offset_end,
+			payload_bytes: state.payload_bytes,
+		}));
 	}
 }
 
@@ -364,7 +422,12 @@ impl Drop for ObjectPhaseTrace<'_> {
 
 /// moq-transport object phase fields.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObjectPhaseEvent {
+	/// Monotonic boundary timestamp in nanoseconds.
+	pub timestamp_ns: u64,
+	/// Parent object lifecycle identifier.
+	pub trace_id: u64,
 	/// Object lifecycle phase being measured.
 	pub phase: ObjectPhase,
 	/// Whether this boundary starts or completes the phase.
@@ -372,9 +435,6 @@ pub struct ObjectPhaseEvent {
 	/// Completion result, present only when `edge` is `done`.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub outcome: Option<ObjectOutcome>,
-	/// Object metadata associated with the phase boundary.
-	#[serde(flatten)]
-	pub object: ObjectEvent,
 }
 
 /// One JSONL trace record.
@@ -382,12 +442,14 @@ pub struct ObjectPhaseEvent {
 #[non_exhaustive]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
+	/// Trace format and clock metadata. This must be the first record.
+	TraceHeader(TraceHeaderEvent),
 	/// First byte of a moq-transport object was observed.
 	#[serde(rename = "moq_object_start")]
 	MoqObjectStart(ObjectEvent),
 	/// Final byte of a moq-transport object was observed.
 	#[serde(rename = "moq_object_end")]
-	MoqObjectEnd(ObjectEvent),
+	MoqObjectEnd(ObjectEndEvent),
 	/// moq-transport object processing phase boundary.
 	#[serde(rename = "moq_object_phase")]
 	MoqObjectPhase(ObjectPhaseEvent),
@@ -411,57 +473,43 @@ pub enum Event {
 	SocketEnd(SocketEndEvent),
 }
 
+/// Current trace format revision. Readers reject every other revision.
+pub const TRACE_REVISION: u32 = 1;
+
+/// Metadata that begins every trace file.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceHeaderEvent {
+	/// Exact trace schema revision.
+	pub revision: u32,
+	/// Timestamp clock and unit used by every event.
+	pub clock: TraceClock,
+}
+
+/// Timestamp clock used by a trace file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceClock {
+	/// Process-local monotonic nanoseconds.
+	MonotonicNs,
+}
+
 impl Event {
 	/// Process-unique trace identifier for scoped socket and packet records.
 	pub fn trace_id(&self) -> Option<u64> {
 		match self {
+			Self::MoqObjectStart(event) => Some(event.trace_id),
+			Self::MoqObjectEnd(event) => Some(event.trace_id),
+			Self::MoqObjectPhase(event) => Some(event.trace_id),
 			Self::SocketStart(event) => Some(event.trace_id),
 			Self::PacketStart(event) => Some(event.trace_id),
-			Self::PacketEnd(event) => Some(event.packet.trace_id),
-			Self::PacketPhase(event) => Some(event.packet.trace_id),
-			Self::StreamFrame(event) => Some(event.packet.trace_id),
-			Self::SocketEnd(event) => Some(event.socket.trace_id),
+			Self::PacketEnd(event) => Some(event.trace_id),
+			Self::PacketPhase(event) => Some(event.trace_id),
+			Self::StreamFrame(event) => Some(event.trace_id),
+			Self::SocketEnd(event) => Some(event.trace_id),
 			_ => None,
 		}
 	}
-
-	fn object_id(&self) -> Option<u64> {
-		match self {
-			Self::MoqObjectStart(event) | Self::MoqObjectEnd(event) => Some(event.object_id),
-			Self::MoqObjectPhase(event) => Some(event.object.object_id),
-			_ => None,
-		}
-	}
-
-	fn set_sample_rate(&mut self, sample_rate: u64) {
-		match self {
-			Self::MoqObjectStart(event) | Self::MoqObjectEnd(event) => event.sample_rate = sample_rate,
-			Self::MoqObjectPhase(event) => event.object.sample_rate = sample_rate,
-			_ => {}
-		}
-	}
-}
-
-/// Emit the canonical moq-transport object interval start event.
-pub fn object_interval_start(handle: &Handle, object: &ObjectEvent) -> bool {
-	let Some(sample_rate) = handle.object_sample_rate(object.object_id) else {
-		return false;
-	};
-	let mut object = object.clone();
-	object.timestamp_ns = now_ns();
-	object.sample_rate = sample_rate;
-	handle.emit(Event::MoqObjectStart(object))
-}
-
-/// Emit the canonical moq-transport object interval end event.
-pub fn object_interval_end(handle: &Handle, object: &ObjectEvent) -> bool {
-	let Some(sample_rate) = handle.object_sample_rate(object.object_id) else {
-		return false;
-	};
-	let mut object = object.clone();
-	object.timestamp_ns = now_ns();
-	object.sample_rate = sample_rate;
-	handle.emit(Event::MoqObjectEnd(object))
 }
 
 /// A cheap cloneable handle used by instrumentation sites to emit trace events.
@@ -486,6 +534,7 @@ struct Inner {
 	packet_seen: AtomicU64,
 	socket_seen: AtomicU64,
 	next_trace_id: AtomicU64,
+	next_logical_id: AtomicU64,
 	emitted: AtomicU64,
 	dropped: AtomicU64,
 	writer_failed: Arc<AtomicBool>,
@@ -539,23 +588,40 @@ impl Handle {
 		self
 	}
 
-	fn object_sample_rate(&self, object_id: u64) -> Option<u64> {
+	fn object_sample_rate(&self, logical_id: u64) -> Option<u64> {
 		let inner = self.inner.as_ref()?;
 		let sample = inner.config.object_sample;
-		if object_id % sample == sample - 1 {
+		if logical_id % sample == sample - 1 {
 			Some(sample)
 		} else {
 			None
 		}
 	}
 
+	/// Allocate an identity that can be propagated from ingress to outbound copies.
+	pub fn next_object_id(&self) -> u64 {
+		self.inner
+			.as_ref()
+			.map(|inner| inner.next_logical_id.fetch_add(1, Ordering::Relaxed))
+			.unwrap_or_default()
+	}
+
 	/// Start a moq-transport object trace after applying object sampling.
 	pub fn object(&self, context: ObjectContext) -> ObjectTrace {
-		let Some(sample_rate) = self.object_sample_rate(context.object_id) else {
+		let logical_id = context.logical_id.unwrap_or_else(|| self.next_object_id());
+		let Some(sample_rate) = self.object_sample_rate(logical_id) else {
 			return ObjectTrace::disabled();
 		};
+		let trace_id = self
+			.inner
+			.as_ref()
+			.unwrap()
+			.next_trace_id
+			.fetch_add(1, Ordering::Relaxed);
 		let object = ObjectEvent {
 			timestamp_ns: now_ns(),
+			trace_id,
+			logical_id,
 			session_id: context.session_id.or(self.session_id),
 			connection_id: context.connection_id.or(self.connection_id),
 			direction: context.direction,
@@ -565,14 +631,14 @@ impl Handle {
 			object_id: context.object_id,
 			stream_id: context.stream_id,
 			stream_offset_start: context.stream_offset_start,
-			stream_offset_end: None,
-			payload_bytes: context.payload_bytes,
 			sample_rate,
 		};
 		self.emit(Event::MoqObjectStart(object.clone()));
 		ObjectTrace(Some(ObjectTraceState {
 			handle: self.clone(),
-			object,
+			trace_id,
+			payload_bytes: context.payload_bytes,
+			stream_offset_end: None,
 		}))
 	}
 
@@ -581,22 +647,6 @@ impl Handle {
 		let Some(inner) = &self.inner else {
 			return false;
 		};
-		inner.emit(event)
-	}
-
-	/// Emit a MoQ object event after sampling by object ID.
-	pub fn emit_object(&self, mut event: Event) -> bool {
-		let Some(inner) = &self.inner else {
-			return false;
-		};
-		let Some(object_id) = event.object_id() else {
-			return false;
-		};
-		let sample = inner.config.object_sample;
-		if object_id % sample != sample - 1 {
-			return false;
-		}
-		event.set_sample_rate(sample);
 		inner.emit(event)
 	}
 
@@ -654,6 +704,7 @@ impl Inner {
 			packet_seen: AtomicU64::new(0),
 			socket_seen: AtomicU64::new(0),
 			next_trace_id: AtomicU64::new(1),
+			next_logical_id: AtomicU64::new(1),
 			emitted: AtomicU64::new(0),
 			dropped: AtomicU64::new(0),
 			writer_failed,
@@ -694,6 +745,18 @@ impl Drop for Inner {
 
 fn write_events<W: Write>(writer: W, receiver: std::sync::mpsc::Receiver<WriterCommand>, failed: Arc<AtomicBool>) {
 	let mut writer = BufWriter::new(writer);
+	let header = Event::TraceHeader(TraceHeaderEvent {
+		revision: TRACE_REVISION,
+		clock: TraceClock::MonotonicNs,
+	});
+	if serde_json::to_writer(&mut writer, &header)
+		.map_err(std::io::Error::other)
+		.and_then(|()| writer.write_all(b"\n"))
+		.is_err()
+	{
+		failed.store(true, Ordering::Relaxed);
+		return;
+	}
 	for command in receiver {
 		let result = match command {
 			WriterCommand::Event(event) => serde_json::to_writer(&mut writer, &event)
@@ -759,795 +822,4 @@ pub fn now_ns() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-	use std::io;
-
-	use super::*;
-
-	fn object_event() -> Event {
-		Event::MoqObjectEnd(ObjectEvent {
-			timestamp_ns: 42,
-			session_id: Some(7),
-			connection_id: Some(42),
-			direction: Direction::Tx,
-			protocol: Protocol::MoqTransport,
-			track_alias: 11,
-			group_id: 12,
-			object_id: 13,
-			stream_id: Some(16),
-			stream_offset_start: Some(100),
-			stream_offset_end: Some(144),
-			payload_bytes: 44,
-			sample_rate: 1,
-		})
-	}
-
-	#[test]
-	fn config_rejects_unknown_fields() {
-		let error = serde_json::from_str::<Config>(r#"{"unexpected":true}"#).unwrap_err();
-
-		assert!(error.to_string().contains("unknown field `unexpected`"));
-	}
-
-	#[test]
-	fn config_uses_default_when_fields_are_missing() {
-		let config = serde_json::from_str::<Config>("{}").unwrap();
-		let default = Config::default();
-
-		assert_eq!(config.path, default.path);
-		assert_eq!(config.object_sample, default.object_sample);
-		assert_eq!(config.packet_sample, default.packet_sample);
-		assert_eq!(config.socket_sample, default.socket_sample);
-		assert_eq!(config.queue_capacity, default.queue_capacity);
-	}
-
-	#[test]
-	fn flush_makes_events_visible_while_clones_are_alive() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			..Config::default()
-		})
-		.unwrap();
-		let clone = handle.clone();
-
-		assert!(handle.emit(object_event()));
-		assert!(handle.flush());
-		assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
-		drop(clone);
-	}
-
-	#[test]
-	fn serializes_jsonl_event_type() {
-		let json = serde_json::to_string(&object_event()).unwrap();
-		assert!(json.contains(r#""type":"moq_object_end""#));
-		assert!(json.contains(r#""session_id":7"#));
-		assert!(json.contains(r#""connection_id":42"#));
-		assert!(json.contains(r#""protocol":"moq_transport""#));
-	}
-
-	#[test]
-	fn serializes_object_phase_event() {
-		let event = Event::MoqObjectPhase(ObjectPhaseEvent {
-			phase: ObjectPhase::Create,
-			edge: PhaseEdge::Done,
-			outcome: Some(ObjectOutcome::Success),
-			object: ObjectEvent {
-				timestamp_ns: 42,
-				session_id: Some(7),
-				connection_id: None,
-				direction: Direction::Rx,
-				protocol: Protocol::MoqTransport,
-				track_alias: 11,
-				group_id: 12,
-				object_id: 13,
-				stream_id: Some(16),
-				stream_offset_start: Some(100),
-				stream_offset_end: Some(144),
-				payload_bytes: 44,
-				sample_rate: 1,
-			},
-		});
-
-		let json = serde_json::to_string(&event).unwrap();
-		assert!(json.contains(r#""type":"moq_object_phase""#));
-		assert!(json.contains(r#""phase":"create""#));
-		assert!(json.contains(r#""edge":"done""#));
-		assert!(json.contains(r#""outcome":"success""#));
-		assert!(!json.contains("frame"));
-		assert!(!json.contains(r#""point""#));
-	}
-
-	#[test]
-	fn object_interval_helpers_stamp_and_emit_events() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			..Config::disabled()
-		})
-		.unwrap();
-		let object = ObjectEvent {
-			timestamp_ns: u64::MAX,
-			session_id: Some(7),
-			connection_id: None,
-			direction: Direction::Tx,
-			protocol: Protocol::MoqTransport,
-			track_alias: 11,
-			group_id: 12,
-			object_id: 13,
-			stream_id: Some(16),
-			stream_offset_start: Some(100),
-			stream_offset_end: Some(144),
-			payload_bytes: 44,
-			sample_rate: 0,
-		};
-
-		object_interval_start(&handle, &object);
-		object_interval_end(&handle, &object);
-		drop(handle);
-
-		let contents = std::fs::read_to_string(path).unwrap();
-		assert!(contents.contains(r#""type":"moq_object_start""#));
-		assert!(contents.contains(r#""type":"moq_object_end""#));
-		assert!(!contents.contains(&u64::MAX.to_string()));
-	}
-
-	#[test]
-	fn object_phase_guard_records_latest_metadata_and_abandonment() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			..Config::disabled()
-		})
-		.unwrap();
-		let mut object = handle.object(ObjectContext::new(Direction::Rx, ObjectIdentity::new(11, 12, 13)));
-
-		{
-			let mut phase = object.phase(ObjectPhase::HeaderParse);
-			phase.set_payload_bytes(44);
-			phase.set_stream_offset_end(144);
-		}
-		object.finish();
-		drop(handle);
-
-		let events: Vec<Event> = std::fs::read_to_string(path)
-			.unwrap()
-			.lines()
-			.map(|line| serde_json::from_str(line).unwrap())
-			.collect();
-		assert!(matches!(
-			&events[2],
-			Event::MoqObjectPhase(ObjectPhaseEvent {
-				phase: ObjectPhase::HeaderParse,
-				edge: PhaseEdge::Done,
-				outcome: Some(ObjectOutcome::Abandoned),
-				object: ObjectEvent {
-					payload_bytes: 44,
-					stream_offset_end: Some(144),
-					..
-				},
-			})
-		));
-	}
-
-	#[test]
-	fn object_trace_updates_metadata_and_emits_interval() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			..Config::disabled()
-		})
-		.unwrap();
-		let context = ObjectContext::new(Direction::Tx, ObjectIdentity::new(11, 12, 13))
-			.with_session_id(7)
-			.with_stream_id(16)
-			.with_stream_offset_start(100)
-			.with_payload_bytes(44);
-
-		let mut object = handle.object(context);
-		let mut phase = object.phase(ObjectPhase::HeaderEncode);
-		phase.set_payload_bytes(44);
-		phase.set_stream_offset_end(144);
-		phase.finish(ObjectOutcome::Success);
-		object.finish();
-		drop(handle);
-
-		let contents = std::fs::read_to_string(path).unwrap();
-		let events = contents
-			.lines()
-			.map(|line| serde_json::from_str::<Event>(line).unwrap())
-			.collect::<Vec<_>>();
-		assert_eq!(events.len(), 4);
-		assert!(matches!(
-			events[0],
-			Event::MoqObjectStart(ref object) if object.payload_bytes == 44
-		));
-		assert!(matches!(
-			events[1],
-			Event::MoqObjectPhase(ObjectPhaseEvent {
-				phase: ObjectPhase::HeaderEncode,
-				edge: PhaseEdge::Start,
-				outcome: None,
-				..
-			})
-		));
-		assert!(matches!(
-			events[2],
-			Event::MoqObjectPhase(ObjectPhaseEvent {
-				phase: ObjectPhase::HeaderEncode,
-				edge: PhaseEdge::Done,
-				outcome: Some(ObjectOutcome::Success),
-				ref object,
-			}) if object.payload_bytes == 44 && object.stream_offset_end == Some(144)
-		));
-		assert!(matches!(
-			events[3],
-			Event::MoqObjectEnd(ref object)
-				if object.session_id == Some(7)
-					&& object.stream_id == Some(16)
-					&& object.stream_offset_start == Some(100)
-					&& object.stream_offset_end == Some(144)
-		));
-	}
-
-	#[test]
-	fn session_scoped_handle_stamps_object_events() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			..Config::disabled()
-		})
-		.unwrap()
-		.with_session_id(7);
-
-		handle
-			.object(ObjectContext::new(Direction::Tx, ObjectIdentity::new(11, 12, 13)))
-			.finish();
-		drop(handle);
-
-		let events = std::fs::read_to_string(path)
-			.unwrap()
-			.lines()
-			.map(|line| serde_json::from_str::<Event>(line).unwrap())
-			.collect::<Vec<_>>();
-		assert!(events.iter().all(|event| match event {
-			Event::MoqObjectStart(object) | Event::MoqObjectEnd(object) => object.session_id == Some(7),
-			_ => false,
-		}));
-	}
-
-	#[test]
-	fn object_context_connection_id_overrides_handle() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			..Config::disabled()
-		})
-		.unwrap()
-		.with_connection_id(42);
-
-		handle
-			.clone()
-			.object(ObjectContext::new(Direction::Tx, ObjectIdentity::new(11, 12, 13)).with_connection_id(99))
-			.finish();
-		handle
-			.object(ObjectContext::new(Direction::Tx, ObjectIdentity::new(21, 22, 23)))
-			.finish();
-		drop(handle);
-
-		let connection_ids = std::fs::read_to_string(path)
-			.unwrap()
-			.lines()
-			.map(|line| serde_json::from_str::<Event>(line).unwrap())
-			.filter_map(|event| match event {
-				Event::MoqObjectStart(object) => object.connection_id,
-				_ => None,
-			})
-			.collect::<Vec<_>>();
-		assert_eq!(connection_ids, vec![99, 42]);
-	}
-
-	#[test]
-	fn sequential_session_ids_start_at_one() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			..Config::disabled()
-		})
-		.unwrap();
-		let first = handle.clone().with_new_session_id();
-		let second = handle.with_new_session_id();
-
-		first
-			.object(ObjectContext::new(Direction::Tx, ObjectIdentity::new(11, 12, 13)))
-			.finish();
-		second
-			.object(ObjectContext::new(Direction::Tx, ObjectIdentity::new(21, 22, 23)))
-			.finish();
-		drop(first);
-		drop(second);
-
-		let session_ids = std::fs::read_to_string(path)
-			.unwrap()
-			.lines()
-			.map(|line| serde_json::from_str::<Event>(line).unwrap())
-			.filter_map(|event| match event {
-				Event::MoqObjectStart(object) => object.session_id,
-				_ => None,
-			})
-			.collect::<Vec<_>>();
-		assert_eq!(session_ids, vec![1, 2]);
-	}
-
-	#[test]
-	fn object_trace_samples_once_before_emitting_phases() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			object_sample: 3,
-			..Config::disabled()
-		})
-		.unwrap();
-
-		for object_id in 0..3 {
-			let mut object = handle.object(ObjectContext::new(
-				Direction::Rx,
-				ObjectIdentity::new(11, 12, object_id),
-			));
-			object.phase(ObjectPhase::HeaderParse).finish(ObjectOutcome::Success);
-			object.finish();
-		}
-		drop(handle);
-
-		let contents = std::fs::read_to_string(path).unwrap();
-		let events = contents
-			.lines()
-			.map(|line| serde_json::from_str::<Event>(line).unwrap())
-			.collect::<Vec<_>>();
-		assert_eq!(events.len(), 4);
-		assert!(events.iter().all(|event| match event {
-			Event::MoqObjectStart(object) | Event::MoqObjectEnd(object) => {
-				object.object_id == 2 && object.sample_rate == 3
-			}
-			Event::MoqObjectPhase(event) => event.object.object_id == 2 && event.object.sample_rate == 3,
-			_ => false,
-		}));
-	}
-
-	#[test]
-	fn disabled_object_trace_is_noop() {
-		let handle = Handle::new(Config::disabled()).unwrap();
-		let mut object = handle.object(ObjectContext::new(Direction::Rx, ObjectIdentity::new(11, 12, 13)));
-
-		let mut phase = object.phase(ObjectPhase::HeaderParse);
-		phase.set_payload_bytes(44);
-		phase.set_stream_offset_end(144);
-		phase.finish(ObjectOutcome::Success);
-		object.finish();
-
-		assert_eq!(handle.emitted(), 0);
-	}
-	#[test]
-	fn samples_all_events_for_every_nth_object() {
-		let dir = tempfile::tempdir().unwrap();
-		let handle = Handle::new(Config {
-			path: Some(dir.path().join("trace.jsonl")),
-			object_sample: 3,
-			..Config::disabled()
-		})
-		.unwrap();
-
-		let mut skipped = object_event();
-		if let Event::MoqObjectEnd(object) = &mut skipped {
-			object.object_id = 0;
-		}
-
-		assert!(!handle.emit_object(skipped.clone()));
-		assert!(!handle.emit_object(skipped.clone()));
-		assert!(!handle.emit_object(skipped));
-
-		let mut sampled = object_event();
-		if let Event::MoqObjectEnd(object) = &mut sampled {
-			object.object_id = 2;
-		}
-
-		assert!(handle.emit_object(sampled.clone()));
-		assert!(handle.emit_object(sampled.clone()));
-		assert!(handle.emit_object(sampled));
-		assert_eq!(handle.emitted(), 3);
-	}
-
-	#[test]
-	fn config_without_path_is_disabled() {
-		let handle = Handle::new(Config::disabled()).unwrap();
-
-		assert!(!handle.emit(object_event()));
-		assert_eq!(handle.emitted(), 0);
-		assert_eq!(handle.dropped(), 0);
-	}
-
-	#[test]
-	fn global_handle_does_not_keep_writer_alive() {
-		clear_global();
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			..Config::disabled()
-		})
-		.unwrap();
-		set_global(handle.clone());
-
-		assert!(global().emit(object_event()));
-		drop(handle);
-
-		assert!(!global().emit(object_event()));
-		let contents = std::fs::read_to_string(path).unwrap();
-		assert!(contents.contains(r#""type":"moq_object_end""#));
-	}
-
-	struct FailingWriter;
-
-	impl Write for FailingWriter {
-		fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-			Err(io::Error::other("expected test failure"))
-		}
-
-		fn flush(&mut self) -> io::Result<()> {
-			Ok(())
-		}
-	}
-
-	#[test]
-	fn records_writer_failure() {
-		let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-		let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-		sender.send(WriterCommand::Event(object_event())).unwrap();
-		drop(sender);
-
-		write_events(FailingWriter, receiver, failed.clone());
-		let handle = Handle {
-			inner: Some(Arc::new(Inner::new(Config::default(), None, None, failed))),
-			session_id: None,
-			connection_id: None,
-		};
-		assert!(handle.writer_failed());
-	}
-
-	#[test]
-	fn drops_when_queue_is_full() {
-		let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-		let handle = Handle {
-			inner: Some(Arc::new(Inner::new(
-				Config::default(),
-				Some(sender),
-				None,
-				Arc::new(AtomicBool::new(false)),
-			))),
-			session_id: None,
-			connection_id: None,
-		};
-
-		assert!(handle.emit(object_event()));
-		assert!(!handle.emit(object_event()));
-		assert_eq!(handle.dropped(), 1);
-		drop(handle);
-		drop(receiver);
-	}
-
-	#[test]
-	fn writer_flushes_on_drop() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		{
-			let handle = Handle::new(Config {
-				path: Some(path.clone()),
-				..Config::disabled()
-			})
-			.unwrap();
-			assert!(handle.emit(object_event()));
-		}
-
-		let contents = std::fs::read_to_string(&path).unwrap();
-		assert!(contents.contains(r#""type":"moq_object_end""#));
-	}
-
-	#[test]
-	fn socket_trace_keeps_start_and_end_together() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			socket_sample: 2,
-			..Config::default()
-		})
-		.unwrap();
-
-		assert!(handle.socket(Direction::Rx, None).is_none());
-		handle
-			.socket(Direction::Rx, None)
-			.expect("second socket operation should be sampled")
-			.finish(SocketOutcome::Success, SocketStats::new(2, 5, 6144));
-		drop(handle);
-
-		let events: Vec<Event> = std::fs::read_to_string(path)
-			.unwrap()
-			.lines()
-			.map(|line| serde_json::from_str(line).unwrap())
-			.collect();
-		assert_eq!(events.len(), 2);
-		assert_eq!(events[0].trace_id(), events[1].trace_id());
-	}
-
-	#[test]
-	fn dropped_socket_trace_records_abandoned() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			..Config::default()
-		})
-		.unwrap();
-
-		drop(handle.socket(Direction::Tx, Some(7)).unwrap());
-		drop(handle);
-
-		let events: Vec<Event> = std::fs::read_to_string(path)
-			.unwrap()
-			.lines()
-			.map(|line| serde_json::from_str(line).unwrap())
-			.collect();
-		assert!(matches!(
-			events.as_slice(),
-			[
-				Event::SocketStart(_),
-				Event::SocketEnd(SocketEndEvent {
-					outcome: SocketOutcome::Abandoned,
-					..
-				})
-			]
-		));
-	}
-
-	#[test]
-	fn serialized_events_can_be_read_back() {
-		let json = serde_json::to_string(&object_event()).unwrap();
-		let event: Event = serde_json::from_str(&json).unwrap();
-
-		assert_eq!(event, object_event());
-	}
-
-	#[test]
-	fn dropped_packet_trace_records_abandoned() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			..Config::default()
-		})
-		.unwrap();
-
-		drop(handle.packet(PacketContext::new(Direction::Rx, 7)));
-		drop(handle);
-
-		let events: Vec<Event> = std::fs::read_to_string(path)
-			.unwrap()
-			.lines()
-			.map(|line| serde_json::from_str(line).unwrap())
-			.collect();
-		assert!(matches!(
-			events.as_slice(),
-			[
-				Event::PacketStart(_),
-				Event::PacketEnd(PacketEndEvent {
-					outcome: PacketOutcome::Abandoned,
-					..
-				})
-			]
-		));
-	}
-
-	#[test]
-	fn dropped_packet_phase_records_abandoned() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			..Config::default()
-		})
-		.unwrap();
-		let packet = handle.packet(PacketContext::new(Direction::Rx, 7));
-
-		drop(packet.phase(PacketPhase::HeaderParse));
-		packet.finish(PacketOutcome::Success);
-		drop(handle);
-
-		let events: Vec<Event> = std::fs::read_to_string(path)
-			.unwrap()
-			.lines()
-			.map(|line| serde_json::from_str(line).unwrap())
-			.collect();
-		assert!(matches!(
-			&events[2],
-			Event::PacketPhase(PacketPhaseEvent {
-				edge: PhaseEdge::Done,
-				outcome: Some(PacketOutcome::Abandoned),
-				..
-			})
-		));
-	}
-
-	#[test]
-	fn packet_trace_records_captured_timestamps() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			..Config::default()
-		})
-		.unwrap();
-		let packet = handle.packet(PacketContext::new(Direction::Rx, 7).with_start_ns(10));
-
-		packet
-			.phase_at(PacketPhase::Routing, 20)
-			.finish_at(PacketOutcome::Success, 30);
-		packet.finish(PacketOutcome::Success);
-		drop(handle);
-
-		let events: Vec<Event> = std::fs::read_to_string(path)
-			.unwrap()
-			.lines()
-			.map(|line| serde_json::from_str(line).unwrap())
-			.collect();
-		assert!(matches!(
-			&events[0],
-			Event::PacketStart(PacketEvent { timestamp_ns: 10, .. })
-		));
-		assert!(matches!(
-			&events[1],
-			Event::PacketPhase(PacketPhaseEvent {
-				packet: PacketEvent { timestamp_ns: 20, .. },
-				phase: PacketPhase::Routing,
-				edge: PhaseEdge::Start,
-				outcome: None,
-			})
-		));
-		assert!(matches!(
-			&events[2],
-			Event::PacketPhase(PacketPhaseEvent {
-				packet: PacketEvent { timestamp_ns: 30, .. },
-				phase: PacketPhase::Routing,
-				edge: PhaseEdge::Done,
-				outcome: Some(PacketOutcome::Success),
-			})
-		));
-	}
-
-	#[test]
-	fn disabled_packet_trace_is_noop() {
-		let handle = Handle::new(Config::disabled()).unwrap();
-		let mut packet = handle.packet(PacketContext::new(Direction::Rx, 7));
-
-		packet.phase(PacketPhase::HeaderParse).finish(PacketOutcome::Success);
-		packet.set_number(91);
-		packet.set_space(PacketSpace::Data);
-		packet.set_byte_len(1200);
-		packet.stream_frame(StreamFrame::new(16, 0, 10), PacketOutcome::Success);
-		packet.finish(PacketOutcome::Success);
-
-		assert_eq!(handle.emitted(), 0);
-	}
-
-	#[test]
-	fn unsampled_packet_trace_is_noop() {
-		let dir = tempfile::tempdir().unwrap();
-		let handle = Handle::new(Config {
-			path: Some(dir.path().join("trace.jsonl")),
-			packet_sample: 2,
-			..Config::default()
-		})
-		.unwrap();
-		let packet = handle.packet(PacketContext::new(Direction::Tx, 7).with_number(0));
-
-		packet.phase(PacketPhase::FrameEncode).finish(PacketOutcome::Success);
-		packet.finish(PacketOutcome::Success);
-
-		assert_eq!(handle.emitted(), 0);
-	}
-
-	#[test]
-	fn packet_trace_enriches_context_after_header_decode() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			..Config::default()
-		})
-		.unwrap();
-		let mut packet = handle.packet(PacketContext::new(Direction::Rx, 7).with_byte_len(1200));
-
-		packet.phase(PacketPhase::HeaderParse).finish(PacketOutcome::Success);
-		packet.set_space(PacketSpace::Data);
-		packet.set_number(91);
-		packet
-			.phase(PacketPhase::HeaderUnprotect)
-			.finish(PacketOutcome::Success);
-		packet.stream_frame(StreamFrame::new(16, 120, 520), PacketOutcome::Success);
-		packet.finish(PacketOutcome::Success);
-		drop(handle);
-
-		let events: Vec<Event> = std::fs::read_to_string(path)
-			.unwrap()
-			.lines()
-			.map(|line| serde_json::from_str(line).unwrap())
-			.collect();
-		assert!(matches!(
-			events.last(),
-			Some(Event::PacketEnd(PacketEndEvent {
-				packet: PacketEvent {
-					packet_number: Some(91),
-					packet_space: Some(PacketSpace::Data),
-					..
-				},
-				outcome: PacketOutcome::Success,
-			}))
-		));
-		assert!(events.iter().all(|event| event.trace_id() == Some(1)));
-	}
-
-	#[test]
-	fn packet_with_multiple_stream_frames_has_one_interval() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let handle = Handle::new(Config {
-			path: Some(path.clone()),
-			..Config::default()
-		})
-		.unwrap();
-		let packet = handle.packet(
-			PacketContext::new(Direction::Tx, 7)
-				.with_number(2)
-				.with_space(PacketSpace::Data),
-		);
-
-		packet.stream_frame(StreamFrame::new(4, 0, 10), PacketOutcome::Success);
-		packet.stream_frame(StreamFrame::new(8, 20, 40), PacketOutcome::Success);
-		packet.finish(PacketOutcome::Success);
-		drop(handle);
-
-		let events: Vec<Event> = std::fs::read_to_string(path)
-			.unwrap()
-			.lines()
-			.map(|line| serde_json::from_str(line).unwrap())
-			.collect();
-		assert_eq!(
-			events
-				.iter()
-				.filter(|event| matches!(event, Event::PacketStart(_)))
-				.count(),
-			1
-		);
-		assert_eq!(
-			events
-				.iter()
-				.filter(|event| matches!(event, Event::PacketEnd(_)))
-				.count(),
-			1
-		);
-		assert_eq!(
-			events
-				.iter()
-				.filter(|event| matches!(event, Event::StreamFrame(_)))
-				.count(),
-			2
-		);
-	}
-}
+mod tests;

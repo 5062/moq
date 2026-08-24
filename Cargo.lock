@@ -4632,6 +4632,11 @@ dependencies = [
 name = "moq-trace"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "clap",
+ "csv",
+ "humantime",
+ "rangemap",
  "serde",
  "serde_json",
  "tempfile",
@@ -6614,6 +6619,12 @@ checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core 0.9.5",
 ]
+
+[[package]]
+name = "rangemap"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a611d15b50743feb4c76b7d03edcb0e64f399c26961e4efe6975bc398be6aa3d"
 
 [[package]]
 name = "raw-cpuid"

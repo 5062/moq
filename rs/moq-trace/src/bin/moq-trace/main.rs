@@ -1,6 +1,8 @@
 //! Offline analysis for `moq-trace` JSONL files.
 
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -25,16 +27,16 @@ enum Command {
 		output: PathBuf,
 		/// Expected inbound object payload size in bytes.
 		#[arg(long)]
-		object_size: u64,
+		object_size: NonZeroU64,
 		/// Expected number of outbound copies per object.
 		#[arg(long)]
-		subscribers: usize,
-		/// Seconds excluded from the beginning of the workload.
-		#[arg(long, default_value_t = 0.0)]
-		warmup: f64,
-		/// Seconds excluded from the end of the workload.
-		#[arg(long, default_value_t = 0.0)]
-		cooldown: f64,
+		subscribers: NonZeroUsize,
+		/// Duration excluded from the beginning of the workload.
+		#[arg(long, default_value = "0s", value_parser = humantime::parse_duration)]
+		warmup: Duration,
+		/// Duration excluded from the end of the workload.
+		#[arg(long, default_value = "0s", value_parser = humantime::parse_duration)]
+		cooldown: Duration,
 	},
 }
 
@@ -53,8 +55,8 @@ fn main() -> anyhow::Result<()> {
 			analysis::Options {
 				object_size,
 				subscribers,
-				warmup_seconds: warmup,
-				cooldown_seconds: cooldown,
+				warmup,
+				cooldown,
 			},
 		)
 		.with_context(|| format!("failed to analyze {}", input.display())),

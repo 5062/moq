@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import dataclasses
 import datetime
 import json
 import os
@@ -264,9 +263,9 @@ def write_summary(
                 "object_id": timeline.selection.object_id,
                 "actual_us": timeline.selection.actual_us,
                 "copies": {
-                    "first": dataclasses.asdict(timeline.first_copy),
-                    "last": dataclasses.asdict(timeline.last_copy),
-                    "slowest": dataclasses.asdict(timeline.slowest_copy),
+                    "first": timeline.first_copy.model_dump(),
+                    "last": timeline.last_copy.model_dump(),
+                    "slowest": timeline.slowest_copy.model_dump(),
                 },
             }
             for timeline in analysis.timelines
@@ -433,26 +432,27 @@ def _capture_trace(
 def _analyze_trace(config: ExperimentConfig, trace: pathlib.Path, output: pathlib.Path) -> Analysis:
     """Run the typed Rust analyzer and load its artifact bundle."""
 
+    bundle = output / "analysis"
     command = [
         str(config.analyzer_bin),
         "analyze",
         str(trace),
         "--output",
-        str(output),
+        str(bundle),
         "--object-size",
         str(config.object_size),
         "--subscribers",
         str(config.subscribers),
         "--warmup",
-        str(config.warmup),
+        f"{config.warmup:g}s",
         "--cooldown",
-        str(config.cooldown),
+        f"{config.cooldown:g}s",
     ]
     with (output / "analyze.log").open("wb") as log:
         result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False)
     if result.returncode != 0:
         raise AnalysisError(f"trace analyzer exited with status {result.returncode}; see {output / 'analyze.log'}")
-    return load_analysis(output)
+    return load_analysis(bundle)
 
 
 def _write_artifacts(
@@ -469,21 +469,6 @@ def _write_artifacts(
         object_size=config.object_size,
         fps=config.fps,
         protocol=PROTOCOL,
-    )
-    write_samples(
-        output / "objects.csv",
-        analysis.samples,
-        ("group_id", "object_id", "metric", "copy_ordinal"),
-    )
-    write_samples(
-        output / "quic_objects.csv",
-        analysis.quic_object_samples,
-        ("group_id", "object_id", "metric", "copy_ordinal"),
-    )
-    write_samples(
-        output / "quic_packets.csv",
-        analysis.packet_samples,
-        ("trace_id", "metric", "occurrence"),
     )
     write_summary(output / "summary.json", config, analysis, commands)
     plot_analysis(output / "latency.png", plot_options, analysis)
@@ -573,8 +558,8 @@ def _run_per_copy_comparison(
         run_config = config.model_copy(update=updates)
         run_output = run_experiment(run_config)
         summary = json.loads((run_output / "summary.json").read_text())
-        object_samples = pl.read_csv(run_output / "objects.csv")
-        quic_object_samples = pl.read_csv(run_output / "quic_objects.csv")
+        object_samples = pl.read_csv(run_output / "analysis" / "objects.csv")
+        quic_object_samples = pl.read_csv(run_output / "analysis" / "quic_objects.csv")
         if dimension == "subscribers":
             label_noun = "subscriber" if value == 1 else "subscribers"
             label = f"{value} {label_noun}"

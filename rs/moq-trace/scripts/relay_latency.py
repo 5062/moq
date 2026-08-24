@@ -160,10 +160,10 @@ def main(
     print_statistics("QUIC-inclusive object metrics", summary["quic_object_statistics_us"])
     print_statistics("QUIC packet diagnostics", summary["quic_packet_statistics_us"])
     for name in (
-        "objects.csv",
-        "quic_objects.csv",
-        "quic_packets.csv",
-        "analysis.json",
+        "analysis/objects.csv",
+        "analysis/quic_objects.csv",
+        "analysis/quic_packets.csv",
+        "analysis/manifest.json",
         "summary.json",
         "latency.png",
         "quic_latency.png",

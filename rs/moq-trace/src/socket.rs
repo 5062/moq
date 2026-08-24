@@ -45,6 +45,7 @@ impl SocketStats {
 
 /// Fields recorded when a UDP socket operation starts.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SocketEvent {
 	/// Monotonic timestamp in nanoseconds from the local process clock.
 	pub timestamp_ns: u64,
@@ -61,14 +62,15 @@ pub struct SocketEvent {
 
 /// Fields recorded when a UDP socket operation ends.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SocketEndEvent {
-	/// Identity and timing fields shared with the start record.
-	#[serde(flatten)]
-	pub socket: SocketEvent,
+	/// Monotonic completion timestamp in nanoseconds.
+	pub timestamp_ns: u64,
+	/// Socket operation identifier from [`SocketEvent::trace_id`].
+	pub trace_id: u64,
 	/// Result of the socket operation.
 	pub outcome: SocketOutcome,
 	/// Batch measurements observed by the operation.
-	#[serde(flatten)]
 	pub stats: SocketStats,
 }
 
@@ -113,10 +115,12 @@ impl SocketTrace {
 	}
 
 	fn emit_end(&self, outcome: SocketOutcome, stats: SocketStats) {
-		let mut socket = self.event.clone();
-		socket.timestamp_ns = now_ns();
-		self.handle
-			.emit(Event::SocketEnd(SocketEndEvent { socket, outcome, stats }));
+		self.handle.emit(Event::SocketEnd(SocketEndEvent {
+			timestamp_ns: now_ns(),
+			trace_id: self.event.trace_id,
+			outcome,
+			stats,
+		}));
 	}
 }
 

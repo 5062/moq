@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Direction, Event, Handle, PacketSpace, now_ns};
 
 /// Result of packet or packet-phase processing.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub enum PacketOutcome {
@@ -22,7 +22,7 @@ pub enum PacketOutcome {
 }
 
 /// A measured step in the QUIC packet lifecycle.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub enum PacketPhase {
@@ -42,6 +42,22 @@ pub enum PacketPhase {
 	FrameEncode,
 	/// Encrypt the packet and apply header protection.
 	PacketEncrypt,
+}
+
+impl PacketPhase {
+	/// Return the serialized phase name.
+	pub const fn as_str(self) -> &'static str {
+		match self {
+			Self::HeaderParse => "header_parse",
+			Self::Routing => "routing",
+			Self::Scheduling => "scheduling",
+			Self::HeaderUnprotect => "header_unprotect",
+			Self::PayloadDecrypt => "payload_decrypt",
+			Self::FrameProcess => "frame_process",
+			Self::FrameEncode => "frame_encode",
+			Self::PacketEncrypt => "packet_encrypt",
+		}
+	}
 }
 
 /// Whether a packet phase record starts or completes work.
@@ -122,6 +138,7 @@ impl StreamFrame {
 
 /// Fields shared by every record for one QUIC packet.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PacketEvent {
 	/// Monotonic timestamp in nanoseconds from the local process clock.
 	pub timestamp_ns: u64,
@@ -146,10 +163,12 @@ pub struct PacketEvent {
 
 /// One boundary of a measured packet phase.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PacketPhaseEvent {
-	/// Packet metadata at this phase boundary.
-	#[serde(flatten)]
-	pub packet: PacketEvent,
+	/// Monotonic timestamp in nanoseconds from the local process clock.
+	pub timestamp_ns: u64,
+	/// Packet lifecycle identifier from [`PacketEvent::trace_id`].
+	pub trace_id: u64,
 	/// Packet lifecycle phase being measured.
 	pub phase: PacketPhase,
 	/// Whether this boundary starts or completes the phase.
@@ -161,10 +180,12 @@ pub struct PacketPhaseEvent {
 
 /// STREAM frame mapping emitted as a child of one packet trace.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StreamFrameEvent {
-	/// Packet metadata when the STREAM frame was processed.
-	#[serde(flatten)]
-	pub packet: PacketEvent,
+	/// Monotonic timestamp in nanoseconds from the local process clock.
+	pub timestamp_ns: u64,
+	/// Packet lifecycle identifier from [`PacketEvent::trace_id`].
+	pub trace_id: u64,
 	/// QUIC stream identifier.
 	pub stream_id: u64,
 	/// Inclusive stream byte offset.
@@ -177,10 +198,21 @@ pub struct StreamFrameEvent {
 
 /// Packet completion record with an explicit result.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PacketEndEvent {
-	/// Final packet metadata.
-	#[serde(flatten)]
-	pub packet: PacketEvent,
+	/// Monotonic completion timestamp in nanoseconds.
+	pub timestamp_ns: u64,
+	/// Packet lifecycle identifier from [`PacketEvent::trace_id`].
+	pub trace_id: u64,
+	/// QUIC packet number discovered during processing.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub packet_number: Option<u64>,
+	/// QUIC packet number space discovered during processing.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub packet_space: Option<PacketSpace>,
+	/// Final encoded packet length in bytes.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub byte_len: Option<usize>,
 	/// Result of processing the packet.
 	pub outcome: PacketOutcome,
 }
@@ -200,7 +232,8 @@ pub struct PacketPhaseTrace(Option<PacketPhaseTraceState>);
 
 struct PacketPhaseTraceState {
 	handle: Handle,
-	packet: PacketEvent,
+	trace_id: u64,
+	start_ns: u64,
 	phase: PacketPhase,
 }
 
@@ -277,17 +310,17 @@ impl PacketTrace {
 		let Some(state) = &self.0 else {
 			return PacketPhaseTrace::disabled();
 		};
-		let mut packet = state.packet.clone();
-		packet.timestamp_ns = timestamp_ns;
 		state.handle.emit(Event::PacketPhase(PacketPhaseEvent {
-			packet: packet.clone(),
+			timestamp_ns,
+			trace_id: state.packet.trace_id,
 			phase,
 			edge: PhaseEdge::Start,
 			outcome: None,
 		}));
 		PacketPhaseTrace(Some(PacketPhaseTraceState {
 			handle: state.handle.clone(),
-			packet,
+			trace_id: state.packet.trace_id,
+			start_ns: timestamp_ns,
 			phase,
 		}))
 	}
@@ -297,10 +330,9 @@ impl PacketTrace {
 		let Some(state) = &self.0 else {
 			return;
 		};
-		let mut packet = state.packet.clone();
-		packet.timestamp_ns = now_ns();
 		state.handle.emit(Event::StreamFrame(StreamFrameEvent {
-			packet,
+			timestamp_ns: now_ns(),
+			trace_id: state.packet.trace_id,
 			stream_id: frame.stream_id,
 			offset_start: frame.offset_start,
 			offset_end: frame.offset_end,
@@ -318,9 +350,14 @@ impl PacketTrace {
 
 impl PacketTraceState {
 	fn emit_end(self, outcome: PacketOutcome) {
-		let mut packet = self.packet;
-		packet.timestamp_ns = now_ns();
-		self.handle.emit(Event::PacketEnd(PacketEndEvent { packet, outcome }));
+		self.handle.emit(Event::PacketEnd(PacketEndEvent {
+			timestamp_ns: now_ns(),
+			trace_id: self.packet.trace_id,
+			packet_number: self.packet.packet_number,
+			packet_space: self.packet.packet_space,
+			byte_len: self.packet.byte_len,
+			outcome,
+		}));
 	}
 }
 
@@ -356,11 +393,10 @@ impl PacketPhaseTraceState {
 	}
 
 	fn emit_done_at(self, outcome: PacketOutcome, timestamp_ns: u64) {
-		let mut packet = self.packet;
-		debug_assert!(timestamp_ns >= packet.timestamp_ns);
-		packet.timestamp_ns = timestamp_ns;
+		debug_assert!(timestamp_ns >= self.start_ns);
 		self.handle.emit(Event::PacketPhase(PacketPhaseEvent {
-			packet,
+			timestamp_ns,
+			trace_id: self.trace_id,
 			phase: self.phase,
 			edge: PhaseEdge::Done,
 			outcome: Some(outcome),
