@@ -46,7 +46,7 @@ pub(super) struct StreamFrame {
 }
 
 pub(super) struct Trace {
-	pub objects: BTreeMap<u64, LogicalObject>,
+	pub objects: BTreeMap<moq_trace::LogicalId, LogicalObject>,
 	pub packets: BTreeMap<u64, PacketLifecycle>,
 	pub frames: Vec<StreamFrame>,
 }

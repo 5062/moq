@@ -360,9 +360,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut object_id = 0;
 
 		loop {
+			let frame = group.next_frame_identity();
 			let mut context = trace::ObjectContext::new(
 				trace::Direction::Tx,
 				trace::ObjectIdentity::new(msg.track_alias, msg.group_id, object_id),
+				trace::LogicalId::new(frame.group, frame.frame),
 			)
 			.with_stream_offset_start(stream.offset());
 			if let Some(stream_id) = stream.stream_id() {

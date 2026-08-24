@@ -1,6 +1,7 @@
 //! Raw JSONL tracing for MoQ relay object and QUIC packet latency.
 
 use std::fs::File;
+use std::hash::BuildHasher;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -138,7 +139,7 @@ pub struct ObjectEvent {
 	/// Process-unique lifecycle identifier used by child and completion records.
 	pub trace_id: u64,
 	/// Process-unique identity shared by ingress and every outbound copy.
-	pub logical_id: u64,
+	pub logical_id: LogicalId,
 	/// Process-local MoQ session ID when available.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub session_id: Option<u64>,
@@ -163,6 +164,37 @@ pub struct ObjectEvent {
 	pub stream_offset_start: Option<u64>,
 	/// Sampling rate active for this event.
 	pub sample_rate: u64,
+}
+
+/// Identity shared by ingress and every outbound copy of one logical object.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogicalId {
+	group: u64,
+	frame: u64,
+}
+
+impl LogicalId {
+	/// Create an identity from a process-unique group instance and frame ordinal.
+	pub fn new(group: u64, frame: u64) -> Self {
+		Self { group, frame }
+	}
+
+	/// Return the process-unique group instance.
+	pub fn group(self) -> u64 {
+		self.group
+	}
+
+	/// Return the zero-based frame ordinal within the group.
+	pub fn frame(self) -> u64 {
+		self.frame
+	}
+}
+
+impl std::fmt::Display for LogicalId {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(formatter, "{}:{}", self.group, self.frame)
+	}
 }
 
 /// Final metadata emitted when a MoQ object lifecycle completes.
@@ -251,7 +283,7 @@ impl ObjectIdentity {
 /// Stable metadata known before a moq-transport object trace starts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectContext {
-	logical_id: Option<u64>,
+	logical_id: LogicalId,
 	session_id: Option<u64>,
 	connection_id: Option<u64>,
 	direction: Direction,
@@ -265,9 +297,9 @@ pub struct ObjectContext {
 
 impl ObjectContext {
 	/// Create metadata for one moq-transport object.
-	pub fn new(direction: Direction, identity: ObjectIdentity) -> Self {
+	pub fn new(direction: Direction, identity: ObjectIdentity, logical_id: LogicalId) -> Self {
 		Self {
-			logical_id: None,
+			logical_id,
 			session_id: None,
 			connection_id: None,
 			direction,
@@ -278,12 +310,6 @@ impl ObjectContext {
 			stream_offset_start: None,
 			payload_bytes: 0,
 		}
-	}
-
-	/// Attach the identity shared by ingress and outbound copies.
-	pub fn with_logical_id(mut self, logical_id: u64) -> Self {
-		self.logical_id = Some(logical_id);
-		self
 	}
 
 	/// Attach a process-local trace session identifier.
@@ -534,7 +560,7 @@ struct Inner {
 	packet_seen: AtomicU64,
 	socket_seen: AtomicU64,
 	next_trace_id: AtomicU64,
-	next_logical_id: AtomicU64,
+	object_hasher: std::collections::hash_map::RandomState,
 	emitted: AtomicU64,
 	dropped: AtomicU64,
 	writer_failed: Arc<AtomicBool>,
@@ -588,27 +614,19 @@ impl Handle {
 		self
 	}
 
-	fn object_sample_rate(&self, logical_id: u64) -> Option<u64> {
+	fn object_sample_rate(&self, logical_id: LogicalId) -> Option<u64> {
 		let inner = self.inner.as_ref()?;
 		let sample = inner.config.object_sample;
-		if logical_id % sample == sample - 1 {
+		if inner.object_hasher.hash_one(logical_id) % sample == sample - 1 {
 			Some(sample)
 		} else {
 			None
 		}
 	}
 
-	/// Allocate an identity that can be propagated from ingress to outbound copies.
-	pub fn next_object_id(&self) -> u64 {
-		self.inner
-			.as_ref()
-			.map(|inner| inner.next_logical_id.fetch_add(1, Ordering::Relaxed))
-			.unwrap_or_default()
-	}
-
 	/// Start a moq-transport object trace after applying object sampling.
 	pub fn object(&self, context: ObjectContext) -> ObjectTrace {
-		let logical_id = context.logical_id.unwrap_or_else(|| self.next_object_id());
+		let logical_id = context.logical_id;
 		let Some(sample_rate) = self.object_sample_rate(logical_id) else {
 			return ObjectTrace::disabled();
 		};
@@ -704,7 +722,7 @@ impl Inner {
 			packet_seen: AtomicU64::new(0),
 			socket_seen: AtomicU64::new(0),
 			next_trace_id: AtomicU64::new(1),
-			next_logical_id: AtomicU64::new(1),
+			object_hasher: std::collections::hash_map::RandomState::new(),
 			emitted: AtomicU64::new(0),
 			dropped: AtomicU64::new(0),
 			writer_failed,

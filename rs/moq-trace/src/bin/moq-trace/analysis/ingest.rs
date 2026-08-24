@@ -155,7 +155,7 @@ fn finish(objects: ObjectBuilder, packets: PacketBuilder, frames: Vec<StreamFram
 	if packets.phase_starts.values().any(|starts| !starts.is_empty()) {
 		bail!("trace contains incomplete packet phases");
 	}
-	let mut logical = BTreeMap::<u64, (Option<ObjectLifecycle>, Vec<ObjectLifecycle>)>::new();
+	let mut logical = BTreeMap::<moq_trace::LogicalId, (Option<ObjectLifecycle>, Vec<ObjectLifecycle>)>::new();
 	for (trace_id, start) in objects.starts {
 		let end = objects
 			.ends

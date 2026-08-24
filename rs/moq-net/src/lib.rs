@@ -141,23 +141,29 @@ pub mod trace {
 		}
 	}
 
+	/// No-op logical object identity used when tracing is disabled.
+	#[derive(Clone, Copy)]
+	pub struct LogicalId;
+
+	impl LogicalId {
+		/// Create a no-op identity from a group instance and frame ordinal.
+		pub fn new(_group: u64, _frame: u64) -> Self {
+			Self
+		}
+	}
+
 	/// No-op metadata used when the `trace` feature is disabled.
 	#[derive(Clone)]
 	pub struct ObjectContext;
 
 	impl ObjectContext {
 		/// Create no-op metadata for one object.
-		pub fn new(_direction: Direction, _identity: ObjectIdentity) -> Self {
+		pub fn new(_direction: Direction, _identity: ObjectIdentity, _logical_id: LogicalId) -> Self {
 			Self
 		}
 
 		/// Ignore an optional session identifier.
 		pub fn with_session_id(self, _session_id: u64) -> Self {
-			self
-		}
-
-		/// Ignore an identity shared by ingress and outbound copies.
-		pub fn with_logical_id(self, _logical_id: u64) -> Self {
 			self
 		}
 
@@ -247,11 +253,6 @@ pub mod trace {
 		/// Ignore allocation of a process-local session identifier.
 		pub fn with_new_session_id(self) -> Self {
 			self
-		}
-
-		/// Return the no-op logical object identity.
-		pub fn next_object_id(&self) -> u64 {
-			0
 		}
 
 		/// Return a no-op trace token for one object.

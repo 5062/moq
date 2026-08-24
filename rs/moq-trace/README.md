@@ -105,9 +105,10 @@ MoQ object phases follow the same scoped shape: a `phase` and `edge` pair, with 
 `outcome` on done edges. The phase values are `header_parse`, `create`,
 `payload_read`, `frame_commit`, `clone`, `header_encode`, and `payload_write`.
 Object outcomes are `success`, `failed`, and `abandoned`. Each lifecycle has a
-`trace_id`. Ingress and every outbound copy share a process-unique `logical_id`,
-so fan-out is joined directly instead of inferred from timestamps. Wire identity
-within one lifecycle is:
+`trace_id`. Ingress and every outbound copy share a structured `logical_id`
+containing a process-unique group instance and the frame ordinal within that
+group. Fan-out is joined directly instead of inferred from timestamps. Wire
+identity within one lifecycle is:
 
 ```text
 (session_id, track_alias, group_id, object_id)

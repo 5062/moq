@@ -170,6 +170,7 @@ mod tests {
 		let object = trace.object(moq_trace::ObjectContext::new(
 			moq_trace::Direction::Tx,
 			moq_trace::ObjectIdentity::new(1, 2, 3),
+			moq_trace::LogicalId::new(4, 5),
 		));
 		object.finish();
 
@@ -182,7 +183,8 @@ mod tests {
 		.unwrap();
 
 		let output = std::fs::read_to_string(path).unwrap();
-		assert_eq!(output.lines().count(), 2);
+		assert_eq!(output.lines().count(), 3);
+		assert!(output.lines().next().unwrap().contains(r#""type":"trace_header""#));
 		assert!(output.ends_with('\n'));
 	}
 }

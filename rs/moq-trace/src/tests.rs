@@ -38,10 +38,9 @@ fn writer_starts_with_exact_header() {
 #[test]
 fn object_children_only_reference_the_start_record() {
 	let (_directory, path, handle) = trace();
-	let logical_id = handle.next_object_id();
+	let logical_id = LogicalId::new(9, 4);
 	let mut object = handle.object(
-		ObjectContext::new(Direction::Rx, ObjectIdentity::new(11, 12, 13))
-			.with_logical_id(logical_id)
+		ObjectContext::new(Direction::Rx, ObjectIdentity::new(11, 12, 13), logical_id)
 			.with_session_id(7)
 			.with_connection_id(42)
 			.with_stream_id(16)
@@ -58,6 +57,9 @@ fn object_children_only_reference_the_start_record() {
 	assert_eq!(events.len(), 5);
 	let trace_id = events[1].trace_id().unwrap();
 	assert!(events[2..].iter().all(|event| event.trace_id() == Some(trace_id)));
+	let start = serde_json::to_value(&events[1]).unwrap();
+	assert_eq!(start["logical_id"]["group"], 9);
+	assert_eq!(start["logical_id"]["frame"], 4);
 	assert!(matches!(
 		events.last(),
 		Some(Event::MoqObjectEnd(ObjectEndEvent {
@@ -81,16 +83,22 @@ fn logical_identity_samples_ingress_and_copies_together() {
 		..Config::default()
 	})
 	.unwrap();
-	let sampled = handle.next_object_id();
+	let sampled = (0..)
+		.map(|frame| LogicalId::new(9, frame))
+		.find(|logical_id| handle.object_sample_rate(*logical_id).is_some())
+		.unwrap();
 	for direction in [Direction::Rx, Direction::Tx, Direction::Tx] {
 		handle
-			.object(ObjectContext::new(direction, ObjectIdentity::new(1, 2, 3)).with_logical_id(sampled))
+			.object(ObjectContext::new(direction, ObjectIdentity::new(1, 2, 3), sampled))
 			.finish();
 	}
-	let skipped = handle.next_object_id();
+	let skipped = (0..)
+		.map(|frame| LogicalId::new(10, frame))
+		.find(|logical_id| handle.object_sample_rate(*logical_id).is_none())
+		.unwrap();
 	for direction in [Direction::Rx, Direction::Tx] {
 		handle
-			.object(ObjectContext::new(direction, ObjectIdentity::new(1, 2, 4)).with_logical_id(skipped))
+			.object(ObjectContext::new(direction, ObjectIdentity::new(1, 2, 4), skipped))
 			.finish();
 	}
 	drop(handle);
@@ -138,7 +146,11 @@ fn strict_records_reject_unknown_fields() {
 fn disabled_handle_is_noop() {
 	let handle = Handle::new(Config::disabled()).unwrap();
 	handle
-		.object(ObjectContext::new(Direction::Rx, ObjectIdentity::new(1, 2, 3)))
+		.object(ObjectContext::new(
+			Direction::Rx,
+			ObjectIdentity::new(1, 2, 3),
+			LogicalId::new(4, 5),
+		))
 		.finish();
 	assert_eq!(handle.emitted(), 0);
 }
