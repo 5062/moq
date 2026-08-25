@@ -76,9 +76,8 @@ class ArtifactFiles(StrictModel):
 
 
 class Manifest(StrictModel):
-    """Versioned Rust analyzer manifest."""
+    """Rust analyzer manifest."""
 
-    artifact_revision: Literal[1]
     files: ArtifactFiles
     statistics: dict[str, Statistics]
     quic_object_statistics: dict[str, Statistics]

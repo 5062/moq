@@ -17,7 +17,6 @@ class AnalysisBundleTests(unittest.TestCase):
 
     def write_bundle(self, path: pathlib.Path, extra: dict | None = None) -> None:
         manifest = {
-            "artifact_revision": 1,
             "files": {
                 "objects": "objects.csv",
                 "quic_objects": "quic_objects.csv",
@@ -40,7 +39,7 @@ class AnalysisBundleTests(unittest.TestCase):
             "metric,direction,connection_id,trace_id,occurrence,elapsed_ms,latency_us\n"
         )
 
-    def test_loads_exact_revision_one_bundle(self) -> None:
+    def test_loads_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory)
             self.write_bundle(path)

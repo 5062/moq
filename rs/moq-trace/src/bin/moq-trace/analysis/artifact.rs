@@ -7,8 +7,6 @@ use serde::Serialize;
 
 use super::model::Report;
 
-const ARTIFACT_REVISION: u32 = 1;
-
 #[derive(Serialize)]
 struct Files {
 	objects: &'static str,
@@ -18,7 +16,6 @@ struct Files {
 
 #[derive(Serialize)]
 struct Manifest<'a> {
-	artifact_revision: u32,
 	files: Files,
 	#[serde(flatten)]
 	report: &'a Report,
@@ -42,7 +39,6 @@ pub(super) fn publish(output: &Path, report: &Report) -> Result<()> {
 	write_csv(&staging.path().join("quic_objects.csv"), &report.quic_object_samples)?;
 	write_csv(&staging.path().join("quic_packets.csv"), &report.packet_samples)?;
 	let manifest = Manifest {
-		artifact_revision: ARTIFACT_REVISION,
 		files: Files {
 			objects: "objects.csv",
 			quic_objects: "quic_objects.csv",

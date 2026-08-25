@@ -180,7 +180,7 @@ moq-trace analyze relay.jsonl \
 ```
 
 The analyzer atomically publishes `objects.csv`, `quic_objects.csv`,
-`quic_packets.csv`, and a versioned `manifest.json` to a new output directory.
+`quic_packets.csv`, and a `manifest.json` to a new output directory.
 It refuses to replace an existing bundle.
 
 To compare delivery-copy latency across subscriber counts, run each workload in
