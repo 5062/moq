@@ -72,6 +72,18 @@ class AnalysisBundleTests(unittest.TestCase):
             self.assertEqual(analysis.samples[0].group_id, 7)
             self.assertEqual(analysis.samples[0].latency_us, 42.25)
 
+    def test_rejects_invalid_packet_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory)
+            self.write_bundle(path)
+            (path / "quic_packets.csv").write_text(
+                "metric,direction,connection_id,trace_id,occurrence,elapsed_ms,latency_us\n"
+                "packet_span,sideways,1,2,0,12.5,42.25\n"
+            )
+
+            with self.assertRaises(AnalysisError):
+                load_analysis(path)
+
 
 if __name__ == "__main__":
     unittest.main()

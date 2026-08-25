@@ -4,9 +4,9 @@ import csv
 import dataclasses
 import json
 import pathlib
-from typing import Literal
+from typing import Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 Direction = Literal["rx", "tx"]
 
@@ -88,8 +88,7 @@ class Manifest(StrictModel):
     timelines: tuple[ObjectTimeline, ...]
 
 
-@dataclasses.dataclass(frozen=True)
-class Sample:
+class Sample(StrictModel):
     """One Rust-produced object latency sample."""
 
     group_id: int
@@ -100,8 +99,7 @@ class Sample:
     latency_us: float
 
 
-@dataclasses.dataclass(frozen=True)
-class PacketSample:
+class PacketSample(StrictModel):
     """One Rust-produced packet latency sample."""
 
     metric: str
@@ -132,56 +130,22 @@ class AnalysisError(RuntimeError):
     """The Rust analyzer bundle is invalid or cannot be read."""
 
 
-def _read_object_samples(path: pathlib.Path) -> tuple[Sample, ...]:
-    with path.open(newline="") as handle:
-        reader = csv.DictReader(handle)
-        expected = ("group_id", "object_id", "metric", "copy_ordinal", "elapsed_ms", "latency_us")
-        if tuple(reader.fieldnames or ()) != expected:
-            raise ValueError(f"{path} has unexpected columns")
-        return tuple(
-            Sample(
-                group_id=int(row["group_id"]),
-                object_id=int(row["object_id"]),
-                metric=row["metric"],
-                copy_ordinal=int(row["copy_ordinal"]),
-                elapsed_ms=float(row["elapsed_ms"]),
-                latency_us=float(row["latency_us"]),
-            )
-            for row in reader
-        )
+Model = TypeVar("Model", bound=StrictModel)
+SAMPLE_ROWS = TypeAdapter(tuple[Sample, ...])
+PACKET_SAMPLE_ROWS = TypeAdapter(tuple[PacketSample, ...])
 
 
-def _read_packet_samples(path: pathlib.Path) -> tuple[PacketSample, ...]:
+def _read_rows(
+    path: pathlib.Path,
+    model: type[Model],
+    adapter: TypeAdapter[tuple[Model, ...]],
+) -> tuple[Model, ...]:
     with path.open(newline="") as handle:
         reader = csv.DictReader(handle)
-        expected = (
-            "metric",
-            "direction",
-            "connection_id",
-            "trace_id",
-            "occurrence",
-            "elapsed_ms",
-            "latency_us",
-        )
+        expected = tuple(model.model_fields)
         if tuple(reader.fieldnames or ()) != expected:
             raise ValueError(f"{path} has unexpected columns")
-        rows = []
-        for row in reader:
-            direction = row["direction"]
-            if direction not in ("rx", "tx"):
-                raise ValueError(f"{path} has invalid direction {direction!r}")
-            rows.append(
-                PacketSample(
-                    metric=row["metric"],
-                    direction=direction,
-                    connection_id=int(row["connection_id"]),
-                    trace_id=int(row["trace_id"]),
-                    occurrence=int(row["occurrence"]),
-                    elapsed_ms=float(row["elapsed_ms"]),
-                    latency_us=float(row["latency_us"]),
-                )
-            )
-        return tuple(rows)
+        return adapter.validate_python(tuple(reader))
 
 
 def load_analysis(output: pathlib.Path) -> Analysis:
@@ -190,13 +154,21 @@ def load_analysis(output: pathlib.Path) -> Analysis:
     try:
         manifest = Manifest.model_validate_json((output / "manifest.json").read_text())
         return Analysis(
-            samples=_read_object_samples(output / manifest.files.objects),
+            samples=_read_rows(output / manifest.files.objects, Sample, SAMPLE_ROWS),
             statistics={key: value.model_dump() for key, value in manifest.statistics.items()},
-            quic_object_samples=_read_object_samples(output / manifest.files.quic_objects),
+            quic_object_samples=_read_rows(
+                output / manifest.files.quic_objects,
+                Sample,
+                SAMPLE_ROWS,
+            ),
             quic_object_statistics={
                 key: value.model_dump() for key, value in manifest.quic_object_statistics.items()
             },
-            packet_samples=_read_packet_samples(output / manifest.files.quic_packets),
+            packet_samples=_read_rows(
+                output / manifest.files.quic_packets,
+                PacketSample,
+                PACKET_SAMPLE_ROWS,
+            ),
             packet_statistics={
                 key: value.model_dump() for key, value in manifest.packet_statistics.items()
             },

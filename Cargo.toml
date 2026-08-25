@@ -98,9 +98,11 @@ moq-transcode = { version = "0.0.1", path = "rs/moq-transcode", default-features
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 moq-vaapi = "0.0.2"
 moq-video = { version = "0.0.6", path = "rs/moq-video", default-features = false }
+parse-size = "1.1.0"
 qmux = { version = "0.4.0", default-features = false }
 rangemap = "1.8.0"
 serde = { version = "1", features = ["derive"] }
+strip-ansi-escapes = "0.2.1"
 tempfile = "3"
 tokio = "1.48"
 web-async = { version = "0.1.5", features = ["tracing"] }

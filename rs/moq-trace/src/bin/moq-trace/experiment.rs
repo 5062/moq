@@ -612,7 +612,7 @@ fn wait_for_log(
 		if let Ok(mut file) = File::open(path) {
 			file.read_to_string(&mut contents)?;
 		}
-		let contents = strip_ansi(&contents);
+		let contents = strip_ansi(&contents)?;
 		if matches(&contents) {
 			return Ok(());
 		}
@@ -633,21 +633,8 @@ fn wait_for_log(
 	}
 }
 
-fn strip_ansi(value: &str) -> String {
-	let mut output = String::with_capacity(value.len());
-	let mut characters = value.chars();
-	while let Some(character) = characters.next() {
-		if character == '\u{1b}' && characters.next() == Some('[') {
-			for character in characters.by_ref() {
-				if ('@'..='~').contains(&character) {
-					break;
-				}
-			}
-		} else {
-			output.push(character);
-		}
-	}
-	output
+fn strip_ansi(value: &str) -> Result<String> {
+	String::from_utf8(strip_ansi_escapes::strip(value)).context("ANSI stripping produced invalid UTF-8")
 }
 
 #[cfg(unix)]
@@ -945,23 +932,11 @@ fn format_byte_size(value: u64) -> String {
 }
 
 fn parse_byte_size(value: &str) -> Result<NonZeroU64, String> {
-	let token = value.trim().to_ascii_lowercase();
-	let (number, multiplier) = ["kib", "kb", "k", "b"]
-		.into_iter()
-		.find_map(|suffix| {
-			token
-				.strip_suffix(suffix)
-				.map(|number| (number, if suffix == "b" { 1 } else { 1024 }))
-		})
-		.unwrap_or((&token, 1));
-	let number = number
-		.parse::<u64>()
-		.map_err(|_| format!("invalid byte size {value:?}"))?;
-	let bytes = number
-		.checked_mul(multiplier)
-		.and_then(NonZeroU64::new)
-		.ok_or_else(|| format!("byte size must be positive and fit in u64: {value:?}"))?;
-	Ok(bytes)
+	let bytes = parse_size::Config::new()
+		.with_binary()
+		.parse_size(value)
+		.map_err(|error| format!("invalid byte size {value:?}: {error}"))?;
+	NonZeroU64::new(bytes).ok_or_else(|| format!("byte size must be positive: {value:?}"))
 }
 
 #[cfg(test)]
@@ -1091,6 +1066,6 @@ mod tests {
 
 	#[test]
 	fn strips_ansi_control_sequences() {
-		assert_eq!(strip_ansi("\u{1b}[32mlistening\u{1b}[0m"), "listening");
+		assert_eq!(strip_ansi("\u{1b}[32mlistening\u{1b}[0m").unwrap(), "listening");
 	}
 }
