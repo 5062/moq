@@ -12,6 +12,8 @@ mod ingest;
 mod metrics;
 mod model;
 
+pub(crate) use model::{Metric, Report, Sample, Statistics};
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Options {
 	pub object_size: NonZeroU64,
@@ -20,8 +22,9 @@ pub(crate) struct Options {
 	pub cooldown: Duration,
 }
 
-pub(crate) fn run(input: &Path, output: &Path, options: Options) -> Result<()> {
+pub(crate) fn run(input: &Path, output: &Path, options: Options) -> Result<Report> {
 	let trace = ingest::read(input)?;
 	let report = metrics::analyze(&trace, options)?;
-	artifact::publish(output, &report)
+	artifact::publish(output, &report)?;
+	Ok(report)
 }

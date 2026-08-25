@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import csv
+import dataclasses
 import json
 import pathlib
 from typing import Literal
 
-import polars as pl
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 Direction = Literal["rx", "tx"]
@@ -87,16 +88,40 @@ class Manifest(StrictModel):
     timelines: tuple[ObjectTimeline, ...]
 
 
-class Analysis(StrictModel):
-    """Validated Rust-produced latency samples and aggregate trace counts."""
+@dataclasses.dataclass(frozen=True)
+class Sample:
+    """One Rust-produced object latency sample."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
+    group_id: int
+    object_id: int
+    metric: str
+    copy_ordinal: int
+    elapsed_ms: float
+    latency_us: float
 
-    samples: pl.DataFrame
+
+@dataclasses.dataclass(frozen=True)
+class PacketSample:
+    """One Rust-produced packet latency sample."""
+
+    metric: str
+    direction: Direction
+    connection_id: int
+    trace_id: int
+    occurrence: int
+    elapsed_ms: float
+    latency_us: float
+
+
+@dataclasses.dataclass(frozen=True)
+class Analysis:
+    """Validated Rust-produced samples and aggregate trace counts."""
+
+    samples: tuple[Sample, ...]
     statistics: dict[str, dict[str, float | int]]
-    quic_object_samples: pl.DataFrame
+    quic_object_samples: tuple[Sample, ...]
     quic_object_statistics: dict[str, dict[str, float | int]]
-    packet_samples: pl.DataFrame
+    packet_samples: tuple[PacketSample, ...]
     packet_statistics: dict[str, dict[str, float | int]]
     packet_count: int
     group_count: int
@@ -104,22 +129,74 @@ class Analysis(StrictModel):
 
 
 class AnalysisError(RuntimeError):
-    """The Rust trace analyzer failed or produced invalid artifacts."""
+    """The Rust analyzer bundle is invalid or cannot be read."""
+
+
+def _read_object_samples(path: pathlib.Path) -> tuple[Sample, ...]:
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        expected = ("group_id", "object_id", "metric", "copy_ordinal", "elapsed_ms", "latency_us")
+        if tuple(reader.fieldnames or ()) != expected:
+            raise ValueError(f"{path} has unexpected columns")
+        return tuple(
+            Sample(
+                group_id=int(row["group_id"]),
+                object_id=int(row["object_id"]),
+                metric=row["metric"],
+                copy_ordinal=int(row["copy_ordinal"]),
+                elapsed_ms=float(row["elapsed_ms"]),
+                latency_us=float(row["latency_us"]),
+            )
+            for row in reader
+        )
+
+
+def _read_packet_samples(path: pathlib.Path) -> tuple[PacketSample, ...]:
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        expected = (
+            "metric",
+            "direction",
+            "connection_id",
+            "trace_id",
+            "occurrence",
+            "elapsed_ms",
+            "latency_us",
+        )
+        if tuple(reader.fieldnames or ()) != expected:
+            raise ValueError(f"{path} has unexpected columns")
+        rows = []
+        for row in reader:
+            direction = row["direction"]
+            if direction not in ("rx", "tx"):
+                raise ValueError(f"{path} has invalid direction {direction!r}")
+            rows.append(
+                PacketSample(
+                    metric=row["metric"],
+                    direction=direction,
+                    connection_id=int(row["connection_id"]),
+                    trace_id=int(row["trace_id"]),
+                    occurrence=int(row["occurrence"]),
+                    elapsed_ms=float(row["elapsed_ms"]),
+                    latency_us=float(row["latency_us"]),
+                )
+            )
+        return tuple(rows)
 
 
 def load_analysis(output: pathlib.Path) -> Analysis:
-    """Load and strictly validate one atomic artifact bundle."""
+    """Load and strictly validate one atomic Rust analyzer bundle."""
 
     try:
         manifest = Manifest.model_validate_json((output / "manifest.json").read_text())
         return Analysis(
-            samples=pl.read_csv(output / manifest.files.objects),
+            samples=_read_object_samples(output / manifest.files.objects),
             statistics={key: value.model_dump() for key, value in manifest.statistics.items()},
-            quic_object_samples=pl.read_csv(output / manifest.files.quic_objects),
+            quic_object_samples=_read_object_samples(output / manifest.files.quic_objects),
             quic_object_statistics={
                 key: value.model_dump() for key, value in manifest.quic_object_statistics.items()
             },
-            packet_samples=pl.read_csv(output / manifest.files.quic_packets),
+            packet_samples=_read_packet_samples(output / manifest.files.quic_packets),
             packet_statistics={
                 key: value.model_dump() for key, value in manifest.packet_statistics.items()
             },
@@ -127,5 +204,5 @@ def load_analysis(output: pathlib.Path) -> Analysis:
             group_count=manifest.group_count,
             timelines=manifest.timelines,
         )
-    except (OSError, ValidationError, json.JSONDecodeError, pl.exceptions.PolarsError) as error:
+    except (OSError, ValidationError, ValueError, csv.Error, json.JSONDecodeError) as error:
         raise AnalysisError(f"failed to load analyzer artifacts from {output}: {error}") from error

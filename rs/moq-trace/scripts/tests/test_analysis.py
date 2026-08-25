@@ -57,6 +57,21 @@ class AnalysisBundleTests(unittest.TestCase):
             with self.assertRaises(AnalysisError):
                 load_analysis(path)
 
+    def test_reads_object_samples_without_dataframe_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory)
+            self.write_bundle(path)
+            (path / "objects.csv").write_text(
+                "group_id,object_id,metric,copy_ordinal,elapsed_ms,latency_us\n"
+                "7,3,full_span,1,12.5,42.25\n"
+            )
+
+            analysis = load_analysis(path)
+
+            self.assertEqual(len(analysis.samples), 1)
+            self.assertEqual(analysis.samples[0].group_id, 7)
+            self.assertEqual(analysis.samples[0].latency_us, 42.25)
+
 
 if __name__ == "__main__":
     unittest.main()

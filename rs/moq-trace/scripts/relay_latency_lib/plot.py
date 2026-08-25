@@ -7,12 +7,13 @@ from typing import cast
 import matplotlib
 
 matplotlib.use("Agg")
-import polars as pl
 from matplotlib import pyplot as plt  # noqa: E402
 from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 
-from .analysis import Analysis, ObjectTimeline
+from .analysis import Analysis, ObjectTimeline, PacketSample, Sample
+
+Samples = tuple[Sample | PacketSample, ...]
 
 METRICS = {
     "full_span": "Full relay span",
@@ -53,7 +54,7 @@ class PlotOptions:
 class MetricPlot:
     """One metric layer and its plot presentation."""
 
-    samples: pl.DataFrame
+    samples: Samples
     statistics: dict[str, dict[str, float | int]]
     labels: dict[str, str]
     title: str
@@ -65,7 +66,7 @@ class CdfSeries:
 
     metric: str
     label: str
-    samples: pl.DataFrame
+    samples: Samples
     statistics: dict[str, dict[str, float | int]]
     color_index: int
     line_style: str
@@ -77,8 +78,8 @@ class PerCopyCdfRun:
     """Per-copy object latency samples for one comparison workload."""
 
     label: str
-    samples: pl.DataFrame
-    quic_object_samples: pl.DataFrame
+    samples: tuple[Sample, ...]
+    quic_object_samples: tuple[Sample, ...]
     statistics: dict[str, dict[str, float | int]]
     quic_object_statistics: dict[str, dict[str, float | int]]
 
@@ -129,7 +130,7 @@ def _plot_cdf_series(axis: Axes, series: CdfSeries) -> int:
     colors = cast(tuple[tuple[float, ...], ...], getattr(plt.get_cmap("tab10"), "colors"))
     color = colors[series.color_index]
     percentiles = (("p50", 0.50, "o"), ("p99", 0.99, "s"))
-    values_us = series.samples.filter(pl.col("metric") == series.metric)["latency_us"].to_numpy()
+    values_us = [sample.latency_us for sample in series.samples if sample.metric == series.metric]
     if len(values_us) == 0:
         raise ValueError(f"cannot plot CDF without {series.metric} samples")
     axis.ecdf(
@@ -308,8 +309,8 @@ def plot_metrics(
     if not present:
         raise ValueError("cannot plot a metric layer without samples")
     for index, metric in enumerate(present):
-        metric_samples = plot.samples.filter(pl.col("metric") == metric)
-        values_ms = (metric_samples["latency_us"] / 1_000).to_numpy()
+        metric_samples = [sample for sample in plot.samples if sample.metric == metric]
+        values_ms = [sample.latency_us / 1_000 for sample in metric_samples]
         axes[0].ecdf(
             values_ms,
             label=plot.labels[metric],
@@ -341,10 +342,10 @@ def plot_metrics(
     axes[1].grid(axis="y", alpha=0.25)
 
     for index, metric in enumerate(present):
-        metric_samples = plot.samples.filter(pl.col("metric") == metric)
+        metric_samples = [sample for sample in plot.samples if sample.metric == metric]
         axes[2].scatter(
-            (metric_samples["elapsed_ms"] / 1_000).to_numpy(),
-            (metric_samples["latency_us"] / 1_000).to_numpy(),
+            [sample.elapsed_ms / 1_000 for sample in metric_samples],
+            [sample.latency_us / 1_000 for sample in metric_samples],
             label=plot.labels[metric],
             color=colors[index],
             s=8,

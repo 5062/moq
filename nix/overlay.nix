@@ -75,6 +75,11 @@ let
     cargoExtraArgs = "-p moq-bench";
   };
 
+  moqTraceArgs = crateInfo ../rs/moq-trace/Cargo.toml // {
+    src = craneLib.cleanCargoSource ../.;
+    cargoExtraArgs = "-p moq-trace";
+  };
+
   libmoqInfo = crateInfo ../rs/libmoq/Cargo.toml;
 
   # The native libraries an external linker must pass alongside libmoq.a.
@@ -266,6 +271,8 @@ in
 
   moq-bench = craneLib.buildPackage moqBenchArgs;
   moq-bench-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqBenchArgs);
+
+  moq-trace = craneLib.buildPackage moqTraceArgs;
 
   moq-token = moqTokenPackage;
   moq-token-cli = moqTokenPackage;

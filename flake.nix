@@ -147,9 +147,7 @@
           (python3.withPackages (
             pythonPackages: with pythonPackages; [
               matplotlib
-              polars
               pydantic
-              typer
             ]
           ))
         ];
@@ -258,6 +256,7 @@
             moq-relay
             moq-cli
             moq-bench
+            moq-trace
             moq-token
             moq-token-cli
             moq-boy

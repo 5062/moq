@@ -156,18 +156,24 @@ live trace file while cached handle clones still exist.
 
 ## Relay latency analysis
 
-Run the local publisher, relay, and subscriber experiment with:
+Install the workspace binary once, then run the local publisher, relay, and
+subscriber experiment directly:
 
 ```sh
-python rs/moq-trace/scripts/relay_latency.py
+cargo install --path rs/moq-trace
+moq-trace experiment
 ```
 
-The experiment uses the feature-gated Rust analyzer in this package for trace
-validation, packet correlation, and metric calculation. Python only orchestrates
-the workload and renders plots. Analyze an existing trace directly with:
+The flake also exposes the binary as `.#moq-trace` for Nix profile or shell
+installation.
+
+Rust owns workload orchestration, trace validation, packet correlation, metric
+calculation, comparisons, summaries, and tabular artifacts. Python and
+Matplotlib only render figures from the Rust-produced artifact bundle. Analyze
+an existing trace directly with:
 
 ```sh
-cargo run -p moq-trace --features analyze -- analyze relay.jsonl \
+moq-trace analyze relay.jsonl \
   --output target/moq-trace/analysis \
   --object-size 16384 \
   --subscribers 1
@@ -181,7 +187,8 @@ To compare delivery-copy latency across subscriber counts, run each workload in
 sequence with one shared build:
 
 ```sh
-python rs/moq-trace/scripts/relay_latency.py --compare-subscribers 1,50,100
+moq-trace experiment \
+  --compare-subscribers 1,50,100
 ```
 
 The comparison directory contains one `subscribers-N` run directory per count,
@@ -194,7 +201,8 @@ drop lifecycle records during high-fanout runs.
 To compare per-copy latency across object sizes, use binary size suffixes:
 
 ```sh
-python rs/moq-trace/scripts/relay_latency.py --compare-object-sizes 16k,64k,256k
+moq-trace experiment \
+  --compare-object-sizes 16k,64k,256k
 ```
 
 This writes one `object-size-BYTES` run directory per size, plus
@@ -206,10 +214,18 @@ To test uncommitted instrumentation in a local Quinn checkout, override the
 workspace's pinned fork revision:
 
 ```sh
-python rs/moq-trace/scripts/relay_latency.py --quinn-path ~/quinn
+moq-trace experiment --quinn-path ~/quinn
 ```
 
 The selected build command is stored in `summary.json`.
+
+Plot generation can be skipped on a headless machine and repeated later without
+rerunning the workload:
+
+```sh
+moq-trace experiment --no-plot
+moq-trace plot target/moq-trace/RUN
+```
 
 Correlated object analysis requires `packet_sample = 1`, complete packet
 lifecycles, transport identity on every completed object, and complete STREAM

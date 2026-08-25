@@ -1,4 +1,4 @@
-//! Offline analysis for `moq-trace` JSONL files.
+//! Capture, analyze, compare, and plot `moq-trace` relay experiments.
 
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
@@ -8,9 +8,10 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 mod analysis;
+mod experiment;
 
 #[derive(Debug, Parser)]
-#[command(about = "Analyze MoQ relay trace files.")]
+#[command(about = "Capture and analyze MoQ relay latency traces.")]
 struct Args {
 	#[command(subcommand)]
 	command: Command,
@@ -38,6 +39,10 @@ enum Command {
 		#[arg(long, default_value = "0s", value_parser = humantime::parse_duration)]
 		cooldown: Duration,
 	},
+	/// Run one local relay workload or a workload comparison.
+	Experiment(experiment::Args),
+	/// Render Matplotlib figures from an existing experiment directory.
+	Plot(experiment::PlotArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -49,16 +54,21 @@ fn main() -> anyhow::Result<()> {
 			subscribers,
 			warmup,
 			cooldown,
-		} => analysis::run(
-			&input,
-			&output,
-			analysis::Options {
-				object_size,
-				subscribers,
-				warmup,
-				cooldown,
-			},
-		)
-		.with_context(|| format!("failed to analyze {}", input.display())),
+		} => {
+			analysis::run(
+				&input,
+				&output,
+				analysis::Options {
+					object_size,
+					subscribers,
+					warmup,
+					cooldown,
+				},
+			)
+			.with_context(|| format!("failed to analyze {}", input.display()))?;
+			Ok(())
+		}
+		Command::Experiment(args) => experiment::run(args),
+		Command::Plot(args) => experiment::plot(args),
 	}
 }

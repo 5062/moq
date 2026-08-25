@@ -52,7 +52,7 @@ pub(super) struct Trace {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct Sample {
+pub(crate) struct Sample {
 	pub group_id: u64,
 	pub object_id: u64,
 	pub metric: Metric,
@@ -62,7 +62,7 @@ pub(super) struct Sample {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct PacketSample {
+pub(crate) struct PacketSample {
 	pub metric: String,
 	pub direction: Direction,
 	pub connection_id: u64,
@@ -74,7 +74,7 @@ pub(super) struct PacketSample {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum Metric {
+pub(crate) enum Metric {
 	FullSpan,
 	QuicForwardStart,
 	QuicTailGap,
@@ -93,7 +93,7 @@ impl Metric {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct Statistics {
+pub(crate) struct Statistics {
 	pub count: usize,
 	pub mean: f64,
 	pub p50: f64,
@@ -103,7 +103,7 @@ pub(super) struct Statistics {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct TimelineSelection {
+pub(crate) struct TimelineSelection {
 	pub statistic: String,
 	pub target_us: f64,
 	pub group_id: u64,
@@ -112,7 +112,7 @@ pub(super) struct TimelineSelection {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct TimelineInterval {
+pub(crate) struct TimelineInterval {
 	pub direction: Direction,
 	pub session_id: u64,
 	pub phase: String,
@@ -122,14 +122,14 @@ pub(super) struct TimelineInterval {
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
-pub(super) struct TimelineCopy {
+pub(crate) struct TimelineCopy {
 	pub session_id: u64,
 	pub subscriber_ordinal: usize,
 	pub full_span_us: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct ObjectTimeline {
+pub(crate) struct ObjectTimeline {
 	pub selection: TimelineSelection,
 	pub intervals: Vec<TimelineInterval>,
 	pub first_copy: TimelineCopy,
@@ -137,8 +137,8 @@ pub(super) struct ObjectTimeline {
 	pub slowest_copy: TimelineCopy,
 }
 
-#[derive(Serialize)]
-pub(super) struct Report {
+#[derive(Debug, Serialize)]
+pub(crate) struct Report {
 	pub statistics: BTreeMap<String, Statistics>,
 	pub quic_object_statistics: BTreeMap<String, Statistics>,
 	pub packet_statistics: BTreeMap<String, Statistics>,
