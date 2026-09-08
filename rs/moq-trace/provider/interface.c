@@ -2,9 +2,17 @@
 #define LTTNG_UST_TRACEPOINT_DEFINE
 #include "events.h"
 
-void moq_trace_provider_init(void) {
-	/* rust-lld otherwise collects pointer entries reached only through ELF section boundaries. */
-	volatile void *tracepoints[] = {
+#if defined(__has_attribute)
+#if __has_attribute(retain)
+#define MOQ_TRACE_RETAIN __attribute__((used, retain))
+#endif
+#endif
+#ifndef MOQ_TRACE_RETAIN
+#define MOQ_TRACE_RETAIN __attribute__((used))
+#endif
+
+/* Keep these references alive when release linking performs section GC. */
+static void *volatile tracepoints[] MOQ_TRACE_RETAIN = {
 		&lttng_ust_tracepoint_ptr_moq_trace___moq_object_start,
 		&lttng_ust_tracepoint_ptr_moq_trace___moq_object_end,
 		&lttng_ust_tracepoint_ptr_moq_trace___moq_object_phase,
@@ -15,6 +23,8 @@ void moq_trace_provider_init(void) {
 		&lttng_ust_tracepoint_ptr_moq_trace___udp_socket_start,
 		&lttng_ust_tracepoint_ptr_moq_trace___udp_socket_end,
 	};
+
+void moq_trace_provider_init(void) {
 	(void) tracepoints;
 }
 
