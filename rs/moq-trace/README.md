@@ -58,12 +58,10 @@ multiple files.
 
 ## Output
 
-The primary output is native LTTng CTF. `babeltrace2` can read it directly, and
-the experiment runner also converts it to newline-delimited JSON for the
-existing analyzer. Every normalized JSON line has a `type` field. The first
-record is an exact schema and clock header. Monotonic `timestamp_ns` timestamps
-are useful for latency deltas inside one process, not for wall-clock comparison
-between hosts.
+The only trace output is native LTTng CTF. `babeltrace2` can inspect it directly,
+and `moq-trace analyze` reads it through the Babeltrace Python bindings.
+Monotonic `timestamp_ns` fields are useful for latency deltas inside one
+process, not for wall-clock comparison between hosts.
 
 For a captured session, inspect the native trace with:
 
@@ -71,31 +69,12 @@ For a captured session, inspect the native trace with:
 babeltrace2 /tmp/moq-relay.ctf
 ```
 
-The record types are:
+The provider emits these event types:
 
-- `trace_header`
 - `moq_object_start`, `moq_object_phase`, and `moq_object_end`
 - `quic_packet_start`, `quic_packet_phase`, and `quic_packet_end`
 - `quic_stream_frame`
 - `udp_socket_start` and `udp_socket_end`
-
-Example packet lifecycle:
-
-```json
-{"type":"trace_header","revision":1,"clock":"monotonic_ns"}
-{"type":"quic_packet_start","timestamp_ns":123456700,"trace_id":17,"connection_id":42,"direction":"tx","packet_number":9901,"packet_space":"data","sample_rate":1}
-{"type":"quic_packet_phase","timestamp_ns":123456710,"trace_id":17,"phase":"packet_encrypt","edge":"start"}
-{"type":"quic_packet_phase","timestamp_ns":123456760,"trace_id":17,"phase":"packet_encrypt","edge":"done","outcome":"success"}
-{"type":"quic_stream_frame","timestamp_ns":123456770,"trace_id":17,"stream_id":16,"offset_start":120,"offset_end":520,"outcome":"success"}
-{"type":"quic_packet_end","timestamp_ns":123456780,"trace_id":17,"packet_number":9901,"packet_space":"data","byte_len":1232,"outcome":"success"}
-```
-
-Example receive socket operation with GRO:
-
-```json
-{"type":"udp_socket_start","timestamp_ns":123456800,"trace_id":18,"direction":"rx","sample_rate":1}
-{"type":"udp_socket_end","timestamp_ns":123456850,"trace_id":18,"outcome":"success","stats":{"buffers":2,"datagrams":5,"bytes":6144}}
-```
 
 ## Event semantics
 
@@ -196,7 +175,7 @@ Matplotlib only render figures from the Rust-produced artifact bundle. Analyze
 an existing trace directly with:
 
 ```sh
-moq-trace analyze relay.jsonl \
+moq-trace analyze relay.ctf \
   --output target/moq-trace/analysis \
   --object-size 16384 \
   --subscribers 1

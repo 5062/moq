@@ -6,6 +6,7 @@ use anyhow::Result;
 
 mod artifact;
 mod coverage;
+mod ctf;
 mod ingest;
 mod metrics;
 mod model;
@@ -20,8 +21,15 @@ pub(crate) struct Options {
 	pub cooldown: Duration,
 }
 
-pub(crate) fn run(input: &Path, output: &Path, options: Options) -> Result<Report> {
-	let trace = ingest::read(input)?;
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Source<'a> {
+	pub ctf: &'a Path,
+	pub python: &'a Path,
+	pub expected_pid: Option<u32>,
+}
+
+pub(crate) fn run(source: Source<'_>, output: &Path, options: Options) -> Result<Report> {
+	let trace = ingest::read(source.ctf, source.python, source.expected_pid)?;
 	let report = metrics::analyze(&trace, options)?;
 	artifact::publish(output, &report)?;
 	Ok(report)

@@ -7,8 +7,6 @@ mod ffi {
 	include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
-pub(crate) const TRACE_REVISION: u32 = ffi::TRACE_REVISION;
-
 #[cfg(all(target_os = "linux", not(test)))]
 pub(crate) fn object_enabled() -> bool {
 	unsafe {

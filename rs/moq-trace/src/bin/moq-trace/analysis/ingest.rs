@@ -1,14 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use moq_trace::{
 	Direction, Event, ObjectEndEvent, ObjectEvent, ObjectOutcome, ObjectPhase, PacketEndEvent, PacketEvent,
-	PacketOutcome, PacketPhase, PhaseEdge, TRACE_REVISION, TraceClock,
+	PacketOutcome, PacketPhase, PhaseEdge,
 };
 
+use super::ctf;
 use super::model::{Interval, LogicalObject, ObjectLifecycle, PacketLifecycle, PhaseInterval, StreamFrame, Trace};
 
 #[derive(Default)]
@@ -28,29 +27,17 @@ struct PacketBuilder {
 	phases: BTreeMap<u64, Vec<(PacketPhase, Interval)>>,
 }
 
-pub(super) fn read(path: &Path) -> Result<Trace> {
-	let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-	let mut lines = BufReader::new(file).lines().enumerate();
-	let Some((_, header)) = lines.next() else {
-		bail!("trace is empty");
-	};
-	let header: Event = serde_json::from_str(&header?).context("invalid trace header")?;
-	match header {
-		Event::TraceHeader(header) if header.revision == TRACE_REVISION && header.clock == TraceClock::MonotonicNs => {}
-		Event::TraceHeader(header) => bail!("unsupported trace revision or clock: {header:?}"),
-		_ => bail!("the first trace record must be trace_header"),
-	}
+pub(super) fn read(path: &Path, python: &Path, expected_pid: Option<u32>) -> Result<Trace> {
+	build(ctf::read(path, python, expected_pid)?)
+}
 
+fn build(events: impl IntoIterator<Item = Event>) -> Result<Trace> {
 	let mut objects = ObjectBuilder::default();
 	let mut packets = PacketBuilder::default();
 	let mut frames = Vec::new();
 	let mut sockets = BTreeSet::new();
-	for (line, value) in lines {
-		let value = value.with_context(|| format!("failed to read trace line {}", line + 1))?;
-		let event: Event =
-			serde_json::from_str(&value).with_context(|| format!("invalid trace event on line {}", line + 1))?;
+	for event in events {
 		match event {
-			Event::TraceHeader(_) => bail!("trace_header may only appear as the first record"),
 			Event::MoqObjectStart(event) => insert_unique(&mut objects.starts, event.trace_id, event, "object start")?,
 			Event::MoqObjectEnd(event) => insert_unique(&mut objects.ends, event.trace_id, event, "object end")?,
 			Event::MoqObjectPhase(event) => {
@@ -99,7 +86,7 @@ pub(super) fn read(path: &Path) -> Result<Trace> {
 					bail!("socket end {} has no start", event.trace_id);
 				}
 			}
-			_ => bail!("trace contains an event unsupported by revision {TRACE_REVISION}"),
+			_ => bail!("CTF trace contains an event unsupported by this analyzer"),
 		}
 	}
 	if !sockets.is_empty() {
@@ -285,23 +272,13 @@ fn validate_object_phases(direction: Direction, phases: &[(ObjectPhase, Interval
 
 #[cfg(test)]
 mod tests {
-	use std::io::Write;
+	use moq_trace::{Event, PacketEndEvent, PacketEvent, PacketOutcome, PacketPhase, PacketPhaseEvent, PhaseEdge};
 
-	use moq_trace::{
-		Event, PacketEndEvent, PacketEvent, PacketOutcome, PacketPhase, PacketPhaseEvent, PhaseEdge, TraceClock,
-		TraceHeaderEvent,
-	};
-
-	use super::read;
+	use super::build;
 
 	#[test]
 	fn dropped_packet_phase_is_complete_but_not_measured() {
-		let mut input = tempfile::NamedTempFile::new().unwrap();
 		let events = [
-			Event::TraceHeader(TraceHeaderEvent {
-				revision: moq_trace::TRACE_REVISION,
-				clock: TraceClock::MonotonicNs,
-			}),
 			Event::PacketStart(PacketEvent {
 				timestamp_ns: 10,
 				trace_id: 1,
@@ -335,22 +312,13 @@ mod tests {
 				outcome: PacketOutcome::Dropped,
 			}),
 		];
-		for event in events {
-			writeln!(input, "{}", serde_json::to_string(&event).unwrap()).unwrap();
-		}
-
-		let trace = read(input.path()).unwrap();
+		let trace = build(events).unwrap();
 		assert!(trace.packets[&1].phases.is_empty());
 	}
 
 	#[test]
 	fn failed_object_lifecycle_is_complete_but_not_measured() {
-		let mut input = tempfile::NamedTempFile::new().unwrap();
 		let events = [
-			Event::TraceHeader(TraceHeaderEvent {
-				revision: moq_trace::TRACE_REVISION,
-				clock: TraceClock::MonotonicNs,
-			}),
 			Event::MoqObjectStart(moq_trace::ObjectEvent {
 				timestamp_ns: 10,
 				trace_id: 1,
@@ -381,22 +349,13 @@ mod tests {
 				outcome: Some(moq_trace::ObjectOutcome::Failed),
 			}),
 		];
-		for event in events {
-			writeln!(input, "{}", serde_json::to_string(&event).unwrap()).unwrap();
-		}
-
-		let trace = read(input.path()).unwrap();
+		let trace = build(events).unwrap();
 		assert!(trace.objects.is_empty());
 	}
 
 	#[test]
 	fn abandoned_socket_operation_is_complete() {
-		let mut input = tempfile::NamedTempFile::new().unwrap();
 		let events = [
-			Event::TraceHeader(TraceHeaderEvent {
-				revision: moq_trace::TRACE_REVISION,
-				clock: TraceClock::MonotonicNs,
-			}),
 			Event::SocketStart(moq_trace::SocketEvent {
 				timestamp_ns: 10,
 				trace_id: 1,
@@ -411,11 +370,7 @@ mod tests {
 				stats: moq_trace::SocketStats::default(),
 			}),
 		];
-		for event in events {
-			writeln!(input, "{}", serde_json::to_string(&event).unwrap()).unwrap();
-		}
-
-		let trace = read(input.path()).unwrap();
+		let trace = build(events).unwrap();
 		assert!(trace.objects.is_empty());
 	}
 }

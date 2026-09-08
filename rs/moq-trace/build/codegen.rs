@@ -73,7 +73,6 @@ pub enum Error {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Schema {
-	revision: u32,
 	enums: Vec<Enum>,
 	enum_fields: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 	events: Vec<Event>,
@@ -173,10 +172,7 @@ impl Schema {
 	}
 
 	fn rust(&self) -> String {
-		let mut out = format!(
-			"// Generated from schema/events.json.\n\npub(crate) const TRACE_REVISION: u32 = {};\n\n",
-			self.revision
-		);
+		let mut out = String::from("// Generated from schema/events.json.\n\n");
 		for enumeration in &self.enums {
 			writeln!(
 				out,

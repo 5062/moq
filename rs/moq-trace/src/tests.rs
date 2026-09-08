@@ -62,7 +62,7 @@ fn packet_end_contains_metadata_discovered_after_start() {
 
 #[test]
 fn strict_records_reject_unknown_fields() {
-	let json = r#"{"type":"trace_header","revision":1,"clock":"monotonic_ns","legacy":true}"#;
+	let json = r#"{"type":"moq_object_end","timestamp_ns":1,"trace_id":1,"stream_offset_end":null,"payload_bytes":1,"legacy":true}"#;
 	assert!(serde_json::from_str::<Event>(json).is_err());
 }
 

@@ -18,7 +18,6 @@ use crate::analysis::{self, Metric, Report, Sample, Statistics};
 
 const PROTOCOL: &str = "moq-transport-19";
 
-mod ctf;
 mod lttng;
 
 /// Arguments for one experiment or workload comparison.
@@ -154,6 +153,11 @@ struct Commands {
 struct Run {
 	output: PathBuf,
 	report: Report,
+}
+
+struct Capture {
+	ctf: PathBuf,
+	relay_pid: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -390,9 +394,13 @@ fn run_one(config: &Config) -> Result<Run> {
 	create_new_dir(&output, "run")?;
 	let commands = Commands::new(config)?;
 	build(config, &commands.build, &output)?;
-	let trace = capture(config, &commands, &output)?;
+	let capture = capture(config, &commands, &output)?;
 	let report = analysis::run(
-		&trace,
+		analysis::Source {
+			ctf: &capture.ctf,
+			python: &config.python,
+			expected_pid: Some(capture.relay_pid),
+		},
 		&output.join("analysis"),
 		analysis::Options {
 			object_size: config.object_size,
@@ -401,7 +409,7 @@ fn run_one(config: &Config) -> Result<Run> {
 			cooldown: config.cooldown,
 		},
 	)
-	.with_context(|| format!("failed to analyze {}", trace.display()))?;
+	.with_context(|| format!("failed to analyze {}", capture.ctf.display()))?;
 	write_summary(&output.join("summary.json"), config, &commands, &report)?;
 	if config.plot {
 		render(&config.repo, &config.python, &output)?;
@@ -558,7 +566,7 @@ fn build(config: &Config, command: &[String], output: &Path) -> Result<()> {
 	Ok(())
 }
 
-fn capture(config: &Config, commands: &Commands, output: &Path) -> Result<PathBuf> {
+fn capture(config: &Config, commands: &Commands, output: &Path) -> Result<Capture> {
 	let ctf = output.join("relay.ctf");
 	let session = lttng::Session::create(&ctf)?;
 	let mut relay = ManagedChild::spawn(&commands.relay, output, &output.join("relay.log"), "relay")?;
@@ -600,16 +608,7 @@ fn capture(config: &Config, commands: &Commands, output: &Path) -> Result<PathBu
 	publisher.stop(true)?;
 	relay.stop(true)?;
 	session.finish()?;
-	let jsonl = output.join("relay.jsonl");
-	ctf::convert(
-		&config.python,
-		&config.repo.join("rs/moq-trace/scripts/ctf_to_jsonl.py"),
-		&config.repo.join("rs/moq-trace/schema/events.json"),
-		&ctf,
-		&jsonl,
-		relay_pid,
-	)?;
-	Ok(jsonl)
+	Ok(Capture { ctf, relay_pid })
 }
 
 fn wait_for_log(

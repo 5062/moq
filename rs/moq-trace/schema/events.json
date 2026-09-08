@@ -1,5 +1,4 @@
 {
-  "revision": 1,
   "enums": [
     { "name": "direction", "rust_type": "Direction", "values": [
       { "name": "rx", "rust_variant": "Rx" },

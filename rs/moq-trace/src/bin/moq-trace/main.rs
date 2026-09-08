@@ -19,9 +19,9 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-	/// Validate and analyze one relay JSONL trace.
+	/// Validate and analyze one relay LTTng CTF trace.
 	Analyze {
-		/// Input JSONL trace.
+		/// Input LTTng CTF directory.
 		input: PathBuf,
 		/// Directory for CSV and JSON artifacts.
 		#[arg(long)]
@@ -38,6 +38,9 @@ enum Command {
 		/// Duration excluded from the end of the workload.
 		#[arg(long, default_value = "0s", value_parser = humantime::parse_duration)]
 		cooldown: Duration,
+		/// Python interpreter providing the Babeltrace 2 bindings.
+		#[arg(long, default_value = "python3")]
+		python: PathBuf,
 	},
 	/// Run one local relay workload or a workload comparison.
 	Experiment(experiment::Args),
@@ -54,9 +57,14 @@ fn main() -> anyhow::Result<()> {
 			subscribers,
 			warmup,
 			cooldown,
+			python,
 		} => {
 			analysis::run(
-				&input,
+				analysis::Source {
+					ctf: &input,
+					python: &python,
+					expected_pid: None,
+				},
 				&output,
 				analysis::Options {
 					object_size,

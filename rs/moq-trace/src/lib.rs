@@ -104,13 +104,11 @@ pub enum PacketSpace {
 	Data,
 }
 
-/// One normalized JSON trace record used by offline analysis.
+/// One typed trace event used by instrumentation and offline analysis.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
-	/// Trace format and clock metadata. This must be the first record.
-	TraceHeader(TraceHeaderEvent),
 	/// First byte of a moq-transport object was observed.
 	#[serde(rename = "moq_object_start")]
 	MoqObjectStart(ObjectEvent),
@@ -140,27 +138,6 @@ pub enum Event {
 	SocketEnd(SocketEndEvent),
 }
 
-/// Current trace format revision. Readers reject every other revision.
-pub const TRACE_REVISION: u32 = backend::TRACE_REVISION;
-
-/// Metadata that begins every trace file.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TraceHeaderEvent {
-	/// Exact trace schema revision.
-	pub revision: u32,
-	/// Timestamp clock and unit used by every event.
-	pub clock: TraceClock,
-}
-
-/// Timestamp clock used by a trace file.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TraceClock {
-	/// Process-local monotonic nanoseconds.
-	MonotonicNs,
-}
-
 impl Event {
 	/// Process-unique trace identifier for scoped socket and packet records.
 	pub fn trace_id(&self) -> Option<u64> {
@@ -174,7 +151,6 @@ impl Event {
 			Self::PacketPhase(event) => Some(event.trace_id),
 			Self::StreamFrame(event) => Some(event.trace_id),
 			Self::SocketEnd(event) => Some(event.trace_id),
-			_ => None,
 		}
 	}
 }
