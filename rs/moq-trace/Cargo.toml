@@ -1,6 +1,6 @@
 [package]
 name = "moq-trace"
-description = "Raw JSONL tracing for MoQ relay object and QUIC packet latency."
+description = "LTTng-UST tracing for MoQ relay object and QUIC packet latency."
 authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -8,6 +8,10 @@ license = "MIT OR Apache-2.0"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
+
+[package.metadata.cargo-shear]
+# These are used by build/codegen.rs, which cargo-shear does not follow from build.rs.
+ignored = ["cc", "pkg-config"]
 
 [[bin]]
 name = "moq-trace"
@@ -21,7 +25,14 @@ humantime.workspace = true
 parse-size.workspace = true
 rangemap.workspace = true
 serde = { workspace = true }
-serde_json = "1"
+serde_json.workspace = true
 strip-ansi-escapes.workspace = true
 tempfile.workspace = true
-thiserror = "2"
+thiserror.workspace = true
+
+[build-dependencies]
+cc.workspace = true
+pkg-config.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

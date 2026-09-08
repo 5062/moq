@@ -239,6 +239,9 @@ struct PacketPhaseTraceState {
 impl Handle {
 	/// Start a sampled QUIC packet trace.
 	pub fn packet(&self, context: PacketContext) -> PacketTrace {
+		if !crate::backend::packet_enabled() {
+			return PacketTrace::disabled();
+		}
 		let Some(inner) = self.inner.as_ref() else {
 			return PacketTrace::disabled();
 		};

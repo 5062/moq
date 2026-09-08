@@ -78,6 +78,10 @@ let
   moqTraceArgs = crateInfo ../rs/moq-trace/Cargo.toml // {
     src = craneLib.cleanCargoSource ../.;
     cargoExtraArgs = "-p moq-trace";
+    nativeBuildInputs = final.lib.optionals final.stdenv.isLinux [
+      final.pkg-config
+      final.lttng-ust
+    ];
   };
 
   libmoqInfo = crateInfo ../rs/libmoq/Cargo.toml;

@@ -20,6 +20,7 @@ async fn main() -> anyhow::Result<()> {
 	config.server.quic.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
 
 	let mtls_enabled = !config.server.tls.root.is_empty();
+	config.trace.install()?;
 
 	#[allow(unused_mut)]
 	let mut server = config.server.init()?;
@@ -63,7 +64,6 @@ async fn main() -> anyhow::Result<()> {
 	// Keep the producer alive for the whole run: its publish task stops when
 	// the last clone drops. The cluster only needs the counter registry.
 	let stats = config.stats.build(cluster.origin.clone());
-	let trace = config.trace.build()?;
 	let cluster = cluster.with_stats(stats.registry().clone());
 
 	// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
@@ -98,24 +98,15 @@ async fn main() -> anyhow::Result<()> {
 			else => Ok(()),
 		}
 	};
-	#[cfg(feature = "trace")]
-	{
-		let shutdown = async {
-			if let Err(err) = tokio::signal::ctrl_c().await {
-				tracing::warn!(%err, "failed to listen for interrupt");
-			}
-		};
-		run_until_shutdown(trace, server_run, shutdown).await
-	}
-	#[cfg(not(feature = "trace"))]
-	{
-		let _trace = trace;
-		server_run.await
-	}
+	let shutdown = async {
+		if let Err(err) = tokio::signal::ctrl_c().await {
+			tracing::warn!(%err, "failed to listen for interrupt");
+		}
+	};
+	run_until_shutdown(server_run, shutdown).await
 }
 
-#[cfg(feature = "trace")]
-async fn run_until_shutdown<F, S>(trace: Trace, server: F, shutdown: S) -> anyhow::Result<()>
+async fn run_until_shutdown<F, S>(server: F, shutdown: S) -> anyhow::Result<()>
 where
 	F: std::future::Future<Output = anyhow::Result<()>>,
 	S: std::future::Future<Output = ()>,
@@ -126,7 +117,6 @@ where
 		result = &mut server => result,
 		() = &mut shutdown => Ok(()),
 	};
-	anyhow::ensure!(trace.flush(), "failed to flush relay trace");
 	result
 }
 
@@ -152,35 +142,14 @@ async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> 
 	anyhow::bail!("stopped accepting connections")
 }
 
-#[cfg(all(test, feature = "trace"))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 
 	#[tokio::test]
-	async fn shutdown_flushes_trace_writer() {
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("trace.jsonl");
-		let mut config = TraceConfig::default();
-		config.path = Some(path.clone());
-		let trace = config.build().unwrap();
-		let object = moq_trace::global().object(moq_trace::ObjectContext::new(
-			moq_trace::Direction::Tx,
-			moq_trace::ObjectIdentity::new(1, 2, 3),
-			moq_trace::LogicalId::new(4, 5),
-		));
-		object.finish();
-
-		run_until_shutdown(
-			trace,
-			std::future::pending::<anyhow::Result<()>>(),
-			std::future::ready(()),
-		)
-		.await
-		.unwrap();
-
-		let output = std::fs::read_to_string(path).unwrap();
-		assert_eq!(output.lines().count(), 3);
-		assert!(output.lines().next().unwrap().contains(r#""type":"trace_header""#));
-		assert!(output.ends_with('\n'));
+	async fn shutdown_returns_cleanly() {
+		run_until_shutdown(std::future::pending::<anyhow::Result<()>>(), std::future::ready(()))
+			.await
+			.unwrap();
 	}
 }

@@ -356,6 +356,9 @@ impl Handle {
 
 	/// Start a moq-transport object trace after applying object sampling.
 	pub fn object(&self, context: ObjectContext) -> ObjectTrace {
+		if !crate::backend::object_enabled() {
+			return ObjectTrace::disabled();
+		}
 		let logical_id = context.logical_id;
 		let Some(sample_rate) = self.object_sample_rate(logical_id) else {
 			return ObjectTrace::disabled();
@@ -381,7 +384,7 @@ impl Handle {
 			stream_offset_start: context.stream_offset_start,
 			sample_rate,
 		};
-		self.emit(Event::MoqObjectStart(object.clone()));
+		self.emit(Event::MoqObjectStart(object));
 		ObjectTrace(Some(ObjectTraceState {
 			handle: self.clone(),
 			trace_id,
@@ -398,14 +401,10 @@ mod tests {
 
 	#[test]
 	fn logical_identity_samples_ingress_and_copies_together() {
-		let directory = tempfile::tempdir().unwrap();
-		let path = directory.path().join("trace.jsonl");
 		let handle = Handle::new(Config {
-			path: Some(path.clone()),
 			object_sample: 2,
 			..Config::default()
-		})
-		.unwrap();
+		});
 		let sampled = (0..)
 			.map(|frame| LogicalId::new(9, frame))
 			.find(|logical_id| handle.object_sample_rate(*logical_id).is_some())
@@ -424,12 +423,9 @@ mod tests {
 				.object(ObjectContext::new(direction, ObjectIdentity::new(1, 2, 4), skipped))
 				.finish();
 		}
-		drop(handle);
-
-		let starts = std::fs::read_to_string(path)
-			.unwrap()
-			.lines()
-			.map(|line| serde_json::from_str::<Event>(line).unwrap())
+		let starts = handle
+			.events()
+			.into_iter()
 			.filter_map(|event| match event {
 				Event::MoqObjectStart(event) => Some(event),
 				_ => None,

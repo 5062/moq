@@ -4654,10 +4654,12 @@ name = "moq-trace"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cc",
  "clap",
  "csv",
  "humantime",
  "parse-size",
+ "pkg-config",
  "rangemap",
  "serde",
  "serde_json",

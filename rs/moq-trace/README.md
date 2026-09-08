@@ -1,15 +1,16 @@
 # moq-trace
 
-Raw JSONL tracing for measuring MoQ relay and QUIC processing overhead.
+LTTng-UST tracepoints for measuring MoQ relay and QUIC processing overhead.
 
-`moq-trace` is an opt-in Rust crate with three independent trace scopes:
+`moq-trace` is an opt-in Rust crate with one generated LTTng-UST provider and
+three independent trace scopes:
 
 - MoQ objects processed by the relay.
 - QUIC packets encoded or decoded by the patched Quinn fork.
 - UDP socket operations performed by Quinn.
 
-Tracing is disabled unless an output path is configured and the relevant crates
-are built with the `trace` feature.
+Trace collection is controlled by the external `lttng` session. The relay only
+registers the provider and emits events when built with the `trace` feature.
 
 ## Enabling
 
@@ -17,36 +18,58 @@ Build the relay with tracing enabled:
 
 ```sh
 cargo run -p moq-relay --features trace -- \
-  demo/relay/localhost.toml \
-  --trace-path /tmp/moq.trace.jsonl
+  demo/relay/localhost.toml
 ```
+
+In another terminal, create and start a userspace session before generating
+traffic:
+
+```sh
+lttng create moq-relay --output /tmp/moq-relay.ctf
+lttng enable-channel --userspace --session moq-relay moq
+lttng untrack --userspace --session moq-relay --vpid --all
+lttng track --userspace --session moq-relay --vpid=<relay-pid>
+lttng add-context --userspace --session moq-relay --channel moq --type=vpid
+lttng enable-event --userspace --session moq-relay --channel moq 'moq_trace:*'
+lttng start moq-relay
+```
+
+Stop the session after the workload with `lttng stop moq-relay` and
+`lttng destroy moq-relay`. The `moq-trace experiment` command performs this
+session lifecycle automatically.
 
 The relay accepts the same settings through TOML, CLI flags, or environment
 variables:
 
 | TOML field | CLI flag | Environment variable | Default |
 | --- | --- | --- | --- |
-| `trace.path` | `--trace-path` | `MOQ_TRACE_PATH` | disabled |
 | `trace.object_sample` | `--trace-object-sample` | `MOQ_TRACE_OBJECT_SAMPLE` | `1` |
 | `trace.packet_sample` | `--trace-packet-sample` | `MOQ_TRACE_PACKET_SAMPLE` | `1` |
 | `trace.socket_sample` | `--trace-socket-sample` | `MOQ_TRACE_SOCKET_SAMPLE` | `1` |
-| `trace.queue_capacity` | `--trace-queue-capacity` | `MOQ_TRACE_QUEUE_CAPACITY` | `4096` |
 
 A relay built without `--features trace` rejects trace configuration at
 startup instead of silently ignoring it.
 
-The relay installs one trace destination during startup and retains it until
-shutdown. MoQ, QUIC, and socket instrumentation all emit through that same
-process-global destination. Session, connection, and object identifiers remain
-per-event context, so the analyzer can separate sessions without splitting one
-cross-layer lifecycle across multiple files.
+The relay installs one process-global trace configuration during startup. MoQ,
+QUIC, and socket instrumentation all emit through the same provider. Session,
+connection, and object identifiers remain per-event context, so the analyzer
+can separate sessions without splitting one cross-layer lifecycle across
+multiple files.
 
 ## Output
 
-The output is newline-delimited JSON. Every line has a `type` field. The first
-record is an exact schema and clock header. Readers reject any other revision.
-Monotonic `timestamp_ns` timestamps are useful for latency deltas inside one
-process, not for wall-clock comparison between hosts.
+The primary output is native LTTng CTF. `babeltrace2` can read it directly, and
+the experiment runner also converts it to newline-delimited JSON for the
+existing analyzer. Every normalized JSON line has a `type` field. The first
+record is an exact schema and clock header. Monotonic `timestamp_ns` timestamps
+are useful for latency deltas inside one process, not for wall-clock comparison
+between hosts.
+
+For a captured session, inspect the native trace with:
+
+```sh
+babeltrace2 /tmp/moq-relay.ctf
+```
 
 The record types are:
 
@@ -148,11 +171,11 @@ records stay together. TX packets sample by packet number. RX packets sample by
 decode order because their packet number is unavailable before header
 unprotection.
 
-Events enter a bounded queue with non-blocking `try_send`. A full or closed
-queue increments `Handle::dropped`; instrumentation never waits for disk I/O.
-`Handle::writer_failed` reports terminal serialization or I/O failure.
-`Handle::flush` is an explicit writer barrier for consumers that need to read a
-live trace file while cached handle clones still exist.
+Enabled probes write to LTTng-UST's per-CPU ring buffers. The hot path does not
+perform serialization or disk I/O. Configure channel size and loss policy with
+the LTTng session. The experiment runner records only the relay process, uses
+discard mode, and rejects traces for which Babeltrace reports discarded data.
+Stopping the LTTng session completes the CTF files on disk.
 
 ## Relay latency analysis
 
@@ -194,9 +217,9 @@ moq-trace experiment \
 The comparison directory contains one `subscribers-N` run directory per count,
 plus `per_copy_latency.csv`, `per_copy_latency_summary.json`, and
 `per_copy_latency_cdf.png`. Each CDF sample is one outbound delivery copy, so
-`n` scales with both logical objects and subscribers. The runner scales the
-bounded trace queue to 4096 events per subscriber so connection bursts do not
-drop lifecycle records during high-fanout runs.
+`n` scales with both logical objects and subscribers. The runner sizes the
+LTTng channel for the workload and checks for discarded events during
+conversion.
 
 To compare per-copy latency across object sizes, use binary size suffixes:
 

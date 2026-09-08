@@ -84,6 +84,9 @@ pub struct SocketTrace {
 impl Handle {
 	/// Start a sampled UDP socket operation.
 	pub fn socket(&self, direction: Direction, connection_id: Option<u64>) -> Option<SocketTrace> {
+		if !crate::backend::socket_enabled() {
+			return None;
+		}
 		let inner = self.inner.as_ref()?;
 		let sample_rate = inner.config.socket_sample;
 		let seen = inner.socket_seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

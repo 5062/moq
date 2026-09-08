@@ -17,7 +17,9 @@ use serde_json::json;
 use crate::analysis::{self, Metric, Report, Sample, Statistics};
 
 const PROTOCOL: &str = "moq-transport-19";
-const TRACE_QUEUE_CAPACITY_PER_SUBSCRIBER: usize = 4096;
+
+mod ctf;
+mod lttng;
 
 /// Arguments for one experiment or workload comparison.
 #[derive(Clone, Debug, ClapArgs)]
@@ -386,7 +388,7 @@ fn run_one(config: &Config) -> Result<Run> {
 		}
 	});
 	create_new_dir(&output, "run")?;
-	let commands = Commands::new(config, &output)?;
+	let commands = Commands::new(config)?;
 	build(config, &commands.build, &output)?;
 	let trace = capture(config, &commands, &output)?;
 	let report = analysis::run(
@@ -408,17 +410,17 @@ fn run_one(config: &Config) -> Result<Run> {
 }
 
 impl Commands {
-	fn new(config: &Config, output: &Path) -> Result<Self> {
+	fn new(config: &Config) -> Result<Self> {
 		Ok(Self {
 			build: build_command(config)?,
-			relay: relay_command(config, output),
+			relay: relay_command(config),
 			publisher: publisher_command(config),
 			subscriber: subscriber_command(config),
 		})
 	}
 }
 
-fn relay_command(config: &Config, output: &Path) -> Vec<String> {
+fn relay_command(config: &Config) -> Vec<String> {
 	let mut command = vec![
 		config.relay_bin.display().to_string(),
 		"--server-bind".into(),
@@ -431,10 +433,6 @@ fn relay_command(config: &Config, output: &Path) -> Vec<String> {
 		"localhost".into(),
 		"--auth-public".into(),
 		String::new(),
-		"--trace-path".into(),
-		output.join("relay.jsonl").display().to_string(),
-		"--trace-queue-capacity".into(),
-		(TRACE_QUEUE_CAPACITY_PER_SUBSCRIBER * config.subscribers.get()).to_string(),
 	];
 	if let Some(cpu) = config.relay_cpu {
 		command.splice(0..0, ["taskset".into(), "-c".into(), cpu.to_string()]);
@@ -561,6 +559,8 @@ fn build(config: &Config, command: &[String], output: &Path) -> Result<()> {
 }
 
 fn capture(config: &Config, commands: &Commands, output: &Path) -> Result<PathBuf> {
+	let ctf = output.join("relay.ctf");
+	let session = lttng::Session::create(&ctf)?;
 	let mut relay = ManagedChild::spawn(&commands.relay, output, &output.join("relay.log"), "relay")?;
 	wait_for_log(
 		&output.join("relay.log"),
@@ -569,6 +569,9 @@ fn capture(config: &Config, commands: &Commands, output: &Path) -> Result<PathBu
 		|contents| contents.contains("listening"),
 		"listening",
 	)?;
+	session.wait_for_provider(relay.child.id(), Duration::from_secs(10))?;
+	let relay_pid = relay.child.id();
+	session.start(relay_pid)?;
 	let mut publisher = ManagedChild::spawn(&commands.publisher, output, &output.join("publisher.log"), "publisher")?;
 	wait_for_log(
 		&output.join("publisher.log"),
@@ -596,7 +599,17 @@ fn capture(config: &Config, commands: &Commands, output: &Path) -> Result<PathBu
 	require_success("subscriber", subscriber.wait_until(timeout)?)?;
 	publisher.stop(true)?;
 	relay.stop(true)?;
-	Ok(output.join("relay.jsonl"))
+	session.finish()?;
+	let jsonl = output.join("relay.jsonl");
+	ctf::convert(
+		&config.python,
+		&config.repo.join("rs/moq-trace/scripts/ctf_to_jsonl.py"),
+		&config.repo.join("rs/moq-trace/schema/events.json"),
+		&ctf,
+		&jsonl,
+		relay_pid,
+	)?;
+	Ok(jsonl)
 }
 
 fn wait_for_log(
@@ -1004,13 +1017,9 @@ mod tests {
 	}
 
 	#[test]
-	fn queue_capacity_scales_with_subscribers() {
-		let command = relay_command(&config(50), Path::new("/output"));
-		let option = command
-			.iter()
-			.position(|value| value == "--trace-queue-capacity")
-			.unwrap();
-		assert_eq!(command[option + 1], "204800");
+	fn relay_command_has_no_recorder_configuration() {
+		let command = relay_command(&config(50));
+		assert!(!command.iter().any(|value| value.starts_with("--trace-")));
 	}
 
 	#[test]
