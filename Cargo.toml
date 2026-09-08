@@ -67,6 +67,7 @@ resolver = "2"
 rust-version = "1.85"
 
 [workspace.dependencies]
+bindgen = { version = "0.73.2", default-features = false, features = ["runtime"] }
 cc = "1"
 flate2 = "1.1"
 hang = { version = "0.19", path = "rs/hang" }

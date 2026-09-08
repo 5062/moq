@@ -29,7 +29,7 @@ pub(crate) struct Source<'a> {
 }
 
 pub(crate) fn run(source: Source<'_>, output: &Path, options: Options) -> Result<Report> {
-	let trace = ingest::read(source.ctf, source.python, source.expected_pid)?;
+	let trace = ingest::read(source)?;
 	let report = metrics::analyze(&trace, options)?;
 	artifact::publish(output, &report)?;
 	Ok(report)

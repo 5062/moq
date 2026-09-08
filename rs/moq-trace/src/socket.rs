@@ -96,7 +96,7 @@ impl Handle {
 
 		let event = SocketEvent {
 			timestamp_ns: now_ns(),
-			trace_id: inner.next_trace_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+			trace_id: crate::NEXT_TRACE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
 			connection_id,
 			direction,
 			sample_rate,

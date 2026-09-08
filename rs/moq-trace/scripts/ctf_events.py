@@ -9,39 +9,24 @@ from pathlib import Path
 import bt2
 
 
-def load_schema(source):
-    """Load the generated-provider schema used to interpret numeric fields."""
-    schema = json.loads(source)
-    enums = {
-        item["name"]: [value["name"] for value in item["values"]]
-        for item in schema["enums"]
-    }
-    events = {item["name"] for item in schema["events"]}
-    return enums, schema["enum_fields"], events
-
-
 def scalar(value):
     """Convert a Babeltrace scalar field to a plain Python value."""
+    labels = tuple(getattr(value, "labels", ()))
+    if labels:
+        if len(labels) != 1:
+            raise RuntimeError(f"ambiguous CTF enumeration labels: {labels}")
+        return labels[0]
     return int(value)
 
 
-def normalize(name, payload, enums, event_enums):
-    """Normalize one generated provider payload to the stable JSON event schema."""
+def normalize(name, payload):
+    """Normalize one provider payload to the Rust event shape."""
     event = {key: scalar(payload[key]) for key in payload}
     for key in tuple(event):
         if not key.startswith("has_"):
             continue
         value_key = key[4:]
         event[value_key] = event[value_key] if event.pop(key) else None
-
-    for key, enum_name in event_enums[name].items():
-        if event[key] is not None:
-            try:
-                event[key] = enums[enum_name][event[key]]
-            except (KeyError, IndexError) as error:
-                raise RuntimeError(
-                    f"unknown {enum_name} value {event[key]} in {name}.{key}"
-                ) from error
 
     if name == "moq_object_start":
         event["logical_id"] = {
@@ -72,9 +57,8 @@ def event_pid(event):
     return scalar(context["vpid"])
 
 
-def stream(input_path, schema_source, expected_pid=None):
+def stream(input_path, expected_pid=None):
     """Read a CTF trace and stream validated normalized events to stdout."""
-    enums, event_enums, event_names = load_schema(schema_source)
     discarded_events = 0
     discarded_packets = 0
     events = 0
@@ -89,7 +73,7 @@ def stream(input_path, schema_source, expected_pid=None):
         if not isinstance(message, bt2._EventMessageConst):
             continue
         provider, separator, name = message.event.name.partition(":")
-        if provider != "moq_trace" or not separator or name not in event_names:
+        if provider != "moq_trace" or not separator:
             continue
         if expected_pid is not None:
             actual_pid = event_pid(message.event)
@@ -99,10 +83,9 @@ def stream(input_path, schema_source, expected_pid=None):
                 )
         print(
             json.dumps(
-                normalize(name, message.event.payload_field, enums, event_enums),
+                normalize(name, message.event.payload_field),
                 separators=(",", ":"),
-            ),
-            flush=True,
+            )
         )
         events += 1
 
@@ -118,13 +101,11 @@ def main():
     """Parse command-line arguments and stream the trace."""
     parser = argparse.ArgumentParser()
     parser.add_argument("input", type=Path)
-    parser.add_argument("--schema-json", required=True)
     parser.add_argument("--expected-pid", type=int)
     args = parser.parse_args()
     try:
         stream(
             args.input,
-            args.schema_json,
             expected_pid=args.expected_pid,
         )
     except Exception as error:

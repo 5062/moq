@@ -259,7 +259,7 @@ impl Handle {
 
 		let packet = PacketEvent {
 			timestamp_ns: context.start_ns.unwrap_or_else(now_ns),
-			trace_id: inner.next_trace_id.fetch_add(1, Ordering::Relaxed),
+			trace_id: crate::NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed),
 			connection_id: context.connection_id,
 			direction: context.direction,
 			packet_number: context.packet_number,

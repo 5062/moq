@@ -80,6 +80,7 @@ let
     cargoExtraArgs = "-p moq-trace";
     nativeBuildInputs = final.lib.optionals final.stdenv.isLinux [
       final.pkg-config
+      final.rustPlatform.bindgenHook
       final.lttng-ust
     ];
   };

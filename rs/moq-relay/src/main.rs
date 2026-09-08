@@ -98,26 +98,7 @@ async fn main() -> anyhow::Result<()> {
 			else => Ok(()),
 		}
 	};
-	let shutdown = async {
-		if let Err(err) = tokio::signal::ctrl_c().await {
-			tracing::warn!(%err, "failed to listen for interrupt");
-		}
-	};
-	run_until_shutdown(server_run, shutdown).await
-}
-
-async fn run_until_shutdown<F, S>(server: F, shutdown: S) -> anyhow::Result<()>
-where
-	F: std::future::Future<Output = anyhow::Result<()>>,
-	S: std::future::Future<Output = ()>,
-{
-	tokio::pin!(server);
-	tokio::pin!(shutdown);
-	let result = tokio::select! {
-		result = &mut server => result,
-		() = &mut shutdown => Ok(()),
-	};
-	result
+	server_run.await
 }
 
 async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> anyhow::Result<()> {
@@ -140,16 +121,4 @@ async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> 
 	}
 
 	anyhow::bail!("stopped accepting connections")
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[tokio::test]
-	async fn shutdown_returns_cleanly() {
-		run_until_shutdown(std::future::pending::<anyhow::Result<()>>(), std::future::ready(()))
-			.await
-			.unwrap();
-	}
 }

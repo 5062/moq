@@ -363,12 +363,7 @@ impl Handle {
 		let Some(sample_rate) = self.object_sample_rate(logical_id) else {
 			return ObjectTrace::disabled();
 		};
-		let trace_id = self
-			.inner
-			.as_ref()
-			.unwrap()
-			.next_trace_id
-			.fetch_add(1, Ordering::Relaxed);
+		let trace_id = crate::NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed);
 		let object = ObjectEvent {
 			timestamp_ns: now_ns(),
 			trace_id,

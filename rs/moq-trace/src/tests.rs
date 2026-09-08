@@ -67,6 +67,11 @@ fn strict_records_reject_unknown_fields() {
 }
 
 #[test]
+fn strict_records_reject_unknown_event_types() {
+	assert!(serde_json::from_str::<Event>(r#"{"type":"future_event"}"#).is_err());
+}
+
+#[test]
 fn disabled_handle_is_noop() {
 	let handle = Handle::disabled();
 	handle
@@ -77,6 +82,21 @@ fn disabled_handle_is_noop() {
 		))
 		.finish();
 	assert!(handle.events().is_empty());
+}
+
+#[test]
+fn trace_ids_are_unique_across_handles() {
+	let first = trace();
+	let second = trace();
+	first
+		.socket(Direction::Rx, None)
+		.unwrap()
+		.finish(SocketOutcome::Success, SocketStats::default());
+	second
+		.socket(Direction::Rx, None)
+		.unwrap()
+		.finish(SocketOutcome::Success, SocketStats::default());
+	assert_ne!(first.events()[0].trace_id(), second.events()[0].trace_id());
 }
 
 #[test]

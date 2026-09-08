@@ -1,12 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-
 use anyhow::{Result, anyhow, bail};
 use moq_trace::{
 	Direction, Event, ObjectEndEvent, ObjectEvent, ObjectOutcome, ObjectPhase, PacketEndEvent, PacketEvent,
 	PacketOutcome, PacketPhase, PhaseEdge,
 };
+use std::collections::{BTreeMap, BTreeSet};
 
+use super::Source;
 use super::ctf;
 use super::model::{Interval, LogicalObject, ObjectLifecycle, PacketLifecycle, PhaseInterval, StreamFrame, Trace};
 
@@ -27,16 +26,17 @@ struct PacketBuilder {
 	phases: BTreeMap<u64, Vec<(PacketPhase, Interval)>>,
 }
 
-pub(super) fn read(path: &Path, python: &Path, expected_pid: Option<u32>) -> Result<Trace> {
-	build(ctf::read(path, python, expected_pid)?)
+pub(super) fn read(source: Source<'_>) -> Result<Trace> {
+	build(ctf::Decoder::spawn(source)?)
 }
 
-fn build(events: impl IntoIterator<Item = Event>) -> Result<Trace> {
+fn build(events: impl IntoIterator<Item = Result<Event>>) -> Result<Trace> {
 	let mut objects = ObjectBuilder::default();
 	let mut packets = PacketBuilder::default();
 	let mut frames = Vec::new();
 	let mut sockets = BTreeSet::new();
 	for event in events {
+		let event = event?;
 		match event {
 			Event::MoqObjectStart(event) => insert_unique(&mut objects.starts, event.trace_id, event, "object start")?,
 			Event::MoqObjectEnd(event) => insert_unique(&mut objects.ends, event.trace_id, event, "object end")?,
@@ -312,7 +312,7 @@ mod tests {
 				outcome: PacketOutcome::Dropped,
 			}),
 		];
-		let trace = build(events).unwrap();
+		let trace = build(events.into_iter().map(Ok)).unwrap();
 		assert!(trace.packets[&1].phases.is_empty());
 	}
 
@@ -349,7 +349,7 @@ mod tests {
 				outcome: Some(moq_trace::ObjectOutcome::Failed),
 			}),
 		];
-		let trace = build(events).unwrap();
+		let trace = build(events.into_iter().map(Ok)).unwrap();
 		assert!(trace.objects.is_empty());
 	}
 
@@ -370,7 +370,7 @@ mod tests {
 				stats: moq_trace::SocketStats::default(),
 			}),
 		];
-		let trace = build(events).unwrap();
+		let trace = build(events.into_iter().map(Ok)).unwrap();
 		assert!(trace.objects.is_empty());
 	}
 }

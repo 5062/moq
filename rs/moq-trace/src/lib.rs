@@ -59,6 +59,9 @@ impl Default for Config {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// LTTng-UST tracing is only available on Linux.
+	#[error("LTTng-UST tracing is only available on Linux")]
+	UnsupportedPlatform,
 	/// Process-global tracing was already installed.
 	#[error("process-global tracing already installed")]
 	GlobalAlreadyInstalled,
@@ -164,31 +167,26 @@ pub struct Handle {
 }
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 
 struct Inner {
 	config: Config,
 	packet_seen: AtomicU64,
 	socket_seen: AtomicU64,
-	next_trace_id: AtomicU64,
 	object_hasher: std::collections::hash_map::RandomState,
 	#[cfg(test)]
 	events: std::sync::Mutex<Vec<Event>>,
 }
 
 impl Handle {
-	/// Create an enabled handle with the supplied sampling configuration.
-	///
-	/// The process must be traced by an active LTTng-UST session for events to
-	/// be recorded. Creating the handle itself does not start or stop a session.
-	pub fn new(config: Config) -> Self {
+	#[cfg(test)]
+	fn new(config: Config) -> Self {
 		let config = config.normalized();
-		let handle = Self {
+		Self {
 			inner: Some(Arc::new(Inner::new(config))),
 			session_id: None,
 			connection_id: None,
-		};
-		backend::initialize();
-		handle
+		}
 	}
 
 	/// Create a handle that never emits events.
@@ -238,7 +236,6 @@ impl Inner {
 			config,
 			packet_seen: AtomicU64::new(0),
 			socket_seen: AtomicU64::new(0),
-			next_trace_id: AtomicU64::new(1),
 			object_hasher: std::collections::hash_map::RandomState::new(),
 			#[cfg(test)]
 			events: std::sync::Mutex::new(Vec::new()),
@@ -260,11 +257,18 @@ impl Inner {
 static GLOBAL: OnceLock<Arc<Inner>> = OnceLock::new();
 
 /// Install process-global tracing for MoQ, QUIC, and socket instrumentation.
+#[cfg(target_os = "linux")]
 pub fn install(config: Config) -> Result<(), Error> {
 	backend::initialize();
 	GLOBAL
 		.set(Arc::new(Inner::new(config.normalized())))
 		.map_err(|_| Error::GlobalAlreadyInstalled)
+}
+
+/// Install process-global tracing for MoQ, QUIC, and socket instrumentation.
+#[cfg(not(target_os = "linux"))]
+pub fn install(_config: Config) -> Result<(), Error> {
+	Err(Error::UnsupportedPlatform)
 }
 
 /// Return the process-global trace handle used by MoQ, QUIC, and socket hooks.
@@ -277,7 +281,7 @@ pub fn global() -> Handle {
 	}
 }
 
-/// Return a monotonic timestamp in nanoseconds.
+/// Return a process-relative monotonic timestamp in nanoseconds for boundaries recorded after they occur.
 pub fn now_ns() -> u64 {
 	static START: OnceLock<std::time::Instant> = OnceLock::new();
 	START
