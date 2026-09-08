@@ -174,6 +174,36 @@ moq-trace experiment
 The flake also exposes the binary as `.#moq-trace` for Nix profile or shell
 installation.
 
+To keep the relay and publisher on one host while running subscribers on
+another, create a topology file on the relay host:
+
+```toml
+relay_url = "https://192.0.2.10:4443"
+
+[subscriber]
+ssh = "user@192.0.2.20"
+workdir = "/home/user/moq-trace"
+binary = "target/release/moq-bench"
+```
+
+Build `moq-bench` on the subscriber host, configure non-interactive SSH
+authentication, and run the experiment from the relay host:
+
+```sh
+moq-trace experiment \
+  --config two-host.toml \
+  --subscribers 8 \
+  --duration 20s \
+  --object-size 16384 \
+  --fps 30
+```
+
+The relay, publisher, LTTng session, analysis, and plots stay on the local
+host. The experiment starts the subscriber through SSH, waits for all
+subscriber connections, then starts the publisher. `subscriber.binary` may be
+an absolute path or a path relative to `subscriber.workdir`. The remote host
+does not need LTTng or `moq-trace`.
+
 Rust owns workload orchestration, trace validation, packet correlation, metric
 calculation, comparisons, summaries, and tabular artifacts. The Babeltrace
 Python bindings stream native CTF events into the Rust analyzer. Matplotlib

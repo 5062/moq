@@ -26,6 +26,7 @@ cli = [
     "dep:serde_json",
     "dep:strip-ansi-escapes",
     "dep:tempfile",
+    "dep:toml",
 ]
 
 [dependencies]
@@ -39,6 +40,7 @@ serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
 strip-ansi-escapes = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
+toml = { version = "1.1", optional = true }
 thiserror.workspace = true
 
 [build-dependencies]

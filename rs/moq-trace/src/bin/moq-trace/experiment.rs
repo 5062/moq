@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args as ClapArgs;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::analysis::{self, Metric, Report, Sample, Statistics};
@@ -30,6 +30,10 @@ pub(crate) struct Args {
 	/// Directory for logs, analysis artifacts, summaries, and plots.
 	#[arg(long)]
 	output: Option<PathBuf>,
+
+	/// TOML file describing remote experiment topology.
+	#[arg(long)]
+	config: Option<PathBuf>,
 
 	/// CPU on which only the relay process runs.
 	#[arg(long)]
@@ -105,6 +109,62 @@ pub(crate) struct Args {
 	python: PathBuf,
 }
 
+/// Topology settings for the local relay, publisher, and subscriber workload.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+struct Topology {
+	/// URL reachable by subscribers. Defaults to the local relay URL.
+	relay_url: Option<String>,
+
+	/// Host on which the subscriber workload runs.
+	subscriber: SubscriberHost,
+}
+
+/// Execution settings for the subscriber workload.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+struct SubscriberHost {
+	/// SSH destination, such as `user@subscriber.example.com`.
+	ssh: Option<String>,
+
+	/// Benchmark binary on the subscriber host. Defaults to `moq-bench`.
+	binary: Option<String>,
+
+	/// Working directory on the subscriber host.
+	workdir: Option<String>,
+}
+
+impl Topology {
+	fn load(path: Option<&Path>) -> Result<Self> {
+		let Some(path) = path else {
+			return Ok(Self::default());
+		};
+		let contents = std::fs::read_to_string(path)
+			.with_context(|| format!("failed to read experiment config {}", path.display()))?;
+		let topology: Self = toml::from_str(&contents)
+			.with_context(|| format!("failed to parse experiment config {}", path.display()))?;
+		topology
+			.validate()
+			.with_context(|| format!("invalid experiment config {}", path.display()))?;
+		Ok(topology)
+	}
+
+	fn validate(&self) -> Result<()> {
+		if let Some(ssh) = &self.subscriber.ssh {
+			if self.relay_url.is_none() {
+				bail!("subscriber.ssh ({ssh}) requires relay_url so the remote host can reach the relay");
+			}
+		} else if self.relay_url.is_some() || self.subscriber.binary.is_some() || self.subscriber.workdir.is_some() {
+			bail!("remote subscriber settings require subscriber.ssh");
+		}
+		Ok(())
+	}
+
+	fn is_remote(&self) -> bool {
+		self.subscriber.ssh.is_some()
+	}
+}
+
 /// Arguments for rendering plots from an existing experiment directory.
 #[derive(Clone, Debug, ClapArgs)]
 pub(crate) struct PlotArgs {
@@ -139,6 +199,7 @@ struct Config {
 	skip_build: bool,
 	plot: bool,
 	python: PathBuf,
+	topology: Topology,
 }
 
 #[derive(Debug)]
@@ -316,6 +377,7 @@ impl Config {
 		let repo = canonical_repo(&args.repo)?;
 		let profile = if args.debug_build { "debug" } else { "release" };
 		let output = args.output.unwrap_or_else(|| default_output(&repo));
+		let topology = Topology::load(args.config.as_deref())?;
 		Ok(Self {
 			relay_bin: args
 				.relay_bin
@@ -338,6 +400,7 @@ impl Config {
 			skip_build: args.skip_build,
 			plot: !args.no_plot,
 			python: args.python,
+			topology,
 		})
 	}
 }
@@ -423,7 +486,7 @@ impl Commands {
 			build: build_command(config)?,
 			relay: relay_command(config),
 			publisher: publisher_command(config),
-			subscriber: subscriber_command(config),
+			subscriber: subscriber_command(config)?,
 		})
 	}
 }
@@ -448,11 +511,11 @@ fn relay_command(config: &Config) -> Vec<String> {
 	command
 }
 
-fn bench_base(config: &Config) -> Vec<String> {
+fn bench_command(config: &Config, url: &str, binary: &str) -> Vec<String> {
 	vec![
-		config.bench_bin.display().to_string(),
+		binary.into(),
 		"--client-connect".into(),
-		format!("https://localhost:{}", config.port),
+		url.into(),
 		"--client-backend".into(),
 		"quinn".into(),
 		"--client-version".into(),
@@ -471,8 +534,16 @@ fn bench_base(config: &Config) -> Vec<String> {
 	]
 }
 
+fn local_relay_url(config: &Config) -> String {
+	format!("https://localhost:{}", config.port)
+}
+
 fn publisher_command(config: &Config) -> Vec<String> {
-	let mut command = bench_base(config);
+	let mut command = bench_command(
+		config,
+		&local_relay_url(config),
+		&config.bench_bin.display().to_string(),
+	);
 	command.extend([
 		"--name".into(),
 		"relay-latency".into(),
@@ -486,8 +557,20 @@ fn publisher_command(config: &Config) -> Vec<String> {
 	command
 }
 
-fn subscriber_command(config: &Config) -> Vec<String> {
-	let mut command = bench_base(config);
+fn subscriber_command(config: &Config) -> Result<Vec<String>> {
+	let local_binary = config.bench_bin.display().to_string();
+	let binary = if config.topology.is_remote() {
+		config.topology.subscriber.binary.as_deref().unwrap_or("moq-bench")
+	} else {
+		&local_binary
+	};
+	let url = config
+		.topology
+		.relay_url
+		.as_deref()
+		.map(ToOwned::to_owned)
+		.unwrap_or_else(|| local_relay_url(config));
+	let mut command = bench_command(config, &url, binary);
 	command.extend([
 		"--name".into(),
 		"relay-latency-subscribers".into(),
@@ -500,7 +583,46 @@ fn subscriber_command(config: &Config) -> Vec<String> {
 		"--duration".into(),
 		humantime::format_duration(config.warmup + config.duration + config.cooldown).to_string(),
 	]);
-	command
+	if let Some(ssh) = &config.topology.subscriber.ssh {
+		Ok(ssh_command(
+			ssh,
+			config.topology.subscriber.workdir.as_deref(),
+			&command,
+		))
+	} else {
+		Ok(command)
+	}
+}
+
+fn ssh_command(target: &str, workdir: Option<&str>, command: &[String]) -> Vec<String> {
+	let mut remote = String::new();
+	if let Some(workdir) = workdir {
+		remote.push_str("cd ");
+		remote.push_str(&shell_quote(workdir));
+		remote.push_str(" && ");
+	}
+	remote.push_str("exec ");
+	remote.push_str(&shell_join(command));
+	vec![
+		"ssh".into(),
+		"-T".into(),
+		"-o".into(),
+		"BatchMode=yes".into(),
+		target.into(),
+		remote,
+	]
+}
+
+fn shell_join(values: &[String]) -> String {
+	values
+		.iter()
+		.map(|value| shell_quote(value))
+		.collect::<Vec<_>>()
+		.join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+	format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn build_command(config: &Config) -> Result<Vec<String>> {
@@ -580,6 +702,20 @@ fn capture(config: &Config, commands: &Commands, output: &Path) -> Result<Captur
 	session.wait_for_provider(relay.child.id(), Duration::from_secs(10))?;
 	let relay_pid = relay.child.id();
 	session.start(relay_pid)?;
+	let mut subscriber = ManagedChild::spawn(
+		&commands.subscriber,
+		output,
+		&output.join("subscriber.log"),
+		"subscriber",
+	)?;
+	let connections = format!("connections={}", config.subscribers);
+	wait_for_log(
+		&output.join("subscriber.log"),
+		&mut subscriber,
+		Duration::from_secs(20),
+		|contents| contents.contains(&connections),
+		"subscriber connections",
+	)?;
 	let mut publisher = ManagedChild::spawn(&commands.publisher, output, &output.join("publisher.log"), "publisher")?;
 	wait_for_log(
 		&output.join("publisher.log"),
@@ -588,13 +724,6 @@ fn capture(config: &Config, commands: &Commands, output: &Path) -> Result<Captur
 		|contents| contents.contains("connections=1"),
 		"connections=1",
 	)?;
-	let mut subscriber = ManagedChild::spawn(
-		&commands.subscriber,
-		output,
-		&output.join("subscriber.log"),
-		"subscriber",
-	)?;
-	let connections = format!("connections={}", config.subscribers);
 	let subscriptions = format!("subscriptions={}", config.subscribers);
 	wait_for_log(
 		&output.join("subscriber.log"),
@@ -1012,6 +1141,7 @@ mod tests {
 			skip_build: false,
 			plot: true,
 			python: "python3".into(),
+			topology: Topology::default(),
 		}
 	}
 
@@ -1019,6 +1149,90 @@ mod tests {
 	fn relay_command_has_no_recorder_configuration() {
 		let command = relay_command(&config(50));
 		assert!(!command.iter().any(|value| value.starts_with("--trace-")));
+	}
+
+	#[test]
+	fn local_subscriber_command_uses_local_binary_and_url() {
+		let command = subscriber_command(&config(8)).unwrap();
+		assert_eq!(command[0], "/bench");
+		assert_eq!(command[2], "https://localhost:4443");
+		let connections = command.iter().position(|value| value == "--connections").unwrap();
+		assert_eq!(command[connections + 1], "8");
+	}
+
+	#[test]
+	fn remote_subscriber_command_uses_ssh_topology() {
+		let mut config = config(8);
+		config.topology = Topology {
+			relay_url: Some("https://192.0.2.10:4443".into()),
+			subscriber: SubscriberHost {
+				ssh: Some("user@subscriber.example.com".into()),
+				binary: Some("/opt/moq/target/release/moq-bench".into()),
+				workdir: Some("/opt/moq".into()),
+			},
+		};
+
+		let command = subscriber_command(&config).unwrap();
+		assert_eq!(command[0], "ssh");
+		assert_eq!(command[1], "-T");
+		assert_eq!(command[2], "-o");
+		assert_eq!(command[3], "BatchMode=yes");
+		assert_eq!(command[4], "user@subscriber.example.com");
+		let remote = command.last().unwrap();
+		assert!(remote.starts_with("cd '/opt/moq' && exec '/opt/moq/target/release/moq-bench'"));
+		assert!(remote.contains("'--client-connect' 'https://192.0.2.10:4443'"));
+		assert!(remote.contains("'--connections' '8'"));
+	}
+
+	#[test]
+	fn remote_topology_requires_a_relay_url() {
+		let topology = Topology {
+			relay_url: None,
+			subscriber: SubscriberHost {
+				ssh: Some("user@subscriber.example.com".into()),
+				..Default::default()
+			},
+		};
+		let error = topology.validate().unwrap_err();
+		assert!(error.to_string().contains("requires relay_url"));
+	}
+
+	#[test]
+	fn local_topology_rejects_remote_settings() {
+		let topology = Topology {
+			relay_url: Some("https://192.0.2.10:4443".into()),
+			subscriber: SubscriberHost::default(),
+		};
+		let error = topology.validate().unwrap_err();
+		assert!(error.to_string().contains("require subscriber.ssh"));
+	}
+
+	#[test]
+	fn topology_loads_from_toml() {
+		let directory = tempfile::tempdir().unwrap();
+		let path = directory.path().join("topology.toml");
+		std::fs::write(
+			&path,
+			r#"
+relay_url = "https://192.0.2.10:4443"
+
+[subscriber]
+ssh = "user@subscriber.example.com"
+binary = "/opt/moq-bench"
+workdir = "/opt/moq"
+"#,
+		)
+		.unwrap();
+
+		let topology = Topology::load(Some(&path)).unwrap();
+		assert_eq!(topology.relay_url.as_deref(), Some("https://192.0.2.10:4443"));
+		assert_eq!(topology.subscriber.ssh.as_deref(), Some("user@subscriber.example.com"));
+		assert_eq!(topology.subscriber.binary.as_deref(), Some("/opt/moq-bench"));
+	}
+
+	#[test]
+	fn shell_quote_handles_single_quotes() {
+		assert_eq!(shell_quote("publisher's bench"), "'publisher'\"'\"'s bench'");
 	}
 
 	#[test]
