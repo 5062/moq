@@ -1,5 +1,3 @@
-//! Trace ingestion, validation, metrics, and artifact publication.
-
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::Path;
 use std::time::Duration;

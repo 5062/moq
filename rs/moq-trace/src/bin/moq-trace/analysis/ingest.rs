@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, bail};
 use moq_trace::{
 	Direction, Event, ObjectEndEvent, ObjectEvent, ObjectOutcome, ObjectPhase, PacketEndEvent, PacketEvent,
-	PacketOutcome, PacketPhase, PhaseEdge, SocketOutcome, TRACE_REVISION, TraceClock,
+	PacketOutcome, PacketPhase, PhaseEdge, TRACE_REVISION, TraceClock,
 };
 
 use super::model::{Interval, LogicalObject, ObjectLifecycle, PacketLifecycle, PhaseInterval, StreamFrame, Trace};
@@ -15,6 +15,7 @@ use super::model::{Interval, LogicalObject, ObjectLifecycle, PacketLifecycle, Ph
 struct ObjectBuilder {
 	starts: BTreeMap<u64, ObjectEvent>,
 	ends: BTreeMap<u64, ObjectEndEvent>,
+	failed: BTreeSet<u64>,
 	phase_starts: BTreeMap<(u64, ObjectPhase), Vec<u64>>,
 	phases: BTreeMap<u64, Vec<(ObjectPhase, Interval)>>,
 }
@@ -53,13 +54,7 @@ pub(super) fn read(path: &Path) -> Result<Trace> {
 			Event::MoqObjectStart(event) => insert_unique(&mut objects.starts, event.trace_id, event, "object start")?,
 			Event::MoqObjectEnd(event) => insert_unique(&mut objects.ends, event.trace_id, event, "object end")?,
 			Event::MoqObjectPhase(event) => {
-				if event.edge == PhaseEdge::Done && event.outcome != Some(ObjectOutcome::Success) {
-					bail!(
-						"object trace {} phase {:?} did not succeed",
-						event.trace_id,
-						event.phase
-					);
-				}
+				let success = event.outcome == Some(ObjectOutcome::Success);
 				add_phase(
 					&mut objects.phase_starts,
 					&mut objects.phases,
@@ -67,14 +62,15 @@ pub(super) fn read(path: &Path) -> Result<Trace> {
 					event.phase,
 					event.timestamp_ns,
 					event.edge,
+					success,
 				)?;
+				if event.edge == PhaseEdge::Done && !success {
+					objects.failed.insert(event.trace_id);
+				}
 			}
 			Event::PacketStart(event) => insert_unique(&mut packets.starts, event.trace_id, event, "packet start")?,
 			Event::PacketEnd(event) => insert_unique(&mut packets.ends, event.trace_id, event, "packet end")?,
 			Event::PacketPhase(event) => {
-				if event.edge == PhaseEdge::Done && event.outcome != Some(PacketOutcome::Success) {
-					continue;
-				}
 				add_phase(
 					&mut packets.phase_starts,
 					&mut packets.phases,
@@ -82,6 +78,7 @@ pub(super) fn read(path: &Path) -> Result<Trace> {
 					event.phase,
 					event.timestamp_ns,
 					event.edge,
+					event.outcome == Some(PacketOutcome::Success),
 				)?;
 			}
 			Event::StreamFrame(event) if event.outcome == PacketOutcome::Success => frames.push(StreamFrame {
@@ -100,9 +97,6 @@ pub(super) fn read(path: &Path) -> Result<Trace> {
 			Event::SocketEnd(event) => {
 				if !sockets.remove(&event.trace_id) {
 					bail!("socket end {} has no start", event.trace_id);
-				}
-				if event.outcome == SocketOutcome::Abandoned {
-					bail!("socket trace {} was abandoned", event.trace_id);
 				}
 			}
 			_ => bail!("trace contains an event unsupported by revision {TRACE_REVISION}"),
@@ -128,6 +122,7 @@ fn add_phase<P: Copy + Ord + std::fmt::Debug>(
 	phase: P,
 	timestamp: u64,
 	edge: PhaseEdge,
+	record: bool,
 ) -> Result<()> {
 	match edge {
 		PhaseEdge::Start => starts.entry((trace_id, phase)).or_default().push(timestamp),
@@ -139,10 +134,12 @@ fn add_phase<P: Copy + Ord + std::fmt::Debug>(
 			if timestamp < start {
 				bail!("trace {trace_id} phase {phase:?} completes before it starts");
 			}
-			completed
-				.entry(trace_id)
-				.or_default()
-				.push((phase, Interval { start, end: timestamp }));
+			if record {
+				completed
+					.entry(trace_id)
+					.or_default()
+					.push((phase, Interval { start, end: timestamp }));
+			}
 		}
 	}
 	Ok(())
@@ -155,8 +152,18 @@ fn finish(objects: ObjectBuilder, packets: PacketBuilder, frames: Vec<StreamFram
 	if packets.phase_starts.values().any(|starts| !starts.is_empty()) {
 		bail!("trace contains incomplete packet phases");
 	}
+	if let Some(trace_id) = objects
+		.failed
+		.iter()
+		.find(|trace_id| !objects.starts.contains_key(trace_id))
+	{
+		bail!("failed object trace {trace_id} has no start");
+	}
 	let mut logical = BTreeMap::<moq_trace::LogicalId, (Option<ObjectLifecycle>, Vec<ObjectLifecycle>)>::new();
 	for (trace_id, start) in objects.starts {
+		if objects.failed.contains(&trace_id) {
+			continue;
+		}
 		let end = objects
 			.ends
 			.get(&trace_id)
@@ -184,7 +191,11 @@ fn finish(objects: ObjectBuilder, packets: PacketBuilder, frames: Vec<StreamFram
 			Direction::Tx => entry.1.push(lifecycle),
 		}
 	}
-	if objects.ends.len()
+	if objects
+		.ends
+		.keys()
+		.filter(|trace_id| !objects.failed.contains(*trace_id))
+		.count()
 		!= logical
 			.values()
 			.map(|(rx, tx)| usize::from(rx.is_some()) + tx.len())
@@ -270,4 +281,141 @@ fn validate_object_phases(direction: Direction, phases: &[(ObjectPhase, Interval
 		}
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use std::io::Write;
+
+	use moq_trace::{
+		Event, PacketEndEvent, PacketEvent, PacketOutcome, PacketPhase, PacketPhaseEvent, PhaseEdge, TraceClock,
+		TraceHeaderEvent,
+	};
+
+	use super::read;
+
+	#[test]
+	fn dropped_packet_phase_is_complete_but_not_measured() {
+		let mut input = tempfile::NamedTempFile::new().unwrap();
+		let events = [
+			Event::TraceHeader(TraceHeaderEvent {
+				revision: moq_trace::TRACE_REVISION,
+				clock: TraceClock::MonotonicNs,
+			}),
+			Event::PacketStart(PacketEvent {
+				timestamp_ns: 10,
+				trace_id: 1,
+				connection_id: 2,
+				direction: moq_trace::Direction::Rx,
+				packet_number: Some(3),
+				packet_space: None,
+				byte_len: Some(1200),
+				sample_rate: 1,
+			}),
+			Event::PacketPhase(PacketPhaseEvent {
+				timestamp_ns: 20,
+				trace_id: 1,
+				phase: PacketPhase::PayloadDecrypt,
+				edge: PhaseEdge::Start,
+				outcome: None,
+			}),
+			Event::PacketPhase(PacketPhaseEvent {
+				timestamp_ns: 30,
+				trace_id: 1,
+				phase: PacketPhase::PayloadDecrypt,
+				edge: PhaseEdge::Done,
+				outcome: Some(PacketOutcome::Dropped),
+			}),
+			Event::PacketEnd(PacketEndEvent {
+				timestamp_ns: 40,
+				trace_id: 1,
+				packet_number: Some(3),
+				packet_space: None,
+				byte_len: Some(1200),
+				outcome: PacketOutcome::Dropped,
+			}),
+		];
+		for event in events {
+			writeln!(input, "{}", serde_json::to_string(&event).unwrap()).unwrap();
+		}
+
+		let trace = read(input.path()).unwrap();
+		assert!(trace.packets[&1].phases.is_empty());
+	}
+
+	#[test]
+	fn failed_object_lifecycle_is_complete_but_not_measured() {
+		let mut input = tempfile::NamedTempFile::new().unwrap();
+		let events = [
+			Event::TraceHeader(TraceHeaderEvent {
+				revision: moq_trace::TRACE_REVISION,
+				clock: TraceClock::MonotonicNs,
+			}),
+			Event::MoqObjectStart(moq_trace::ObjectEvent {
+				timestamp_ns: 10,
+				trace_id: 1,
+				logical_id: moq_trace::LogicalId::new(2, 3),
+				session_id: Some(4),
+				connection_id: Some(5),
+				direction: moq_trace::Direction::Tx,
+				protocol: moq_trace::Protocol::MoqTransport,
+				track_alias: 6,
+				group_id: 7,
+				object_id: 8,
+				stream_id: Some(9),
+				stream_offset_start: Some(10),
+				sample_rate: 1,
+			}),
+			Event::MoqObjectPhase(moq_trace::ObjectPhaseEvent {
+				timestamp_ns: 20,
+				trace_id: 1,
+				phase: moq_trace::ObjectPhase::PayloadWrite,
+				edge: PhaseEdge::Start,
+				outcome: None,
+			}),
+			Event::MoqObjectPhase(moq_trace::ObjectPhaseEvent {
+				timestamp_ns: 30,
+				trace_id: 1,
+				phase: moq_trace::ObjectPhase::PayloadWrite,
+				edge: PhaseEdge::Done,
+				outcome: Some(moq_trace::ObjectOutcome::Failed),
+			}),
+		];
+		for event in events {
+			writeln!(input, "{}", serde_json::to_string(&event).unwrap()).unwrap();
+		}
+
+		let trace = read(input.path()).unwrap();
+		assert!(trace.objects.is_empty());
+	}
+
+	#[test]
+	fn abandoned_socket_operation_is_complete() {
+		let mut input = tempfile::NamedTempFile::new().unwrap();
+		let events = [
+			Event::TraceHeader(TraceHeaderEvent {
+				revision: moq_trace::TRACE_REVISION,
+				clock: TraceClock::MonotonicNs,
+			}),
+			Event::SocketStart(moq_trace::SocketEvent {
+				timestamp_ns: 10,
+				trace_id: 1,
+				connection_id: None,
+				direction: moq_trace::Direction::Rx,
+				sample_rate: 1,
+			}),
+			Event::SocketEnd(moq_trace::SocketEndEvent {
+				timestamp_ns: 20,
+				trace_id: 1,
+				outcome: moq_trace::SocketOutcome::Abandoned,
+				stats: moq_trace::SocketStats::default(),
+			}),
+		];
+		for event in events {
+			writeln!(input, "{}", serde_json::to_string(&event).unwrap()).unwrap();
+		}
+
+		let trace = read(input.path()).unwrap();
+		assert!(trace.objects.is_empty());
+	}
 }

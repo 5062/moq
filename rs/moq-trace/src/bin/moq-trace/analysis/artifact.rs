@@ -25,6 +25,7 @@ pub(super) fn publish(output: &Path, report: &Report) -> Result<()> {
 	if output.exists() {
 		bail!("analysis output already exists: {}", output.display());
 	}
+
 	let parent = output
 		.parent()
 		.filter(|parent| !parent.as_os_str().is_empty())
@@ -38,6 +39,7 @@ pub(super) fn publish(output: &Path, report: &Report) -> Result<()> {
 	write_csv(&staging.path().join("objects.csv"), &report.object_samples)?;
 	write_csv(&staging.path().join("quic_objects.csv"), &report.quic_object_samples)?;
 	write_csv(&staging.path().join("quic_packets.csv"), &report.packet_samples)?;
+
 	let manifest = Manifest {
 		files: Files {
 			objects: "objects.csv",
@@ -49,6 +51,7 @@ pub(super) fn publish(output: &Path, report: &Report) -> Result<()> {
 	let mut writer = BufWriter::new(File::create(staging.path().join("manifest.json"))?);
 	serde_json::to_writer_pretty(&mut writer, &manifest)?;
 	writer.flush()?;
+
 	let staging = staging.keep();
 	if let Err(error) = std::fs::rename(&staging, output) {
 		let _ = std::fs::remove_dir_all(&staging);

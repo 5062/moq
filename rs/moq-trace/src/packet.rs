@@ -45,7 +45,6 @@ pub enum PacketPhase {
 }
 
 impl PacketPhase {
-	/// Return the serialized phase name.
 	pub const fn as_str(self) -> &'static str {
 		match self {
 			Self::HeaderParse => "header_parse",

@@ -1,4 +1,4 @@
-//! Raw JSONL tracing for MoQ relay object and QUIC packet latency.
+//! Relay tracing for MoQ objects and QUIC packets.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -32,11 +32,11 @@ pub struct Config {
 	/// File path for newline-delimited JSON events. `None` keeps tracing in no-op mode.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub path: Option<PathBuf>,
-	/// Emit all events for every Nth MoQ object ID. Values below 1 are treated as 1.
+	/// Emit all events for every n-th MoQ object ID. Values below 1 are treated as 1.
 	pub object_sample: u64,
-	/// Emit all events for every Nth QUIC packet number. Values below 1 are treated as 1.
+	/// Emit all events for every n-th QUIC packet number. Values below 1 are treated as 1.
 	pub packet_sample: u64,
-	/// Emit every Nth UDP socket operation. Values below 1 are treated as 1.
+	/// Emit every n-th UDP socket operation. Values below 1 are treated as 1.
 	pub socket_sample: u64,
 	/// Maximum queued events before new events are dropped.
 	pub queue_capacity: usize,
@@ -100,7 +100,6 @@ pub enum Direction {
 }
 
 impl Direction {
-	/// Return the serialized direction name.
 	pub const fn as_str(self) -> &'static str {
 		match self {
 			Self::Rx => "rx",
@@ -233,13 +232,13 @@ struct Inner {
 }
 
 impl Handle {
-	/// Create a handle from config, spawning a writer thread when `path` is set.
 	pub fn new(config: Config) -> Result<Self, Error> {
 		let config = config.normalized();
 		let Some(path) = config.path.clone() else {
 			return Ok(Self::disabled());
 		};
 
+		// Spawn a writer thread when `path` is set
 		let file = File::create(path).map_err(Error::Create)?;
 		let (sender, receiver) = std::sync::mpsc::sync_channel(config.queue_capacity);
 		let writer_failed = Arc::new(AtomicBool::new(false));
@@ -255,7 +254,6 @@ impl Handle {
 		})
 	}
 
-	/// Return a disabled handle.
 	pub fn disabled() -> Self {
 		Self::default()
 	}
@@ -436,7 +434,7 @@ pub fn global() -> Handle {
 	}
 }
 
-/// Return a monotonic timestamp in nanoseconds for trace events.
+/// Return a monotonic timestamp in nanoseconds.
 pub fn now_ns() -> u64 {
 	static START: OnceLock<std::time::Instant> = OnceLock::new();
 	START

@@ -275,10 +275,12 @@ fn build_timeline(
 			full_span_us: us(tx.end.timestamp_ns - origin),
 		});
 	}
+
 	let slowest_copy = *copies
 		.iter()
 		.max_by(|left, right| left.full_span_us.total_cmp(&right.full_span_us))
 		.unwrap();
+
 	Ok(ObjectTimeline {
 		selection: TimelineSelection {
 			statistic: statistic.into(),

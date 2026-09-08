@@ -34,6 +34,7 @@ pub(super) fn resolve(trace: &Trace, object: &ObjectLifecycle) -> Result<Coverag
 	if end <= start {
 		bail!("object trace {} has an empty transport range", object.start.trace_id);
 	}
+
 	let target = start..end;
 	let mut candidates = trace
 		.frames
@@ -72,6 +73,7 @@ pub(super) fn resolve(trace: &Trace, object: &ObjectLifecycle) -> Result<Coverag
 			break;
 		}
 	}
+
 	Ok(Coverage {
 		first_start: first_start
 			.ok_or_else(|| anyhow!("object trace {} has no covering packets", object.start.trace_id))?,

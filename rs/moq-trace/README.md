@@ -272,7 +272,7 @@ The experiment writes:
 - `analysis/objects.csv`: MoQ `full_span` samples.
 - `analysis/quic_objects.csv`: the three QUIC-inclusive metrics per subscriber copy.
 - `analysis/quic_packets.csv`: packet-span and packet-phase samples.
-- `analysis/manifest.json`: versioned typed metadata consumed by the plotting layer.
+- `analysis/manifest.json`: typed metadata consumed by the plotting layer.
 - `summary.json`: workload metadata, counts, and all three statistics sections.
 - `latency.png`: MoQ latency distributions, percentiles, and time series.
 - `quic_latency.png`: QUIC-inclusive object plots.

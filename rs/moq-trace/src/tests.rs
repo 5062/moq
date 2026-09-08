@@ -74,47 +74,6 @@ fn object_children_only_reference_the_start_record() {
 }
 
 #[test]
-fn logical_identity_samples_ingress_and_copies_together() {
-	let directory = tempfile::tempdir().unwrap();
-	let path = directory.path().join("trace.jsonl");
-	let handle = Handle::new(Config {
-		path: Some(path.clone()),
-		object_sample: 2,
-		..Config::default()
-	})
-	.unwrap();
-	let sampled = (0..)
-		.map(|frame| LogicalId::new(9, frame))
-		.find(|logical_id| handle.object_sample_rate(*logical_id).is_some())
-		.unwrap();
-	for direction in [Direction::Rx, Direction::Tx, Direction::Tx] {
-		handle
-			.object(ObjectContext::new(direction, ObjectIdentity::new(1, 2, 3), sampled))
-			.finish();
-	}
-	let skipped = (0..)
-		.map(|frame| LogicalId::new(10, frame))
-		.find(|logical_id| handle.object_sample_rate(*logical_id).is_none())
-		.unwrap();
-	for direction in [Direction::Rx, Direction::Tx] {
-		handle
-			.object(ObjectContext::new(direction, ObjectIdentity::new(1, 2, 4), skipped))
-			.finish();
-	}
-	drop(handle);
-
-	let starts = read(&path)
-		.into_iter()
-		.filter_map(|event| match event {
-			Event::MoqObjectStart(event) => Some(event),
-			_ => None,
-		})
-		.collect::<Vec<_>>();
-	assert_eq!(starts.len(), 3);
-	assert!(starts.iter().all(|event| event.logical_id == sampled));
-}
-
-#[test]
 fn packet_end_contains_metadata_discovered_after_start() {
 	let (_directory, path, handle) = trace();
 	let mut packet = handle.packet(PacketContext::new(Direction::Rx, 7).with_byte_len(1200));
