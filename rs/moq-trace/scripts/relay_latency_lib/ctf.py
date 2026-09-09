@@ -19,7 +19,7 @@ SCHEMAS = {
         logical_group=pa.uint64(), logical_frame=pa.uint64(), session_id=pa.uint64(),
         connection_id=pa.uint64(), direction=pa.string(), protocol=pa.string(),
         track_alias=pa.uint64(), group_id=pa.uint64(), object_id=pa.uint64(),
-        stream_id=pa.uint64(), stream_offset_start=pa.uint64(), sample_rate=pa.uint64(),
+        stream_id=pa.uint64(), stream_offset_start=pa.uint64(),
     ),
     "moq_object_end": _schema(
         ctf_timestamp_ns=pa.uint64(), timestamp_ns=pa.uint64(), trace_id=pa.uint64(),
@@ -32,7 +32,7 @@ SCHEMAS = {
     "quic_packet_start": _schema(
         ctf_timestamp_ns=pa.uint64(), timestamp_ns=pa.uint64(), trace_id=pa.uint64(),
         connection_id=pa.uint64(), direction=pa.string(), packet_number=pa.uint64(),
-        packet_space=pa.string(), byte_len=pa.uint64(), sample_rate=pa.uint64(),
+        packet_space=pa.string(), byte_len=pa.uint64(),
     ),
     "quic_packet_end": _schema(
         ctf_timestamp_ns=pa.uint64(), timestamp_ns=pa.uint64(), trace_id=pa.uint64(),
@@ -50,7 +50,7 @@ SCHEMAS = {
     ),
     "udp_socket_start": _schema(
         ctf_timestamp_ns=pa.uint64(), timestamp_ns=pa.uint64(), trace_id=pa.uint64(),
-        connection_id=pa.uint64(), direction=pa.string(), sample_rate=pa.uint64(),
+        connection_id=pa.uint64(), direction=pa.string(),
     ),
     "udp_socket_end": _schema(
         ctf_timestamp_ns=pa.uint64(), timestamp_ns=pa.uint64(), trace_id=pa.uint64(),

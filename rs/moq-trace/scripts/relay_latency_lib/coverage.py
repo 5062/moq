@@ -58,7 +58,6 @@ def resolve(connection: duckdb.DuckDBPyConnection) -> None:
            JOIN packet_lifecycles AS packet
              ON packet.connection_id = object.connection_id
             AND packet.direction = object.direction
-            AND packet.sample_rate = 1
             AND packet.outcome = 'success'
            JOIN quic_stream_frame AS frame
              ON frame.trace_id = packet.trace_id

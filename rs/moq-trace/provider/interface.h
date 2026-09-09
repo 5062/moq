@@ -87,7 +87,6 @@ struct moq_trace_moq_object_start {
 	uint64_t stream_id;
 	uint8_t has_stream_offset_start;
 	uint64_t stream_offset_start;
-	uint64_t sample_rate;
 };
 
 struct moq_trace_moq_object_end {
@@ -119,7 +118,6 @@ struct moq_trace_quic_packet_start {
 	uint8_t packet_space;
 	uint8_t has_byte_len;
 	uint64_t byte_len;
-	uint64_t sample_rate;
 };
 
 struct moq_trace_quic_packet_end {
@@ -159,7 +157,6 @@ struct moq_trace_udp_socket_start {
 	uint8_t has_connection_id;
 	uint64_t connection_id;
 	uint8_t direction;
-	uint64_t sample_rate;
 };
 
 struct moq_trace_udp_socket_end {

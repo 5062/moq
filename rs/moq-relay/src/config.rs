@@ -1,7 +1,7 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthConfig, CacheConfig, ClusterConfig, InternalConfig, StatsConfig, TraceConfig, WebConfig};
+use crate::{AuthConfig, CacheConfig, ClusterConfig, InternalConfig, StatsConfig, WebConfig};
 
 /// Top-level relay configuration, loadable from CLI arguments, environment
 /// variables, or a TOML file.
@@ -44,11 +44,6 @@ pub struct Config {
 	#[command(flatten)]
 	#[serde(default)]
 	pub stats: StatsConfig,
-
-	/// LTTng-UST tracepoint sampling configuration.
-	#[command(flatten)]
-	#[serde(default)]
-	pub trace: TraceConfig,
 
 	/// Group cache sizing. Unbounded unless `cache.capacity` or `cache.headroom`
 	/// is set.
@@ -173,68 +168,6 @@ depth = 2
 		assert_eq!(config.stats.interval, Some(5));
 		assert_eq!(config.stats.node.as_deref(), Some("localhost"));
 		assert_eq!(config.stats.depth, Some(2));
-	}
-
-	/// Serializes tests that touch `MOQ_TRACE_*`. Same rationale as
-	/// `STATS_ENV_LOCK`.
-	static TRACE_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-	#[test]
-	fn cli_does_not_clobber_toml_trace() {
-		let _guard = TRACE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		unsafe {
-			std::env::remove_var("MOQ_TRACE_OBJECT_SAMPLE");
-			std::env::remove_var("MOQ_TRACE_PACKET_SAMPLE");
-			std::env::remove_var("MOQ_TRACE_SOCKET_SAMPLE");
-		}
-
-		let toml = r#"
-[trace]
-object_sample = 10
-packet_sample = 20
-socket_sample = 30
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("trace-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(config.trace.object_sample, Some(10));
-		assert_eq!(config.trace.packet_sample, Some(20));
-		assert_eq!(config.trace.socket_sample, Some(30));
-	}
-
-	#[test]
-	fn cli_flag_overrides_toml_trace() {
-		let _guard = TRACE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		unsafe {
-			std::env::remove_var("MOQ_TRACE_OBJECT_SAMPLE");
-			std::env::remove_var("MOQ_TRACE_PACKET_SAMPLE");
-			std::env::remove_var("MOQ_TRACE_SOCKET_SAMPLE");
-		}
-
-		let toml = "[trace]\nobject_sample = 10\npacket_sample = 20\n";
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("trace-cli-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![
-			std::ffi::OsString::from("moq-relay"),
-			std::ffi::OsString::from(&path),
-			std::ffi::OsString::from("--trace-object-sample"),
-			std::ffi::OsString::from("5"),
-			std::ffi::OsString::from("--trace-socket-sample"),
-			std::ffi::OsString::from("5"),
-		];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(config.trace.object_sample, Some(5));
-		assert_eq!(config.trace.packet_sample, Some(20));
-		assert_eq!(config.trace.socket_sample, Some(5));
 	}
 
 	/// Serializes tests that touch `MOQ_CACHE_*`. Same rationale as

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use moq_trace::{Config, Direction, Handle, LogicalId, ObjectContext, ObjectIdentity, ObjectOutcome, ObjectPhase};
+use moq_trace::{Direction, Handle, LogicalId, ObjectContext, ObjectIdentity, ObjectOutcome, ObjectPhase};
 
 const INSPECT: &str = r#"
 import pathlib
@@ -37,7 +37,7 @@ fn helper_process() {
 	let Ok(group) = std::env::var("MOQ_TRACE_TEST_HELPER_GROUP") else {
 		return;
 	};
-	moq_trace::install(Config::default()).unwrap();
+	moq_trace::install().unwrap();
 	println!("ready");
 	std::io::stdout().flush().unwrap();
 	std::io::stdin().read_exact(&mut [0]).unwrap();
@@ -59,7 +59,7 @@ fn records_real_ctf_with_event_and_process_filtering() {
 	}
 
 	let root = tempfile::tempdir().unwrap();
-	moq_trace::install(Config::default()).unwrap();
+	moq_trace::install().unwrap();
 	let parent_handle = moq_trace::global();
 	let ctf = root.path().join("trace.ctf");
 	let session = lttng::Session::create(&ctf).unwrap();

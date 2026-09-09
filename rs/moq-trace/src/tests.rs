@@ -1,7 +1,7 @@
 use super::*;
 
 fn trace() -> Handle {
-	Handle::new(Config::default())
+	Handle::new()
 }
 
 #[test]
@@ -107,6 +107,6 @@ fn trace_ids_are_unique_across_handles() {
 
 #[test]
 fn global_destination_is_install_once() {
-	install(Config::default()).unwrap();
-	assert!(matches!(install(Config::default()), Err(Error::GlobalAlreadyInstalled)));
+	install().unwrap();
+	assert!(matches!(install(), Err(Error::GlobalAlreadyInstalled)));
 }

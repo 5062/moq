@@ -15,7 +15,6 @@ mod connection;
 mod http_client;
 mod internal;
 mod stats;
-mod trace;
 mod web;
 #[cfg(feature = "websocket")]
 mod websocket;
@@ -37,5 +36,4 @@ pub use config::*;
 pub use connection::*;
 pub use internal::*;
 pub use stats::*;
-pub use trace::*;
 pub use web::*;

@@ -1,4 +1,3 @@
-use std::hash::BuildHasher;
 use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
@@ -45,8 +44,6 @@ pub struct ObjectEvent {
 	/// Inclusive stream byte offset where this object starts, when known.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub stream_offset_start: Option<u64>,
-	/// Sampling rate active for this event.
-	pub sample_rate: u64,
 }
 
 /// Identity shared by ingress and every outbound copy of one logical object.
@@ -223,7 +220,7 @@ impl ObjectContext {
 	}
 }
 
-/// A sampled moq-transport object trace, or a zero-work disabled token.
+/// A moq-transport object trace, or a zero-work disabled token.
 #[must_use = "object traces must be explicitly finished when processing completes"]
 pub struct ObjectTrace(Option<ObjectTraceState>);
 
@@ -359,30 +356,19 @@ pub struct ObjectPhaseEvent {
 }
 
 impl Handle {
-	fn object_sample_rate(&self, logical_id: LogicalId) -> Option<u64> {
-		let inner = self.inner.as_ref()?;
-		let sample = inner.config.object_sample;
-		if inner.object_hasher.hash_one(logical_id) % sample == sample - 1 {
-			Some(sample)
-		} else {
-			None
-		}
-	}
-
-	/// Start a moq-transport object trace after applying object sampling.
+	/// Start a moq-transport object trace.
 	pub fn object(&self, context: ObjectContext) -> ObjectTrace {
 		if !crate::backend::object_enabled() {
 			return ObjectTrace::disabled();
 		}
-		let logical_id = context.logical_id;
-		let Some(sample_rate) = self.object_sample_rate(logical_id) else {
+		let Some(inner) = self.inner.as_ref() else {
 			return ObjectTrace::disabled();
 		};
 		let trace_id = crate::NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed);
 		let object = ObjectEvent {
 			timestamp_ns: now_ns(),
 			trace_id,
-			logical_id,
+			logical_id: context.logical_id,
 			session_id: context.session_id.or(self.session_id),
 			connection_id: context.connection_id.or(self.connection_id),
 			direction: context.direction,
@@ -392,56 +378,13 @@ impl Handle {
 			object_id: context.object_id,
 			stream_id: context.stream_id,
 			stream_offset_start: context.stream_offset_start,
-			sample_rate,
 		};
-		self.emit(Event::MoqObjectStart(object));
+		inner.emit(Event::MoqObjectStart(object));
 		ObjectTrace(Some(ObjectTraceState {
 			handle: self.clone(),
 			trace_id,
 			payload_bytes: context.payload_bytes,
 			stream_offset_end: None,
 		}))
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use crate::Config;
-
-	#[test]
-	fn logical_identity_samples_ingress_and_copies_together() {
-		let handle = Handle::new(Config {
-			object_sample: 2,
-			..Config::default()
-		});
-		let sampled = (0..)
-			.map(|frame| LogicalId::new(9, frame))
-			.find(|logical_id| handle.object_sample_rate(*logical_id).is_some())
-			.unwrap();
-		for direction in [Direction::Rx, Direction::Tx, Direction::Tx] {
-			handle
-				.object(ObjectContext::new(direction, ObjectIdentity::new(1, 2, 3), sampled))
-				.finish();
-		}
-		let skipped = (0..)
-			.map(|frame| LogicalId::new(10, frame))
-			.find(|logical_id| handle.object_sample_rate(*logical_id).is_none())
-			.unwrap();
-		for direction in [Direction::Rx, Direction::Tx] {
-			handle
-				.object(ObjectContext::new(direction, ObjectIdentity::new(1, 2, 4), skipped))
-				.finish();
-		}
-		let starts = handle
-			.events()
-			.into_iter()
-			.filter_map(|event| match event {
-				Event::MoqObjectStart(event) => Some(event),
-				_ => None,
-			})
-			.collect::<Vec<_>>();
-		assert_eq!(starts.len(), 3);
-		assert!(starts.iter().all(|event| event.logical_id == sampled));
 	}
 }

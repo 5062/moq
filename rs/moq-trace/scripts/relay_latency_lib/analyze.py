@@ -288,8 +288,6 @@ def run(
             origin = _select_workload(
                 connection, object_size, subscribers, warmup_ns, cooldown_ns
             )
-            if _count(connection, "SELECT count(*) FROM quic_packet_start WHERE sample_rate <> 1"):
-                raise AnalyzeError("QUIC object correlation requires packet_sample = 1")
             _coverage(connection)
             _derive_samples(connection, origin)
             report = _build_report(connection, DATABASE)

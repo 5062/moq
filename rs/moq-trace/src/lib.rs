@@ -23,38 +23,6 @@ pub use packet::{
 mod socket;
 pub use socket::{SocketEndEvent, SocketEvent, SocketOutcome, SocketStats, SocketTrace};
 
-/// Tracing configuration shared by MoQ and QUIC instrumentation.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-#[non_exhaustive]
-pub struct Config {
-	/// Emit all events for every n-th MoQ object ID. Values below 1 are treated as 1.
-	pub object_sample: u64,
-	/// Emit all events for every n-th QUIC packet number. Values below 1 are treated as 1.
-	pub packet_sample: u64,
-	/// Emit every n-th UDP socket operation. Values below 1 are treated as 1.
-	pub socket_sample: u64,
-}
-
-impl Config {
-	fn normalized(mut self) -> Self {
-		self.object_sample = self.object_sample.max(1);
-		self.packet_sample = self.packet_sample.max(1);
-		self.socket_sample = self.socket_sample.max(1);
-		self
-	}
-}
-
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			object_sample: 1,
-			packet_sample: 1,
-			socket_sample: 1,
-		}
-	}
-}
-
 /// Errors returned when installing process-global tracing.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -171,20 +139,15 @@ static NEXT_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
 
 struct Inner {
-	config: Config,
-	packet_seen: AtomicU64,
-	socket_seen: AtomicU64,
-	object_hasher: std::collections::hash_map::RandomState,
 	#[cfg(test)]
 	events: std::sync::Mutex<Vec<Event>>,
 }
 
 impl Handle {
 	#[cfg(test)]
-	fn new(config: Config) -> Self {
-		let config = config.normalized();
+	fn new() -> Self {
 		Self {
-			inner: Some(Arc::new(Inner::new(config))),
+			inner: Some(Arc::new(Inner::new())),
 			session_id: None,
 			connection_id: None,
 		}
@@ -232,12 +195,8 @@ impl Handle {
 }
 
 impl Inner {
-	fn new(config: Config) -> Self {
+	fn new() -> Self {
 		Self {
-			config,
-			packet_seen: AtomicU64::new(0),
-			socket_seen: AtomicU64::new(0),
-			object_hasher: std::collections::hash_map::RandomState::new(),
 			#[cfg(test)]
 			events: std::sync::Mutex::new(Vec::new()),
 		}
@@ -259,16 +218,16 @@ static GLOBAL: OnceLock<Arc<Inner>> = OnceLock::new();
 
 /// Install process-global tracing for MoQ, QUIC, and socket instrumentation.
 #[cfg(target_os = "linux")]
-pub fn install(config: Config) -> Result<(), Error> {
+pub fn install() -> Result<(), Error> {
 	backend::initialize();
 	GLOBAL
-		.set(Arc::new(Inner::new(config.normalized())))
+		.set(Arc::new(Inner::new()))
 		.map_err(|_| Error::GlobalAlreadyInstalled)
 }
 
 /// Install process-global tracing for MoQ, QUIC, and socket instrumentation.
 #[cfg(not(target_os = "linux"))]
-pub fn install(_config: Config) -> Result<(), Error> {
+pub fn install() -> Result<(), Error> {
 	Err(Error::UnsupportedPlatform)
 }
 

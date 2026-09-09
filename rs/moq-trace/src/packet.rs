@@ -91,7 +91,7 @@ impl PacketContext {
 		}
 	}
 
-	/// Attach the QUIC packet number used for TX sampling.
+	/// Attach the QUIC packet number.
 	pub fn with_number(mut self, number: u64) -> Self {
 		self.packet_number = Some(number);
 		self
@@ -156,8 +156,6 @@ pub struct PacketEvent {
 	/// Encoded packet length in bytes when known.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub byte_len: Option<usize>,
-	/// Sampling rate active for this packet.
-	pub sample_rate: u64,
 }
 
 /// One boundary of a measured packet phase.
@@ -218,7 +216,7 @@ pub struct PacketEndEvent {
 	pub outcome: PacketOutcome,
 }
 
-/// A sampled QUIC packet whose completion consumes the token.
+/// A QUIC packet whose completion consumes the token.
 #[must_use = "dropping a packet trace records an abandoned packet"]
 pub struct PacketTrace(Option<PacketTraceState>);
 
@@ -227,7 +225,7 @@ struct PacketTraceState {
 	packet: PacketEvent,
 }
 
-/// A sampled packet phase whose completion consumes the token.
+/// A packet phase whose completion consumes the token.
 #[must_use = "dropping a packet phase records an abandoned phase"]
 pub struct PacketPhaseTrace(Option<PacketPhaseTraceState>);
 
@@ -240,7 +238,7 @@ struct PacketPhaseTraceState {
 }
 
 impl Handle {
-	/// Start a sampled QUIC packet trace.
+	/// Start a QUIC packet trace.
 	pub fn packet(&self, context: PacketContext) -> PacketTrace {
 		if !crate::backend::packet_enabled() {
 			return PacketTrace::disabled();
@@ -248,18 +246,6 @@ impl Handle {
 		let Some(inner) = self.inner.as_ref() else {
 			return PacketTrace::disabled();
 		};
-		let sample_rate = inner.config.packet_sample;
-		let sampled = context
-			.packet_number
-			.map(|number| number % sample_rate == sample_rate - 1)
-			.unwrap_or_else(|| {
-				let seen = inner.packet_seen.fetch_add(1, Ordering::Relaxed);
-				seen % sample_rate == sample_rate - 1
-			});
-		if !sampled {
-			return PacketTrace::disabled();
-		}
-
 		let packet = PacketEvent {
 			timestamp_ns: context.start_ns.unwrap_or_else(now_ns),
 			trace_id: crate::NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed),
@@ -268,7 +254,6 @@ impl Handle {
 			packet_number: context.packet_number,
 			packet_space: context.packet_space,
 			byte_len: context.byte_len,
-			sample_rate,
 		};
 		inner.emit(Event::PacketStart(packet.clone()));
 		PacketTrace(Some(PacketTraceState {

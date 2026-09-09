@@ -41,20 +41,8 @@ Stop the session after the workload with `lttng stop moq-relay` and
 `lttng destroy moq-relay`. The `moq-trace experiment` command performs this
 session lifecycle automatically.
 
-The relay accepts the same settings through TOML, CLI flags, or environment
-variables:
-
-| TOML field | CLI flag | Environment variable | Default |
-| --- | --- | --- | --- |
-| `trace.object_sample` | `--trace-object-sample` | `MOQ_TRACE_OBJECT_SAMPLE` | `1` |
-| `trace.packet_sample` | `--trace-packet-sample` | `MOQ_TRACE_PACKET_SAMPLE` | `1` |
-| `trace.socket_sample` | `--trace-socket-sample` | `MOQ_TRACE_SOCKET_SAMPLE` | `1` |
-
-A relay built without `--features trace` rejects trace configuration at
-startup instead of silently ignoring it.
-
-The relay installs one process-global trace configuration during startup. MoQ,
-QUIC, and socket instrumentation all emit through the same provider. Session,
+The relay installs one process-global trace provider during startup. MoQ, QUIC,
+and socket instrumentation all emit through the same provider. Session,
 connection, and object identifiers remain per-event context, so the analyzer
 can separate sessions without splitting one cross-layer lifecycle across
 multiple files.
@@ -148,13 +136,7 @@ Offline packet correlation requires the same direction, `connection_id`, and
 `stream_id`, plus a non-empty overlap with the STREAM frame's half-open range.
 The analyzer does not infer connections from session order or timestamps.
 
-## Sampling and backpressure
-
-`object_sample`, `packet_sample`, and `socket_sample` are independent. Sampling
-is decided once when a scoped trace starts, so its start, phase, child, and end
-records stay together. TX packets sample by packet number. RX packets sample by
-decode order because their packet number is unavailable before header
-unprotection.
+## Backpressure
 
 Enabled probes write to LTTng-UST's per-CPU ring buffers. The hot path does not
 perform serialization or disk I/O. Configure channel size and loss policy with
@@ -281,10 +263,9 @@ moq-trace experiment --no-plot
 moq-trace plot target/moq-trace/RUN
 ```
 
-Correlated object analysis requires `packet_sample = 1`, complete packet
-lifecycles, transport identity on every completed object, and complete STREAM
-frame coverage. Validation fails when any requirement is missing instead of
-guessing a join.
+Correlated object analysis requires complete packet lifecycles, transport
+identity on every completed object, and complete STREAM frame coverage.
+Validation fails when any requirement is missing instead of guessing a join.
 
 Frames are ordered by their recorded observation time, then packet completion
 and trace ID for deterministic ties. The analyzer accumulates their clipped

@@ -60,7 +60,6 @@ class SqlAnalysisTests(unittest.TestCase):
             object_id=0,
             stream_id=connection_id * 10,
             stream_offset_start=0,
-            sample_rate=1,
         )
         self.insert(
             "moq_object_end",
@@ -82,7 +81,6 @@ class SqlAnalysisTests(unittest.TestCase):
             packet_number=1,
             packet_space="data",
             byte_len=1200,
-            sample_rate=1,
         )
         self.insert(
             "quic_packet_end",

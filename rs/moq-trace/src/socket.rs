@@ -56,8 +56,6 @@ pub struct SocketEvent {
 	pub connection_id: Option<u64>,
 	/// Whether the operation receives or transmits datagrams.
 	pub direction: Direction,
-	/// Sampling rate active for this operation.
-	pub sample_rate: u64,
 }
 
 /// Fields recorded when a UDP socket operation ends.
@@ -74,7 +72,7 @@ pub struct SocketEndEvent {
 	pub stats: SocketStats,
 }
 
-/// A sampled UDP socket operation whose completion consumes the token.
+/// A UDP socket operation whose completion consumes the token.
 pub struct SocketTrace {
 	handle: Handle,
 	event: SocketEvent,
@@ -82,24 +80,17 @@ pub struct SocketTrace {
 }
 
 impl Handle {
-	/// Start a sampled UDP socket operation.
+	/// Start a UDP socket operation.
 	pub fn socket(&self, direction: Direction, connection_id: Option<u64>) -> Option<SocketTrace> {
 		if !crate::backend::socket_enabled() {
 			return None;
 		}
 		let inner = self.inner.as_ref()?;
-		let sample_rate = inner.config.socket_sample;
-		let seen = inner.socket_seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-		if seen % sample_rate != sample_rate - 1 {
-			return None;
-		}
-
 		let event = SocketEvent {
 			timestamp_ns: now_ns(),
 			trace_id: crate::NEXT_TRACE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
 			connection_id,
 			direction,
-			sample_rate,
 		};
 		inner.emit(Event::SocketStart(event.clone()));
 		Some(SocketTrace {

@@ -59,7 +59,6 @@ pub(crate) fn emit(event: &Event) -> bool {
 					stream_id,
 					has_stream_offset_start,
 					stream_offset_start,
-					sample_rate: event.sample_rate,
 				});
 				true
 			}
@@ -102,7 +101,6 @@ pub(crate) fn emit(event: &Event) -> bool {
 					packet_space,
 					has_byte_len,
 					byte_len,
-					sample_rate: event.sample_rate,
 				});
 				true
 			}
@@ -155,7 +153,6 @@ pub(crate) fn emit(event: &Event) -> bool {
 					has_connection_id,
 					connection_id,
 					direction: direction(event.direction),
-					sample_rate: event.sample_rate,
 				});
 				true
 			}
