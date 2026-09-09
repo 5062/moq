@@ -18,7 +18,7 @@ from .plot import (
 
 
 class RenderError(RuntimeError):
-    """Rust-produced experiment artifacts cannot be rendered."""
+    """Experiment artifacts cannot be rendered."""
 
 
 def _load_json(path: pathlib.Path) -> dict:
@@ -44,7 +44,7 @@ def _options(summary: dict) -> PlotOptions:
 
 
 def render_run(output: pathlib.Path) -> None:
-    """Render every figure for one Rust-produced experiment."""
+    """Render every figure for one experiment."""
 
     summary = _load_json(output / "summary.json")
     analysis = load_analysis(output / "analysis")
@@ -65,7 +65,7 @@ def _format_byte_size(value: int) -> str:
 
 
 def render_comparison(output: pathlib.Path, stem: str, dimension: str) -> None:
-    """Render one Rust-produced subscriber or object-size comparison."""
+    """Render one subscriber or object-size comparison."""
 
     summary = _load_json(output / f"{stem}_summary.json")
     values_key = "subscriber_counts" if dimension == "subscribers" else "object_sizes_bytes"
@@ -122,6 +122,6 @@ def render(output: pathlib.Path) -> None:
         elif (output / "object_size_latency_summary.json").is_file():
             render_comparison(output, "object_size_latency", "object_size")
         else:
-            raise RenderError(f"{output} is not a Rust-produced experiment or comparison")
+            raise RenderError(f"{output} is not an experiment or comparison")
     except (AnalysisError, KeyError, TypeError, ValueError) as error:
         raise RenderError(f"failed to render {output}: {error}") from error

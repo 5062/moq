@@ -101,6 +101,7 @@ struct moq_trace_moq_object_end {
 struct moq_trace_moq_object_phase {
 	uint64_t timestamp_ns;
 	uint64_t trace_id;
+	uint64_t span_id;
 	uint8_t phase;
 	uint8_t edge;
 	uint8_t has_outcome;
@@ -136,6 +137,7 @@ struct moq_trace_quic_packet_end {
 struct moq_trace_quic_packet_phase {
 	uint64_t timestamp_ns;
 	uint64_t trace_id;
+	uint64_t span_id;
 	uint8_t phase;
 	uint8_t edge;
 	uint8_t has_outcome;
@@ -189,4 +191,4 @@ bool moq_trace_udp_socket_end_enabled(void);
 void moq_trace_udp_socket_end(const struct moq_trace_udp_socket_end *event);
 void moq_trace_provider_init(void);
 
-#endif
+#endif /* MOQ_TRACE_INTERFACE_H */

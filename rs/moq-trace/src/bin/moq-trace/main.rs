@@ -23,9 +23,12 @@ enum Command {
 	Analyze {
 		/// Input LTTng CTF directory.
 		input: PathBuf,
-		/// Directory for CSV and JSON artifacts.
+		/// Directory for the DuckDB database and manifest.
 		#[arg(long)]
 		output: PathBuf,
+		/// Repository containing the analysis package.
+		#[arg(long, default_value = ".")]
+		repo: PathBuf,
 		/// Expected inbound object payload size in bytes.
 		#[arg(long)]
 		object_size: NonZeroU64,
@@ -53,14 +56,17 @@ fn main() -> anyhow::Result<()> {
 		Command::Analyze {
 			input,
 			output,
+			repo,
 			object_size,
 			subscribers,
 			warmup,
 			cooldown,
 			python,
 		} => {
+			let repo = repo.canonicalize().context("failed to resolve repository")?;
 			analysis::run(
 				analysis::Source {
+					repo: &repo,
 					ctf: &input,
 					python: &python,
 					expected_pid: None,

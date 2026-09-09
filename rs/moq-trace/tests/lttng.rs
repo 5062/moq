@@ -1,24 +1,35 @@
 #![cfg(target_os = "linux")]
 
 use std::io::{BufRead, Read, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use moq_trace::{Config, Direction, Handle, LogicalId, ObjectContext, ObjectIdentity};
+use moq_trace::{Config, Direction, Handle, LogicalId, ObjectContext, ObjectIdentity, ObjectOutcome, ObjectPhase};
 
-const DECODER: &str = include_str!("../scripts/ctf_events.py");
+const INSPECT: &str = r#"
+import pathlib
+import sys
+from relay_latency_lib.ctf import batches
+
+for name, batch in batches(pathlib.Path(sys.argv[1]), int(sys.argv[2])):
+    if name != "moq_object_start":
+        continue
+    for row in batch.to_pylist():
+        print(f"{row['logical_group']},{row['direction']},{row['protocol']}")
+"#;
 
 #[path = "../src/bin/moq-trace/experiment/lttng.rs"]
 mod lttng;
 
 fn emit_object(handle: &Handle, group: u64) {
-	handle
-		.object(ObjectContext::new(
-			Direction::Rx,
-			ObjectIdentity::new(1, group, 3),
-			LogicalId::new(group, 3),
-		))
-		.finish();
+	let mut trace = handle.object(ObjectContext::new(
+		Direction::Rx,
+		ObjectIdentity::new(1, group, 3),
+		LogicalId::new(group, 3),
+	));
+	trace.phase(ObjectPhase::Create).finish(ObjectOutcome::Success);
+	trace.finish();
 }
 
 #[test]
@@ -40,7 +51,7 @@ fn records_real_ctf_with_event_and_process_filtering() {
 		.status()
 		.is_ok_and(|status| status.success())
 		|| !Command::new("python3")
-			.args(["-c", "import bt2"])
+			.args(["-c", "import bt2, pyarrow"])
 			.status()
 			.is_ok_and(|status| status.success())
 	{
@@ -80,23 +91,12 @@ fn records_real_ctf_with_event_and_process_filtering() {
 	session.finish().unwrap();
 	let result = Command::new("python3")
 		.arg("-c")
-		.arg(DECODER)
+		.arg(INSPECT)
 		.arg(&ctf)
-		.arg("--expected-pid")
 		.arg(helper_pid.to_string())
+		.env("PYTHONPATH", Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts"))
 		.output()
 		.unwrap();
 	assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-	let events = String::from_utf8(result.stdout)
-		.unwrap()
-		.lines()
-		.map(|line| serde_json::from_str(line).unwrap())
-		.collect::<Vec<serde_json::Value>>();
-	let start = events
-		.iter()
-		.find(|event| event["type"] == "moq_object_start" && event["logical_id"]["group"] == 999)
-		.unwrap();
-	assert_eq!(start["direction"], "rx");
-	assert_eq!(start["protocol"], "moq_transport");
-	assert!(!events.iter().any(|event| event["logical_id"]["group"] == 222));
+	assert_eq!(String::from_utf8(result.stdout).unwrap(), "999,rx,moq_transport\n");
 }

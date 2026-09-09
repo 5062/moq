@@ -14,7 +14,7 @@ use clap::Args as ClapArgs;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::analysis::{self, Metric, Report, Sample, Statistics};
+use crate::analysis::{self, Report, Statistics};
 
 const PROTOCOL: &str = "moq-transport-19";
 
@@ -168,7 +168,7 @@ impl Topology {
 /// Arguments for rendering plots from an existing experiment directory.
 #[derive(Clone, Debug, ClapArgs)]
 pub(crate) struct PlotArgs {
-	/// Experiment or comparison directory containing Rust-produced artifacts.
+	/// Experiment or comparison directory containing queryable artifacts.
 	input: PathBuf,
 
 	/// Repository containing the plotting script.
@@ -255,13 +255,6 @@ impl Dimension {
 			Self::ObjectSize => "object_size_latency",
 		}
 	}
-}
-
-#[derive(Debug)]
-struct ComparisonRow {
-	value: u64,
-	layer: &'static str,
-	sample: Sample,
 }
 
 struct ManagedChild {
@@ -460,6 +453,7 @@ fn run_one(config: &Config) -> Result<Run> {
 	let capture = capture(config, &commands, &output)?;
 	let report = analysis::run(
 		analysis::Source {
+			repo: &config.repo,
 			ctf: &capture.ctf,
 			python: &config.python,
 			expected_pid: Some(capture.relay_pid),
@@ -803,18 +797,6 @@ fn require_success(name: &str, status: ExitStatus) -> Result<()> {
 }
 
 fn write_summary(path: &Path, config: &Config, commands: &Commands, report: &Report) -> Result<()> {
-	let correlated_objects = report
-		.object_samples
-		.iter()
-		.map(|sample| (sample.group_id, sample.object_id))
-		.collect::<BTreeSet<_>>()
-		.len();
-	let correlated_copies = report
-		.quic_object_samples
-		.iter()
-		.map(|sample| (sample.group_id, sample.object_id, sample.copy_ordinal))
-		.collect::<BTreeSet<_>>()
-		.len();
 	let affinity = config.relay_cpu.map_or_else(
 		|| json!({"mode": "unpinned"}),
 		|cpu| json!({"mode": "single-core", "cpu": cpu}),
@@ -845,26 +827,14 @@ fn write_summary(path: &Path, config: &Config, commands: &Commands, report: &Rep
 		"counts": {
 			"groups": report.group_count,
 			"packets": report.packet_count,
-			"correlated_objects": correlated_objects,
-			"correlated_object_copies": correlated_copies,
-			"quic_object_samples": report.quic_object_samples.len(),
-			"quic_packet_samples": report.packet_samples.len(),
+			"correlated_objects": report.correlated_objects,
+			"correlated_object_copies": report.correlated_object_copies,
+			"quic_object_samples": report.quic_object_statistics.values().map(|values| values.count).sum::<usize>(),
+			"quic_packet_samples": report.packet_statistics.values().map(|values| values.count).sum::<usize>(),
 		},
 		"statistics_us": report.statistics,
 		"quic_object_statistics_us": report.quic_object_statistics,
 		"quic_packet_statistics_us": report.packet_statistics,
-		"timeline_objects": report.timelines.iter().map(|timeline| json!({
-			"statistic": timeline.selection.statistic,
-			"target_us": timeline.selection.target_us,
-			"group_id": timeline.selection.group_id,
-			"object_id": timeline.selection.object_id,
-			"actual_us": timeline.selection.actual_us,
-			"copies": {
-				"first": timeline.first_copy,
-				"last": timeline.last_copy,
-				"slowest": timeline.slowest_copy,
-			},
-		})).collect::<Vec<_>>(),
 	});
 	write_json(path, &value)
 }
@@ -911,63 +881,7 @@ fn validate_comparison(values: &[u64]) -> Result<()> {
 }
 
 fn write_comparison(output: &Path, dimension: Dimension, values: &[u64], runs: &[Run]) -> Result<()> {
-	let mut rows = Vec::new();
-	for (value, run) in values.iter().copied().zip(runs) {
-		for (layer, metric, samples) in [
-			("moq", Metric::FullSpan, &run.report.object_samples),
-			("quic", Metric::QuicFullSpan, &run.report.quic_object_samples),
-		] {
-			rows.extend(
-				samples
-					.iter()
-					.filter(|sample| sample.metric == metric)
-					.cloned()
-					.map(|sample| ComparisonRow { value, layer, sample }),
-			);
-		}
-	}
-	rows.sort_by(|left, right| {
-		(
-			left.value,
-			left.layer,
-			left.sample.group_id,
-			left.sample.object_id,
-			left.sample.copy_ordinal,
-		)
-			.cmp(&(
-				right.value,
-				right.layer,
-				right.sample.group_id,
-				right.sample.object_id,
-				right.sample.copy_ordinal,
-			))
-	});
 	let stem = dimension.artifact_stem();
-	let mut writer = csv::Writer::from_path(output.join(format!("{stem}.csv")))?;
-	writer.write_record([
-		"group_id",
-		"object_id",
-		"metric",
-		"copy_ordinal",
-		"elapsed_ms",
-		"latency_us",
-		dimension.value_column(),
-		"layer",
-	])?;
-	for row in rows {
-		writer.write_record([
-			row.sample.group_id.to_string(),
-			row.sample.object_id.to_string(),
-			row.sample.metric.as_str().into(),
-			row.sample.copy_ordinal.to_string(),
-			format!("{:.6}", row.sample.elapsed_ms),
-			format!("{:.6}", row.sample.latency_us),
-			row.value.to_string(),
-			row.layer.into(),
-		])?;
-	}
-	writer.flush()?;
-
 	let run_values = values
 		.iter()
 		.copied()
@@ -1095,30 +1009,15 @@ mod tests {
 		}
 	}
 
-	fn report(value: f64) -> Report {
-		let object = Sample {
-			group_id: 1,
-			object_id: 2,
-			metric: Metric::FullSpan,
-			copy_ordinal: 0,
-			elapsed_ms: 3.0,
-			latency_us: value,
-		};
-		let quic = Sample {
-			metric: Metric::QuicFullSpan,
-			latency_us: value + 1.0,
-			..object.clone()
-		};
+	fn report(_value: f64) -> Report {
 		Report {
 			statistics: [("full_span".into(), statistics(1))].into(),
 			quic_object_statistics: [("quic_full_span".into(), statistics(1))].into(),
 			packet_statistics: [("rx_packet_span".into(), statistics(1))].into(),
 			packet_count: 1,
 			group_count: 1,
-			timelines: Vec::new(),
-			object_samples: vec![object],
-			quic_object_samples: vec![quic],
-			packet_samples: Vec::new(),
+			correlated_objects: 1,
+			correlated_object_copies: 1,
 		}
 	}
 
@@ -1262,7 +1161,7 @@ workdir = "/opt/moq"
 	}
 
 	#[test]
-	fn comparison_artifacts_are_written_by_rust() {
+	fn comparison_manifest_references_queryable_runs() {
 		let output = tempfile::tempdir().unwrap();
 		let runs = [
 			Run {
@@ -1282,8 +1181,7 @@ workdir = "/opt/moq"
 				.unwrap();
 		assert_eq!(summary["subscriber_counts"], json!([1, 2]));
 		assert_eq!(summary["runs"][1]["subscribers"], 2);
-		let samples = std::fs::read_to_string(output.path().join("per_copy_latency.csv")).unwrap();
-		assert!(samples.contains("quic_full_span"));
+		assert!(!output.path().join("per_copy_latency.csv").exists());
 	}
 
 	#[test]

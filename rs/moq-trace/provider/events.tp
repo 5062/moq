@@ -123,6 +123,7 @@ LTTNG_UST_TRACEPOINT_EVENT(moq_trace, moq_object_phase,
 	LTTNG_UST_TP_FIELDS(
 		lttng_ust_field_integer(uint64_t, timestamp_ns, event->timestamp_ns)
 		lttng_ust_field_integer(uint64_t, trace_id, event->trace_id)
+		lttng_ust_field_integer(uint64_t, span_id, event->span_id)
 		lttng_ust_field_enum(moq_trace, object_phase, uint8_t, phase, event->phase)
 		lttng_ust_field_enum(moq_trace, edge, uint8_t, edge, event->edge)
 		lttng_ust_field_integer(uint8_t, has_outcome, event->has_outcome)
@@ -167,6 +168,7 @@ LTTNG_UST_TRACEPOINT_EVENT(moq_trace, quic_packet_phase,
 	LTTNG_UST_TP_FIELDS(
 		lttng_ust_field_integer(uint64_t, timestamp_ns, event->timestamp_ns)
 		lttng_ust_field_integer(uint64_t, trace_id, event->trace_id)
+		lttng_ust_field_integer(uint64_t, span_id, event->span_id)
 		lttng_ust_field_enum(moq_trace, packet_phase, uint8_t, phase, event->phase)
 		lttng_ust_field_enum(moq_trace, edge, uint8_t, edge, event->edge)
 		lttng_ust_field_integer(uint8_t, has_outcome, event->has_outcome)

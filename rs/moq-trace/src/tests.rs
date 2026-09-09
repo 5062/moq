@@ -36,6 +36,8 @@ fn object_children_only_reference_the_start_record() {
 		}))
 	));
 	let phase = serde_json::to_value(&events[1]).unwrap();
+	assert_ne!(phase["span_id"], 0);
+	assert_eq!(phase["span_id"], serde_json::to_value(&events[2]).unwrap()["span_id"]);
 	assert!(phase.get("session_id").is_none());
 	assert!(phase.get("direction").is_none());
 }
@@ -48,8 +50,12 @@ fn packet_end_contains_metadata_discovered_after_start() {
 	packet.set_space(PacketSpace::Data);
 	packet.phase(PacketPhase::Routing).finish(PacketOutcome::Success);
 	packet.finish(PacketOutcome::Success);
+	let events = handle.events();
+	let start = serde_json::to_value(&events[1]).unwrap();
+	let finish = serde_json::to_value(&events[2]).unwrap();
+	assert_eq!(start["span_id"], finish["span_id"]);
 	assert!(matches!(
-		handle.events().last(),
+		events.last(),
 		Some(Event::PacketEnd(PacketEndEvent {
 			packet_number: Some(91),
 			packet_space: Some(PacketSpace::Data),

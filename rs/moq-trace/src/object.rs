@@ -238,6 +238,7 @@ struct ObjectTraceState {
 #[must_use = "dropping an object phase records an abandoned phase"]
 pub struct ObjectPhaseTrace<'a> {
 	object: &'a mut ObjectTrace,
+	span_id: u64,
 	phase: ObjectPhase,
 	finished: bool,
 }
@@ -264,21 +265,28 @@ impl ObjectTrace {
 
 	/// Start a measured object lifecycle phase.
 	pub fn phase(&mut self, phase: ObjectPhase) -> ObjectPhaseTrace<'_> {
-		self.emit_phase(phase, PhaseEdge::Start, None);
+		let span_id = self
+			.0
+			.as_ref()
+			.map(|_| crate::NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed))
+			.unwrap_or_default();
+		self.emit_phase(span_id, phase, PhaseEdge::Start, None);
 		ObjectPhaseTrace {
 			object: self,
+			span_id,
 			phase,
 			finished: false,
 		}
 	}
 
-	fn emit_phase(&self, phase: ObjectPhase, edge: PhaseEdge, outcome: Option<ObjectOutcome>) {
+	fn emit_phase(&self, span_id: u64, phase: ObjectPhase, edge: PhaseEdge, outcome: Option<ObjectOutcome>) {
 		let Some(state) = &self.0 else {
 			return;
 		};
 		state.handle.emit(Event::MoqObjectPhase(ObjectPhaseEvent {
 			timestamp_ns: now_ns(),
 			trace_id: state.trace_id,
+			span_id,
 			phase,
 			edge,
 			outcome,
@@ -312,7 +320,8 @@ impl ObjectPhaseTrace<'_> {
 
 	/// Finish the phase with an explicit result.
 	pub fn finish(mut self, outcome: ObjectOutcome) {
-		self.object.emit_phase(self.phase, PhaseEdge::Done, Some(outcome));
+		self.object
+			.emit_phase(self.span_id, self.phase, PhaseEdge::Done, Some(outcome));
 		self.finished = true;
 	}
 }
@@ -320,8 +329,12 @@ impl ObjectPhaseTrace<'_> {
 impl Drop for ObjectPhaseTrace<'_> {
 	fn drop(&mut self) {
 		if !self.finished {
-			self.object
-				.emit_phase(self.phase, PhaseEdge::Done, Some(ObjectOutcome::Abandoned));
+			self.object.emit_phase(
+				self.span_id,
+				self.phase,
+				PhaseEdge::Done,
+				Some(ObjectOutcome::Abandoned),
+			);
 		}
 	}
 }
@@ -334,6 +347,8 @@ pub struct ObjectPhaseEvent {
 	pub timestamp_ns: u64,
 	/// Parent object lifecycle identifier.
 	pub trace_id: u64,
+	/// Process-unique phase span identifier shared by both boundaries.
+	pub span_id: u64,
 	/// Object lifecycle phase being measured.
 	pub phase: ObjectPhase,
 	/// Whether this boundary starts or completes the phase.

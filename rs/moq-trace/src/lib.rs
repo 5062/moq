@@ -168,6 +168,7 @@ pub struct Handle {
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_TRACE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
 
 struct Inner {
 	config: Config,

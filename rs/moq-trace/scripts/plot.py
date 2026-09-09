@@ -9,7 +9,7 @@ from relay_latency_lib.render import RenderError, render
 
 
 def main() -> None:
-    """Render Matplotlib figures from Rust-produced experiment artifacts."""
+    """Render Matplotlib figures from queryable experiment artifacts."""
 
     parser = argparse.ArgumentParser(description=main.__doc__)
     parser.add_argument("input", type=pathlib.Path, help="Experiment or comparison directory.")

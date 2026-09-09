@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import csv
 import dataclasses
-import json
 import pathlib
-from typing import Literal, TypeVar
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+import duckdb
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 Direction = Literal["rx", "tx"]
 
@@ -67,28 +66,22 @@ class ObjectTimeline(StrictModel):
     slowest_copy: TimelineCopy
 
 
-class ArtifactFiles(StrictModel):
-    """CSV members named by the analyzer manifest."""
-
-    objects: Literal["objects.csv"]
-    quic_objects: Literal["quic_objects.csv"]
-    quic_packets: Literal["quic_packets.csv"]
-
-
 class Manifest(StrictModel):
-    """Rust analyzer manifest."""
+    """DuckDB analyzer manifest."""
 
-    files: ArtifactFiles
+    database: Literal["analysis.duckdb"]
     statistics: dict[str, Statistics]
     quic_object_statistics: dict[str, Statistics]
     packet_statistics: dict[str, Statistics]
     packet_count: int
     group_count: int
+    correlated_objects: int
+    correlated_object_copies: int
     timelines: tuple[ObjectTimeline, ...]
 
 
 class Sample(StrictModel):
-    """One Rust-produced object latency sample."""
+    """One SQL-derived object latency sample."""
 
     group_id: int
     object_id: int
@@ -99,7 +92,7 @@ class Sample(StrictModel):
 
 
 class PacketSample(StrictModel):
-    """One Rust-produced packet latency sample."""
+    """One SQL-derived packet latency sample."""
 
     metric: str
     direction: Direction
@@ -112,7 +105,7 @@ class PacketSample(StrictModel):
 
 @dataclasses.dataclass(frozen=True)
 class Analysis:
-    """Validated Rust-produced samples and aggregate trace counts."""
+    """Validated SQL-derived samples and aggregate trace counts."""
 
     samples: tuple[Sample, ...]
     statistics: dict[str, dict[str, float | int]]
@@ -126,54 +119,38 @@ class Analysis:
 
 
 class AnalysisError(RuntimeError):
-    """The Rust analyzer bundle is invalid or cannot be read."""
+    """The DuckDB analyzer bundle is invalid or cannot be read."""
 
 
-Model = TypeVar("Model", bound=StrictModel)
-SAMPLE_ROWS = TypeAdapter(tuple[Sample, ...])
-PACKET_SAMPLE_ROWS = TypeAdapter(tuple[PacketSample, ...])
-
-
-def _read_rows(
-    path: pathlib.Path,
-    model: type[Model],
-    adapter: TypeAdapter[tuple[Model, ...]],
-) -> tuple[Model, ...]:
-    with path.open(newline="") as handle:
-        reader = csv.DictReader(handle)
-        expected = tuple(model.model_fields)
-        if tuple(reader.fieldnames or ()) != expected:
-            raise ValueError(f"{path} has unexpected columns")
-        return adapter.validate_python(tuple(reader))
+def _rows(connection: duckdb.DuckDBPyConnection, table: str, model):
+    result = connection.execute(f"SELECT * FROM {table} ORDER BY ALL")
+    columns = [column[0] for column in result.description]
+    return tuple(model.model_validate(dict(zip(columns, row, strict=True))) for row in result.fetchall())
 
 
 def load_analysis(output: pathlib.Path) -> Analysis:
-    """Load and strictly validate one atomic Rust analyzer bundle."""
+    """Load and strictly validate one atomic DuckDB analyzer bundle."""
 
     try:
         manifest = Manifest.model_validate_json((output / "manifest.json").read_text())
-        return Analysis(
-            samples=_read_rows(output / manifest.files.objects, Sample, SAMPLE_ROWS),
-            statistics={key: value.model_dump() for key, value in manifest.statistics.items()},
-            quic_object_samples=_read_rows(
-                output / manifest.files.quic_objects,
-                Sample,
-                SAMPLE_ROWS,
-            ),
-            quic_object_statistics={
-                key: value.model_dump() for key, value in manifest.quic_object_statistics.items()
-            },
-            packet_samples=_read_rows(
-                output / manifest.files.quic_packets,
-                PacketSample,
-                PACKET_SAMPLE_ROWS,
-            ),
-            packet_statistics={
-                key: value.model_dump() for key, value in manifest.packet_statistics.items()
-            },
-            packet_count=manifest.packet_count,
-            group_count=manifest.group_count,
-            timelines=manifest.timelines,
-        )
-    except (OSError, ValidationError, ValueError, csv.Error, json.JSONDecodeError) as error:
+        connection = duckdb.connect(str(output / manifest.database), read_only=True)
+        try:
+            return Analysis(
+                samples=_rows(connection, "object_samples", Sample),
+                statistics={key: value.model_dump() for key, value in manifest.statistics.items()},
+                quic_object_samples=_rows(connection, "quic_object_samples", Sample),
+                quic_object_statistics={
+                    key: value.model_dump() for key, value in manifest.quic_object_statistics.items()
+                },
+                packet_samples=_rows(connection, "packet_samples", PacketSample),
+                packet_statistics={
+                    key: value.model_dump() for key, value in manifest.packet_statistics.items()
+                },
+                packet_count=manifest.packet_count,
+                group_count=manifest.group_count,
+                timelines=manifest.timelines,
+            )
+        finally:
+            connection.close()
+    except (OSError, duckdb.Error, ValidationError, ValueError) as error:
         raise AnalysisError(f"failed to load analyzer artifacts from {output}: {error}") from error

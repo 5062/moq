@@ -6,6 +6,8 @@ import sys
 import tempfile
 import unittest
 
+import duckdb
+
 SCRIPTS = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 
@@ -13,31 +15,33 @@ from relay_latency_lib.analysis import AnalysisError, load_analysis  # noqa: E40
 
 
 class AnalysisBundleTests(unittest.TestCase):
-    """Strict validation for the Rust analyzer artifact boundary."""
+    """Strict validation for the DuckDB analyzer artifact boundary."""
 
     def write_bundle(self, path: pathlib.Path, extra: dict | None = None) -> None:
         manifest = {
-            "files": {
-                "objects": "objects.csv",
-                "quic_objects": "quic_objects.csv",
-                "quic_packets": "quic_packets.csv",
-            },
+            "database": "analysis.duckdb",
             "statistics": {},
             "quic_object_statistics": {},
             "packet_statistics": {},
             "packet_count": 0,
             "group_count": 0,
+            "correlated_objects": 0,
+            "correlated_object_copies": 0,
             "timelines": [],
         }
         manifest.update(extra or {})
         (path / "manifest.json").write_text(json.dumps(manifest))
-        (path / "objects.csv").write_text("group_id,object_id,metric,copy_ordinal,elapsed_ms,latency_us\n")
-        (path / "quic_objects.csv").write_text(
-            "group_id,object_id,metric,copy_ordinal,elapsed_ms,latency_us\n"
+        connection = duckdb.connect(str(path / "analysis.duckdb"))
+        connection.execute(
+            "CREATE TABLE object_samples(group_id UBIGINT, object_id UBIGINT, metric VARCHAR, "
+            "copy_ordinal UBIGINT, elapsed_ms DOUBLE, latency_us DOUBLE)"
         )
-        (path / "quic_packets.csv").write_text(
-            "metric,direction,connection_id,trace_id,occurrence,elapsed_ms,latency_us\n"
+        connection.execute("CREATE TABLE quic_object_samples AS SELECT * FROM object_samples")
+        connection.execute(
+            "CREATE TABLE packet_samples(metric VARCHAR, direction VARCHAR, connection_id UBIGINT, "
+            "trace_id UBIGINT, occurrence UBIGINT, elapsed_ms DOUBLE, latency_us DOUBLE)"
         )
+        connection.close()
 
     def test_loads_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -56,14 +60,15 @@ class AnalysisBundleTests(unittest.TestCase):
             with self.assertRaises(AnalysisError):
                 load_analysis(path)
 
-    def test_reads_object_samples_without_dataframe_dependency(self) -> None:
+    def test_reads_object_samples_from_duckdb(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory)
             self.write_bundle(path)
-            (path / "objects.csv").write_text(
-                "group_id,object_id,metric,copy_ordinal,elapsed_ms,latency_us\n"
-                "7,3,full_span,1,12.5,42.25\n"
+            connection = duckdb.connect(str(path / "analysis.duckdb"))
+            connection.execute(
+                "INSERT INTO object_samples VALUES (7, 3, 'full_span', 1, 12.5, 42.25)"
             )
+            connection.close()
 
             analysis = load_analysis(path)
 
@@ -75,10 +80,11 @@ class AnalysisBundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory)
             self.write_bundle(path)
-            (path / "quic_packets.csv").write_text(
-                "metric,direction,connection_id,trace_id,occurrence,elapsed_ms,latency_us\n"
-                "packet_span,sideways,1,2,0,12.5,42.25\n"
+            connection = duckdb.connect(str(path / "analysis.duckdb"))
+            connection.execute(
+                "INSERT INTO packet_samples VALUES ('packet_span', 'sideways', 1, 2, 0, 12.5, 42.25)"
             )
+            connection.close()
 
             with self.assertRaises(AnalysisError):
                 load_analysis(path)

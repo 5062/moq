@@ -153,7 +153,9 @@
             pythonPackages:
             with pythonPackages;
             [
+              duckdb
               matplotlib
+              pyarrow
               pydantic
             ]
             ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [ babeltrace2 ]

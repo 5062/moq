@@ -168,6 +168,8 @@ pub struct PacketPhaseEvent {
 	pub timestamp_ns: u64,
 	/// Packet lifecycle identifier from [`PacketEvent::trace_id`].
 	pub trace_id: u64,
+	/// Process-unique phase span identifier shared by both boundaries.
+	pub span_id: u64,
 	/// Packet lifecycle phase being measured.
 	pub phase: PacketPhase,
 	/// Whether this boundary starts or completes the phase.
@@ -232,6 +234,7 @@ pub struct PacketPhaseTrace(Option<PacketPhaseTraceState>);
 struct PacketPhaseTraceState {
 	handle: Handle,
 	trace_id: u64,
+	span_id: u64,
 	start_ns: u64,
 	phase: PacketPhase,
 }
@@ -312,9 +315,11 @@ impl PacketTrace {
 		let Some(state) = &self.0 else {
 			return PacketPhaseTrace::disabled();
 		};
+		let span_id = crate::NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed);
 		state.handle.emit(Event::PacketPhase(PacketPhaseEvent {
 			timestamp_ns,
 			trace_id: state.packet.trace_id,
+			span_id,
 			phase,
 			edge: PhaseEdge::Start,
 			outcome: None,
@@ -322,6 +327,7 @@ impl PacketTrace {
 		PacketPhaseTrace(Some(PacketPhaseTraceState {
 			handle: state.handle.clone(),
 			trace_id: state.packet.trace_id,
+			span_id,
 			start_ns: timestamp_ns,
 			phase,
 		}))
@@ -399,6 +405,7 @@ impl PacketPhaseTraceState {
 		self.handle.emit(Event::PacketPhase(PacketPhaseEvent {
 			timestamp_ns,
 			trace_id: self.trace_id,
+			span_id: self.span_id,
 			phase: self.phase,
 			edge: PhaseEdge::Done,
 			outcome: Some(outcome),

@@ -92,8 +92,9 @@ A packet trace represents one QUIC packet. Creating the scoped token emits one
 start record. Consuming it emits one end record. Dropping an unfinished token
 emits `abandoned`, so early returns do not leave open intervals.
 
-Packet phases use a `phase` and `edge` pair. Done edges include an `outcome`.
-The phase values are:
+Packet phases use a process-unique `span_id` on their start and done edges, so
+overlapping occurrences can be paired without relying on event order. Done
+edges include an `outcome`. The phase values are:
 
 - `header_parse`
 - `routing`
@@ -114,8 +115,8 @@ records its stream ID and exclusive byte range. Packet context can be enriched
 after the start record when RX header processing discovers the number space or
 packet number.
 
-MoQ object phases follow the same scoped shape: a `phase` and `edge` pair, with an
-`outcome` on done edges. The phase values are `header_parse`, `create`,
+MoQ object phases follow the same scoped shape: a `span_id`, `phase`, and edge,
+with an `outcome` on done edges. The phase values are `header_parse`, `create`,
 `payload_read`, `frame_commit`, `clone`, `header_encode`, and `payload_write`.
 The `clone` phase measures creation of an outbound object representation from
 relay storage. This relay shares reference-counted payload storage, while another
@@ -204,11 +205,10 @@ subscriber connections, then starts the publisher. `subscriber.binary` may be
 an absolute path or a path relative to `subscriber.workdir`. The remote host
 does not need LTTng or `moq-trace`.
 
-Rust owns workload orchestration, trace validation, packet correlation, metric
-calculation, comparisons, summaries, and tabular artifacts. The Babeltrace
-Python bindings stream native CTF events into the Rust analyzer. Matplotlib
-renders figures from the Rust-produced artifact bundle. Analyze an existing
-trace directly with:
+Rust owns workload orchestration and process lifecycle. Babeltrace decodes
+native CTF into typed Arrow batches, DuckDB SQL owns validation, correlation,
+metrics, and comparisons, and Matplotlib renders figures by querying DuckDB.
+Analyze an existing trace directly with:
 
 ```sh
 moq-trace analyze relay.ctf \
@@ -217,9 +217,25 @@ moq-trace analyze relay.ctf \
   --subscribers 1
 ```
 
-The analyzer atomically publishes `objects.csv`, `quic_objects.csv`,
-`quic_packets.csv`, and a `manifest.json` to a new output directory.
-It refuses to replace an existing bundle.
+The analyzer atomically publishes `analysis.duckdb` and `manifest.json` to a
+new output directory. Raw CTF remains the authoritative capture. The DuckDB
+database is a reproducible, queryable derived artifact and the analyzer refuses
+to replace an existing bundle.
+
+Query any derived table directly from the development shell:
+
+```sh
+python - <<'PY'
+import duckdb
+
+database = "target/moq-trace/RUN/analysis/analysis.duckdb"
+query = """
+    SELECT metric, count(*), quantile_cont(latency_us, 0.99) AS p99_us
+    FROM quic_object_samples GROUP BY metric
+"""
+print(duckdb.connect(database, read_only=True).sql(query))
+PY
+```
 
 To compare delivery-copy latency across subscriber counts, run each workload in
 sequence with one shared build:
@@ -230,11 +246,11 @@ moq-trace experiment \
 ```
 
 The comparison directory contains one `subscribers-N` run directory per count,
-plus `per_copy_latency.csv`, `per_copy_latency_summary.json`, and
-`per_copy_latency_cdf.png`. Each CDF sample is one outbound delivery copy, so
-`n` scales with both logical objects and subscribers. The runner uses a 64 MiB
-discard-mode LTTng channel and rejects traces when Babeltrace reports discarded
-events.
+plus `per_copy_latency_summary.json` and `per_copy_latency_cdf.png`. Each CDF
+sample is queried from the run databases and represents one outbound delivery
+copy, so `n` scales with both logical objects and subscribers. The runner uses a
+64 MiB discard-mode LTTng channel and rejects traces when Babeltrace reports
+discarded events.
 
 To compare per-copy latency across object sizes, use binary size suffixes:
 
@@ -244,9 +260,9 @@ moq-trace experiment \
 ```
 
 This writes one `object-size-BYTES` run directory per size, plus
-`object_size_latency.csv`, `object_size_latency_summary.json`, and
-`object_size_latency_cdf.png`. The subscriber count and frame rate remain fixed,
-so larger objects also increase the offered byte rate.
+`object_size_latency_summary.json` and `object_size_latency_cdf.png`. The
+subscriber count and frame rate remain fixed, so larger objects also increase
+the offered byte rate.
 
 To test uncommitted instrumentation in a local Quinn checkout, override the
 workspace's pinned fork revision:
@@ -270,9 +286,10 @@ lifecycles, transport identity on every completed object, and complete STREAM
 frame coverage. Validation fails when any requirement is missing instead of
 guessing a join.
 
-Frames are ordered by packet completion. The analyzer accumulates their clipped
-interval union and stops at the first packet completion that fully covers the
-object. Later retransmissions do not extend the measured latency.
+Frames are ordered by their recorded observation time, then packet completion
+and trace ID for deterministic ties. The analyzer accumulates their clipped
+interval union and stops when the first observed prefix fully covers the object.
+Later retransmissions do not extend the measured latency.
 
 The MoQ baseline is:
 
@@ -302,15 +319,16 @@ Packet diagnostics report RX and TX packet spans, RX connection-processing spans
 and each successful packet phase occurrence. The RX connection-processing span
 starts when scheduling finishes and ends when packet processing completes.
 Completed packets with non-success QUIC outcomes are validated and
-excluded because they cannot contribute STREAM data to object coverage. They are kept separate from object metrics because packet and
-object work can overlap.
+excluded because they cannot contribute STREAM data to object coverage. They
+are kept separate from object metrics because packet and object work can
+overlap.
 
 The experiment writes:
 
-- `analysis/objects.csv`: MoQ `full_span` samples.
-- `analysis/quic_objects.csv`: the three QUIC-inclusive metrics per subscriber copy.
-- `analysis/quic_packets.csv`: packet-span and packet-phase samples.
-- `analysis/manifest.json`: typed metadata consumed by the plotting layer.
+- `analysis/analysis.duckdb`: raw typed event tables, correlated lifecycle tables,
+  and MoQ, QUIC-inclusive, and packet metric sample tables.
+- `analysis/manifest.json`: aggregate statistics and typed metadata consumed by
+  the Rust runner and plotting layer.
 - `summary.json`: workload metadata, counts, and all three statistics sections.
 - `latency.png`: MoQ latency distributions, percentiles, and time series.
 - `quic_latency.png`: QUIC-inclusive object plots.

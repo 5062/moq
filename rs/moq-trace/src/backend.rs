@@ -79,6 +79,7 @@ pub(crate) fn emit(event: &Event) -> bool {
 				ffi::moq_trace_moq_object_phase(&ffi::moq_trace_moq_object_phase {
 					timestamp_ns: event.timestamp_ns,
 					trace_id: event.trace_id,
+					span_id: event.span_id,
 					phase: object_phase(event.phase),
 					edge: edge(event.edge),
 					has_outcome,
@@ -127,6 +128,7 @@ pub(crate) fn emit(event: &Event) -> bool {
 				ffi::moq_trace_quic_packet_phase(&ffi::moq_trace_quic_packet_phase {
 					timestamp_ns: event.timestamp_ns,
 					trace_id: event.trace_id,
+					span_id: event.span_id,
 					phase: packet_phase(event.phase),
 					edge: edge(event.edge),
 					has_outcome,
