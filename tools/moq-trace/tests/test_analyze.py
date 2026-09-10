@@ -12,8 +12,8 @@ sys.path.insert(0, str(SOURCE))
 
 from moq_trace import ctf  # noqa: E402
 from moq_trace.analyze import (  # noqa: E402
-    SQL,
     _coverage,
+    _define_lifecycle_views,
     _define_metrics,
     _define_timelines,
     _derive_samples,
@@ -32,7 +32,7 @@ class SqlAnalysisTests(unittest.TestCase):
             self.connection.register("rows", pa.Table.from_batches([], schema=schema))
             self.connection.execute(f"CREATE TABLE {name} AS SELECT * FROM rows")
             self.connection.unregister("rows")
-        self.connection.execute(SQL.read_text())
+        _define_lifecycle_views(self.connection)
 
     def tearDown(self) -> None:
         self.connection.close()
