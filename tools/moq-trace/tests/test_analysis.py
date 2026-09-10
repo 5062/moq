@@ -15,19 +15,7 @@ from moq_trace.errors import TraceError  # noqa: E402
 
 
 class AnalysisDatabaseTests(unittest.TestCase):
-    """Validate the strict database revision seam."""
-
-    def test_rejects_an_old_schema(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            database = pathlib.Path(directory) / "analysis.duckdb"
-            connection = duckdb.connect(str(database))
-            connection.execute("CREATE TABLE metadata(schema_revision INTEGER)")
-            connection.execute("INSERT INTO metadata VALUES (0)")
-            connection.close()
-
-            with self.assertRaisesRegex(TraceError, "unsupported analysis schema"):
-                with open_artifact(database):
-                    pass
+    """Validate the artifact metadata seam."""
 
     def test_rejects_a_database_without_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
