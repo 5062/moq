@@ -5,20 +5,19 @@ from __future__ import annotations
 import contextlib
 import pathlib
 
+import duckdb
+
 from .artifact import open_artifact
 from .errors import TraceError
 from .plot import (
     PerCopyCdfRun,
     PlotOptions,
-    plot_analysis,
     plot_latency_cdf,
+    plot_metrics,
     plot_object_timelines,
-    plot_packet_analysis,
     plot_packet_latency_cdf,
     plot_per_copy_latency_cdf,
-    plot_quic_analysis,
 )
-from .report import build as build_report
 
 
 def _options(metadata: dict) -> PlotOptions:
@@ -33,19 +32,22 @@ def _options(metadata: dict) -> PlotOptions:
     )
 
 
-def render_run(database: pathlib.Path) -> None:
-    """Render every figure for one run artifact."""
-
-    with open_artifact(database, "run") as (connection, _kind, metadata):
-        report = build_report(connection)
-        options = _options(metadata)
-        plots = database.parent / "plots"
-        plot_analysis(plots / "latency.png", options, connection, report)
-        plot_quic_analysis(plots / "quic_latency.png", options, connection, report)
-        plot_packet_analysis(plots / "packet_latency.png", options, connection, report)
-        plot_latency_cdf(plots / "latency_cdf.png", options, connection, report)
-        plot_packet_latency_cdf(plots / "packet_latency_cdf.png", options, connection, report)
-        plot_object_timelines(plots / "object_timeline.png", options, tuple(report["timelines"]))
+def _render_run(
+    database: pathlib.Path,
+    connection: duckdb.DuckDBPyConnection,
+    metadata: dict,
+) -> None:
+    options = _options(metadata)
+    plots = database.parent / "plots"
+    for filename, domain in (
+        ("latency.png", "object"),
+        ("quic_latency.png", "quic_object"),
+        ("packet_latency.png", "packet"),
+    ):
+        plot_metrics(plots / filename, options, connection, domain)
+    plot_latency_cdf(plots / "latency_cdf.png", options, connection)
+    plot_packet_latency_cdf(plots / "packet_latency_cdf.png", options, connection)
+    plot_object_timelines(plots / "object_timeline.png", options, connection)
 
 
 def _format_byte_size(value: int) -> str:
@@ -55,47 +57,36 @@ def _format_byte_size(value: int) -> str:
     return f"{value} bytes"
 
 
-def render_comparison(database: pathlib.Path) -> None:
-    """Render one subscriber or object-size comparison artifact."""
-
-    with open_artifact(database, "comparison") as (_comparison, _kind, metadata):
-        dimension = str(metadata["dimension"])
-        entries = metadata["runs"]
-        with contextlib.ExitStack() as stack:
-            runs = []
-            run_metadata = []
-            for entry in entries:
-                run_database = database.parent / str(entry["database"])
-                connection, _run_kind, summary = stack.enter_context(open_artifact(run_database, "run"))
-                report = build_report(connection)
-                value = int(entry["value"])
-                label = (
-                    f"{value} {'subscriber' if value == 1 else 'subscribers'}"
-                    if dimension == "subscribers"
-                    else _format_byte_size(value)
-                )
-                runs.append(
-                    PerCopyCdfRun(
-                        label=label,
-                        connection=connection,
-                        statistics=report["statistics"],
-                        quic_object_statistics=report["quic_object_statistics"],
-                    )
-                )
-                run_metadata.append(summary)
-
-            options = _options(run_metadata[0])
-            if dimension == "subscribers":
-                comparison = f"{options.object_size} bytes"
-            else:
-                subscribers = options.subscribers
-                comparison = f"{subscribers} {'subscriber' if subscribers == 1 else 'subscribers'}"
-            plot_per_copy_latency_cdf(
-                database.parent / "plots" / "comparison_cdf.png",
-                options,
-                tuple(runs),
-                comparison,
+def _render_comparison(database: pathlib.Path, metadata: dict) -> None:
+    dimension = str(metadata["dimension"])
+    entries = metadata["runs"]
+    with contextlib.ExitStack() as stack:
+        runs = []
+        run_metadata = []
+        for entry in entries:
+            run_database = database.parent / str(entry["database"])
+            connection, _run_kind, summary = stack.enter_context(open_artifact(run_database, "run"))
+            value = int(entry["value"])
+            label = (
+                f"{value} {'subscriber' if value == 1 else 'subscribers'}"
+                if dimension == "subscribers"
+                else _format_byte_size(value)
             )
+            runs.append(PerCopyCdfRun(label=label, connection=connection))
+            run_metadata.append(summary)
+
+        options = _options(run_metadata[0])
+        if dimension == "subscribers":
+            comparison = f"{options.object_size} bytes"
+        else:
+            subscribers = options.subscribers
+            comparison = f"{subscribers} {'subscriber' if subscribers == 1 else 'subscribers'}"
+        plot_per_copy_latency_cdf(
+            database.parent / "plots" / "comparison_cdf.png",
+            options,
+            tuple(runs),
+            comparison,
+        )
 
 
 def render(database: pathlib.Path) -> None:
@@ -103,14 +94,13 @@ def render(database: pathlib.Path) -> None:
 
     database = database.resolve()
     try:
-        with open_artifact(database) as (_connection, kind, _metadata):
-            pass
-        if kind == "run":
-            render_run(database)
-        elif kind == "comparison":
-            render_comparison(database)
-        else:
-            raise TraceError(f"unsupported artifact kind: {kind}")
+        with open_artifact(database) as (connection, kind, metadata):
+            if kind == "run":
+                _render_run(database, connection, metadata)
+            elif kind == "comparison":
+                _render_comparison(database, metadata)
+            else:
+                raise TraceError(f"unsupported artifact kind: {kind}")
     except TraceError:
         raise
     except (KeyError, TypeError, ValueError) as error:

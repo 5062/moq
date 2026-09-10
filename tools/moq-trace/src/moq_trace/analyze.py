@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import pathlib
 import tempfile
@@ -11,10 +10,9 @@ import duckdb
 import pyarrow as pa
 
 from . import ctf
+from .artifact import write_metadata
 from .coverage import resolve as _coverage
 from .errors import TraceError
-from .report import build as _build_report
-from .schema import SCHEMA_REVISION
 
 SQL = pathlib.Path(__file__).with_name("sql") / "analysis.sql"
 
@@ -299,6 +297,125 @@ def _define_metrics(connection: duckdb.DuckDBPyConnection) -> None:
            UNION ALL
            SELECT 'packet', metric, elapsed_ns, latency_ns FROM packet_samples"""
     )
+    connection.execute(
+        """CREATE VIEW metric_statistics AS
+           SELECT domain, metric, count(*) AS count,
+                  avg(latency_ns) / 1000.0 AS mean,
+                  quantile_cont(latency_ns, 0.50) / 1000.0 AS p50,
+                  quantile_cont(latency_ns, 0.95) / 1000.0 AS p95,
+                  quantile_cont(latency_ns, 0.99) / 1000.0 AS p99,
+                  max(latency_ns) / 1000.0 AS max
+           FROM latency_samples
+           GROUP BY domain, metric"""
+    )
+
+
+def _define_timelines(connection: duckdb.DuckDBPyConnection) -> None:
+    connection.execute(
+        """CREATE TEMP TABLE object_slowest AS
+           SELECT rx.trace_id, rx.logical_group, rx.logical_frame, rx.group_id,
+                  rx.object_id, rx.start_ns,
+                  max((tx.end_ns - rx.start_ns) / 1000.0) AS actual_us
+           FROM selected_rx AS rx
+           JOIN object_lifecycles AS tx
+             ON tx.logical_group = rx.logical_group
+            AND tx.logical_frame = rx.logical_frame
+            AND tx.direction = 'tx' AND tx.outcome = 'success'
+           GROUP BY ALL"""
+    )
+    connection.execute(
+        """CREATE TABLE timeline_selections AS
+           WITH targets(selection_order, statistic, target_us) AS (
+             SELECT 0, 'mean', avg(actual_us) FROM object_slowest
+             UNION ALL
+             SELECT 1, 'median', quantile_cont(actual_us, 0.50) FROM object_slowest
+             UNION ALL
+             SELECT 2, 'p99', quantile_cont(actual_us, 0.99) FROM object_slowest
+           ), selected AS (
+             SELECT target.selection_order, target.statistic, target.target_us,
+                    object.*
+             FROM targets AS target
+             CROSS JOIN LATERAL (
+               SELECT * FROM object_slowest
+               ORDER BY abs(actual_us - target.target_us), trace_id
+               LIMIT 1
+             ) AS object
+           )
+           SELECT * FROM selected ORDER BY selection_order"""
+    )
+    connection.execute(
+        """CREATE TEMP TABLE timeline_objects AS
+           SELECT selection.selection_order, 'rx' AS direction,
+                  object.session_id, object.trace_id
+           FROM timeline_selections AS selection
+           JOIN object_lifecycles AS object ON object.trace_id = selection.trace_id
+           UNION ALL
+           SELECT selection.selection_order, 'tx', object.session_id, object.trace_id
+           FROM timeline_selections AS selection
+           JOIN object_lifecycles AS object
+             ON object.logical_group = selection.logical_group
+            AND object.logical_frame = selection.logical_frame
+            AND object.direction = 'tx' AND object.outcome = 'success'"""
+    )
+    _require_zero(
+        connection,
+        "SELECT count(*) FROM timeline_objects WHERE session_id IS NULL",
+        "timeline objects missing session IDs",
+    )
+    connection.execute(
+        """CREATE TABLE timeline_copies AS
+           SELECT object.selection_order, object.session_id,
+                  row_number() OVER (
+                    PARTITION BY object.selection_order
+                    ORDER BY object.session_id, object.trace_id
+                  ) AS subscriber_ordinal,
+                  count(*) OVER (PARTITION BY object.selection_order) AS copy_count,
+                  (lifecycle.end_ns - selection.start_ns) / 1000.0 AS full_span_us
+           FROM timeline_objects AS object
+           JOIN timeline_selections AS selection USING (selection_order)
+           JOIN object_lifecycles AS lifecycle ON lifecycle.trace_id = object.trace_id
+           WHERE object.direction = 'tx'"""
+    )
+    connection.execute(
+        """CREATE TABLE timeline_intervals AS
+           SELECT object.selection_order, object.direction, object.session_id,
+                  'object' AS phase, 0 AS occurrence,
+                  (lifecycle.start_ns::HUGEINT - selection.start_ns) / 1000.0 AS start_us,
+                  (lifecycle.end_ns::HUGEINT - selection.start_ns) / 1000.0 AS end_us
+           FROM timeline_objects AS object
+           JOIN timeline_selections AS selection USING (selection_order)
+           JOIN object_lifecycles AS lifecycle ON lifecycle.trace_id = object.trace_id
+           UNION ALL
+           SELECT object.selection_order, object.direction, object.session_id,
+                  phase.phase, phase.occurrence,
+                  (phase.start_ns::HUGEINT - selection.start_ns) / 1000.0,
+                  (phase.end_ns::HUGEINT - selection.start_ns) / 1000.0
+           FROM timeline_objects AS object
+           JOIN timeline_selections AS selection USING (selection_order)
+           JOIN object_phase_intervals AS phase ON phase.trace_id = object.trace_id
+           WHERE phase.outcome = 'success'
+           UNION ALL
+           SELECT object.selection_order, object.direction, object.session_id,
+                  'quic_packet', list_position(coverage.packet_ids, packet.trace_id) - 1,
+                  (packet.start_ns::HUGEINT - selection.start_ns) / 1000.0,
+                  (packet.end_ns::HUGEINT - selection.start_ns) / 1000.0
+           FROM timeline_objects AS object
+           JOIN timeline_selections AS selection USING (selection_order)
+           JOIN object_packet_coverage AS coverage ON coverage.trace_id = object.trace_id
+           JOIN packet_lifecycles AS packet
+             ON list_contains(coverage.packet_ids, packet.trace_id)
+           UNION ALL
+           SELECT object.selection_order, object.direction, object.session_id,
+                  'quic_' || phase.phase, phase.occurrence,
+                  (phase.start_ns::HUGEINT - selection.start_ns) / 1000.0,
+                  (phase.end_ns::HUGEINT - selection.start_ns) / 1000.0
+           FROM timeline_objects AS object
+           JOIN timeline_selections AS selection USING (selection_order)
+           JOIN object_packet_coverage AS coverage ON coverage.trace_id = object.trace_id
+           JOIN packet_phase_intervals AS phase
+             ON list_contains(coverage.packet_ids, phase.trace_id)
+           WHERE phase.outcome = 'success'"""
+    )
 
 
 def run(
@@ -311,7 +428,7 @@ def run(
     cooldown_ns: int,
     expected_pid: int | None = None,
     metadata: dict | None = None,
-) -> dict:
+) -> None:
     """Analyze CTF into one atomically published DuckDB database."""
 
     if output.exists():
@@ -329,7 +446,10 @@ def run(
             _coverage(connection)
             _derive_samples(connection, origin)
             _define_metrics(connection)
-            report = _build_report(connection)
+            for required in ("rx_routing", "rx_scheduling"):
+                if _count(connection, "SELECT count(*) FROM metric_statistics WHERE metric = ?", [required]) == 0:
+                    raise TraceError(f"Quinn trace is missing packet metric: {required}")
+            _define_timelines(connection)
             value = dict(metadata or {})
             value.setdefault(
                 "workload",
@@ -341,20 +461,16 @@ def run(
                 },
             )
             value["counts"] = {
-                "groups": report["group_count"],
-                "packets": report["packet_count"],
-                "correlated_objects": report["correlated_objects"],
-                "correlated_object_copies": report["correlated_object_copies"],
+                "groups": _count(connection, "SELECT count(DISTINCT group_id) FROM selected_rx"),
+                "packets": _count(connection, "SELECT count(*) FROM packet_lifecycles"),
+                "correlated_objects": _count(connection, "SELECT count(*) FROM selected_rx"),
+                "correlated_object_copies": _count(
+                    connection,
+                    "SELECT count(*) FROM quic_object_samples WHERE metric = 'quic_full_span'",
+                ),
             }
-            connection.execute(
-                "CREATE TABLE metadata(schema_revision INTEGER PRIMARY KEY, kind VARCHAR NOT NULL, value JSON NOT NULL)"
-            )
-            connection.execute(
-                "INSERT INTO metadata VALUES (?, 'run', ?)",
-                [SCHEMA_REVISION, json.dumps(value)],
-            )
+            write_metadata(connection, "run", value)
             connection.execute("CHECKPOINT")
         finally:
             connection.close()
         os.replace(database, output)
-    return report

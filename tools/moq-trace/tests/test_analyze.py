@@ -14,12 +14,13 @@ from moq_trace import ctf  # noqa: E402
 from moq_trace.analyze import (  # noqa: E402
     SQL,
     _coverage,
+    _define_metrics,
+    _define_timelines,
     _derive_samples,
     _select_workload,
     _validate_raw,
 )
 from moq_trace.coverage import _subtract  # noqa: E402
-from moq_trace.report import build as build_report  # noqa: E402
 
 
 class SqlAnalysisTests(unittest.TestCase):
@@ -126,12 +127,21 @@ class SqlAnalysisTests(unittest.TestCase):
         origin = _select_workload(self.connection, 16, 1, 0, 0)
         _coverage(self.connection)
         _derive_samples(self.connection, origin)
-        report = build_report(self.connection)
+        _define_metrics(self.connection)
+        _define_timelines(self.connection)
 
-        self.assertEqual(report["correlated_objects"], 1)
-        self.assertEqual(report["correlated_object_copies"], 1)
-        self.assertEqual(report["quic_object_statistics"]["quic_full_span"]["p50"], 220.0)
-        self.assertEqual(len(report["timelines"]), 3)
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM selected_rx").fetchone()[0], 1)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT count(*) FROM quic_object_samples WHERE metric = 'quic_full_span'"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            self.connection.execute("SELECT p50 FROM metric_statistics WHERE metric = 'quic_full_span'").fetchone()[0],
+            220.0,
+        )
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM timeline_selections").fetchone()[0], 3)
 
     def test_pairs_overlapping_phase_occurrences_by_span_id(self) -> None:
         for ctf_timestamp, timestamp, span_id, edge, outcome in (

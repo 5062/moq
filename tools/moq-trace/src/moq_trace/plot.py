@@ -41,17 +41,6 @@ def _context(options: PlotOptions) -> str:
 
 
 @dataclasses.dataclass(frozen=True)
-class MetricPlot:
-    """One metric layer and its plot presentation."""
-
-    connection: duckdb.DuckDBPyConnection
-    table: str
-    statistics: dict[str, dict[str, float | int]]
-    labels: dict[str, str]
-    title: str
-
-
-@dataclasses.dataclass(frozen=True)
 class CdfSeries:
     """One metric and its empirical CDF presentation."""
 
@@ -59,7 +48,6 @@ class CdfSeries:
     label: str
     connection: duckdb.DuckDBPyConnection
     table: str
-    statistics: dict[str, dict[str, float | int]]
     color_index: int
     line_style: str
     annotation_lane: int
@@ -71,8 +59,13 @@ class PerCopyCdfRun:
 
     label: str
     connection: duckdb.DuckDBPyConnection
-    statistics: dict[str, dict[str, float | int]]
-    quic_object_statistics: dict[str, dict[str, float | int]]
+
+
+_METRIC_PLOTS = {
+    "object": ("object_samples", "MoQ relay latency"),
+    "quic_object": ("quic_object_samples", "QUIC-inclusive relay latency"),
+    "packet": ("packet_samples", "QUIC packet diagnostics"),
+}
 
 
 def _labels(connection: duckdb.DuckDBPyConnection, domain: str) -> dict[str, str]:
@@ -84,6 +77,43 @@ def _labels(connection: duckdb.DuckDBPyConnection, domain: str) -> dict[str, str
     )
 
 
+def _statistics(connection: duckdb.DuckDBPyConnection, domain: str) -> dict[str, dict[str, float | int]]:
+    rows = connection.execute(
+        """SELECT metric, count, mean, p50, p95, p99, max
+           FROM metric_statistics WHERE domain = ? ORDER BY metric""",
+        [domain],
+    ).fetchall()
+    return {
+        metric: {
+            "count": int(count),
+            "mean": float(mean),
+            "p50": float(p50),
+            "p95": float(p95),
+            "p99": float(p99),
+            "max": float(maximum),
+        }
+        for metric, count, mean, p50, p95, p99, maximum in rows
+    }
+
+
+def _statistic(connection: duckdb.DuckDBPyConnection, metric: str) -> dict[str, float | int]:
+    row = connection.execute(
+        "SELECT count, mean, p50, p95, p99, max FROM metric_statistics WHERE metric = ?",
+        [metric],
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"cannot summarize missing metric {metric}")
+    count, mean, p50, p95, p99, maximum = row
+    return {
+        "count": int(count),
+        "mean": float(mean),
+        "p50": float(p50),
+        "p95": float(p95),
+        "p99": float(p99),
+        "max": float(maximum),
+    }
+
+
 def _samples(
     connection: duckdb.DuckDBPyConnection,
     table: str,
@@ -93,69 +123,6 @@ def _samples(
         f"SELECT elapsed_ns / 1000000000.0, latency_ns / 1000000.0 FROM {table} WHERE metric = ? ORDER BY elapsed_ns",
         [metric],
     ).fetchall()
-
-
-def plot_analysis(
-    path: pathlib.Path,
-    options: PlotOptions,
-    connection: duckdb.DuckDBPyConnection,
-    report: dict,
-) -> None:
-    """Render ECDF, percentile, and time-series latency panels."""
-
-    plot_metrics(
-        path,
-        options,
-        MetricPlot(
-            connection,
-            "object_samples",
-            report["statistics"],
-            _labels(connection, "object"),
-            "MoQ relay latency",
-        ),
-    )
-
-
-def plot_quic_analysis(
-    path: pathlib.Path,
-    options: PlotOptions,
-    connection: duckdb.DuckDBPyConnection,
-    report: dict,
-) -> None:
-    """Render QUIC-inclusive object metric panels."""
-
-    plot_metrics(
-        path,
-        options,
-        MetricPlot(
-            connection,
-            "quic_object_samples",
-            report["quic_object_statistics"],
-            _labels(connection, "quic_object"),
-            "QUIC-inclusive relay latency",
-        ),
-    )
-
-
-def plot_packet_analysis(
-    path: pathlib.Path,
-    options: PlotOptions,
-    connection: duckdb.DuckDBPyConnection,
-    report: dict,
-) -> None:
-    """Render QUIC packet span and phase diagnostic panels."""
-
-    plot_metrics(
-        path,
-        options,
-        MetricPlot(
-            connection,
-            "packet_samples",
-            report["packet_statistics"],
-            _labels(connection, "packet"),
-            "QUIC packet diagnostics",
-        ),
-    )
 
 
 def _plot_cdf_series(axis: Axes, series: CdfSeries) -> int:
@@ -175,7 +142,7 @@ def _plot_cdf_series(axis: Axes, series: CdfSeries) -> int:
         linestyle=series.line_style,
         linewidth=2,
     )
-    summary = series.statistics[series.metric]
+    summary = _statistic(series.connection, series.metric)
     for name, cumulative, marker in percentiles:
         latency_us = float(summary[name])
         axis.scatter(
@@ -201,18 +168,16 @@ def plot_latency_cdf(
     path: pathlib.Path,
     options: PlotOptions,
     connection: duckdb.DuckDBPyConnection,
-    report: dict,
 ) -> None:
     """Render the empirical distributions of MoQ and QUIC-inclusive object latency."""
 
     series = (
-        CdfSeries("full_span", "MoQ", connection, "object_samples", report["statistics"], 0, "-", 0),
+        CdfSeries("full_span", "MoQ", connection, "object_samples", 0, "-", 0),
         CdfSeries(
             "quic_full_span",
             "QUIC",
             connection,
             "quic_object_samples",
-            report["quic_object_statistics"],
             1,
             "--",
             1,
@@ -246,17 +211,11 @@ def plot_per_copy_latency_cdf(
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5.5), sharey=True)
     panels = (
-        (axes[0], "full_span", "MoQ", "object_samples", "statistics"),
-        (
-            axes[1],
-            "quic_full_span",
-            "QUIC+MoQ",
-            "quic_object_samples",
-            "quic_object_statistics",
-        ),
+        (axes[0], "full_span", "MoQ", "object_samples"),
+        (axes[1], "quic_full_span", "QUIC+MoQ", "quic_object_samples"),
     )
     line_styles = ("-", "--", ":", "-.")
-    for axis, metric, title, table, statistics_field in panels:
+    for axis, metric, title, table in panels:
         for index, run in enumerate(runs):
             _plot_cdf_series(
                 axis,
@@ -265,7 +224,6 @@ def plot_per_copy_latency_cdf(
                     run.label,
                     run.connection,
                     table,
-                    getattr(run, statistics_field),
                     index,
                     line_styles[index % len(line_styles)],
                     index,
@@ -288,7 +246,6 @@ def plot_packet_latency_cdf(
     path: pathlib.Path,
     options: PlotOptions,
     connection: duckdb.DuckDBPyConnection,
-    report: dict,
 ) -> None:
     """Compare RX and TX packet processing at the QUIC connection layer."""
 
@@ -298,7 +255,6 @@ def plot_packet_latency_cdf(
             "RX",
             connection,
             "packet_samples",
-            report["packet_statistics"],
             0,
             "-",
             0,
@@ -308,7 +264,6 @@ def plot_packet_latency_cdf(
             "TX",
             connection,
             "packet_samples",
-            report["packet_statistics"],
             1,
             "-",
             0,
@@ -332,20 +287,24 @@ def plot_packet_latency_cdf(
 def plot_metrics(
     path: pathlib.Path,
     options: PlotOptions,
-    plot: MetricPlot,
+    connection: duckdb.DuckDBPyConnection,
+    domain: str,
 ) -> None:
     """Render distribution, percentile, and time-series panels for one metric layer."""
 
+    table, title = _METRIC_PLOTS[domain]
+    labels = _labels(connection, domain)
+    statistics = _statistics(connection, domain)
     fig, axes = plt.subplots(1, 3, figsize=(17, 5.5))
-    present = [metric for metric in plot.labels if metric in plot.statistics]
+    present = [metric for metric in labels if metric in statistics]
     if not present:
         raise ValueError("cannot plot a metric layer without samples")
     for index, metric in enumerate(present):
-        metric_samples = _samples(plot.connection, plot.table, metric)
+        metric_samples = _samples(connection, table, metric)
         values_ms = [latency_ms for _elapsed_s, latency_ms in metric_samples]
         axes[0].ecdf(
             values_ms,
-            label=plot.labels[metric],
+            label=labels[metric],
             color=_color(index, len(present)),
             linewidth=2,
         )
@@ -359,13 +318,13 @@ def plot_metrics(
     width = 0.8 / len(present)
     x_positions = list(range(len(percentiles)))
     for index, metric in enumerate(present):
-        summary = plot.statistics[metric]
+        summary = statistics[metric]
         offset = (index - (len(present) - 1) / 2) * width
         axes[1].bar(
             [position + offset for position in x_positions],
             [float(summary[name]) / 1_000 for name in percentiles],
             width=width,
-            label=plot.labels[metric],
+            label=labels[metric],
             color=_color(index, len(present)),
         )
     axes[1].set_xticks(x_positions, percentiles)
@@ -374,11 +333,11 @@ def plot_metrics(
     axes[1].grid(axis="y", alpha=0.25)
 
     for index, metric in enumerate(present):
-        metric_samples = _samples(plot.connection, plot.table, metric)
+        metric_samples = _samples(connection, table, metric)
         axes[2].scatter(
             [elapsed_s for elapsed_s, _latency_ms in metric_samples],
             [latency_ms for _elapsed_s, latency_ms in metric_samples],
-            label=plot.labels[metric],
+            label=labels[metric],
             color=_color(index, len(present)),
             s=8,
             alpha=0.55,
@@ -388,20 +347,80 @@ def plot_metrics(
     axes[2].set_ylabel("Latency (ms)")
     axes[2].grid(alpha=0.25)
 
-    fig.suptitle(f"{plot.title} | {_context(options)}")
+    fig.suptitle(f"{title} | {_context(options)}")
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160)
     plt.close(fig)
 
 
+def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[dict, ...]:
+    timelines = []
+    for selection_order, statistic, target_us, group_id, object_id in connection.execute(
+        """SELECT selection_order, statistic, target_us, group_id, object_id
+           FROM timeline_selections ORDER BY selection_order"""
+    ).fetchall():
+        copies = [
+            {
+                "session_id": int(session_id),
+                "subscriber_ordinal": int(subscriber_ordinal),
+                "full_span_us": float(full_span_us),
+            }
+            for session_id, subscriber_ordinal, full_span_us in connection.execute(
+                """SELECT session_id, subscriber_ordinal, full_span_us
+                   FROM timeline_copies
+                   WHERE selection_order = ?
+                     AND (subscriber_ordinal = 1 OR subscriber_ordinal = copy_count)
+                   ORDER BY subscriber_ordinal""",
+                [selection_order],
+            ).fetchall()
+        ]
+        intervals = [
+            {
+                "direction": direction,
+                "session_id": int(session_id),
+                "phase": phase,
+                "occurrence": int(occurrence),
+                "start_us": float(start_us),
+                "end_us": float(end_us),
+            }
+            for direction, session_id, phase, occurrence, start_us, end_us in connection.execute(
+                """SELECT direction, session_id, phase, occurrence, start_us, end_us
+                   FROM timeline_intervals AS interval
+                   WHERE selection_order = ?
+                     AND (direction = 'rx' OR session_id IN (
+                       SELECT session_id FROM timeline_copies
+                       WHERE selection_order = ?
+                         AND (subscriber_ordinal = 1 OR subscriber_ordinal = copy_count)
+                     ))
+                   ORDER BY direction, session_id, phase, occurrence, start_us""",
+                [selection_order, selection_order],
+            ).fetchall()
+        ]
+        timelines.append(
+            {
+                "selection": {
+                    "statistic": statistic,
+                    "target_us": float(target_us),
+                    "group_id": int(group_id),
+                    "object_id": int(object_id),
+                },
+                "intervals": intervals,
+                "first_copy": copies[0],
+                "last_copy": copies[-1],
+            }
+        )
+    return tuple(timelines)
+
+
 def plot_object_timelines(
     path: pathlib.Path,
     options: PlotOptions,
-    timelines: tuple[dict, ...],
+    connection: duckdb.DuckDBPyConnection,
 ) -> None:
     """Render aligned lifecycle timelines for representative objects."""
 
+    timelines = _timelines(connection)
     if not timelines:
         raise ValueError("cannot plot an empty object timeline selection")
     rx_quic_rows = (

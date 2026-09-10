@@ -132,9 +132,10 @@ moq-trace analyze relay.ctf \
 
 The analyzer atomically publishes one DuckDB database and refuses to overwrite
 it. The database is the authoritative derived artifact. It contains raw typed
-events, validated lifecycles, correlated samples, run metadata, and metric
-definitions. Durations remain integer nanoseconds in storage; conversion to
-display units happens only at presentation boundaries.
+events, validated lifecycles, correlated samples, run metadata, metric
+statistics, and representative timeline rows. Durations remain integer
+nanoseconds in storage; conversion to display units happens only at
+presentation boundaries.
 
 Query it directly:
 

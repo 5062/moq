@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-import json
 import os
 import pathlib
 import shlex
@@ -12,10 +11,10 @@ import shlex
 import duckdb
 
 from .analyze import run as analyze
+from .artifact import write_metadata
 from .capture import LttngSession, ManagedProcess, wait_for_log
 from .config import ComparisonConfig, ExperimentConfig
 from .render import render
-from .schema import SCHEMA_REVISION
 
 PROTOCOL = "moq-transport-19"
 
@@ -253,17 +252,8 @@ def compare(config: ComparisonConfig) -> pathlib.Path:
         database = run(run_config)
         runs.append({"value": value, "database": str(database.relative_to(output))})
     database = output / "comparison.duckdb"
-    connection = duckdb.connect(str(database))
-    try:
-        connection.execute(
-            "CREATE TABLE metadata(schema_revision INTEGER PRIMARY KEY, kind VARCHAR NOT NULL, value JSON NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO metadata VALUES (?, 'comparison', ?)",
-            [SCHEMA_REVISION, json.dumps({"dimension": config.dimension, "runs": runs})],
-        )
-    finally:
-        connection.close()
+    with duckdb.connect(str(database)) as connection:
+        write_metadata(connection, "comparison", {"dimension": config.dimension, "runs": runs})
     if config.experiment.render:
         render(database)
     return database

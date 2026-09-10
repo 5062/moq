@@ -10,7 +10,20 @@ from collections.abc import Generator
 import duckdb
 
 from .errors import TraceError
-from .schema import SCHEMA_REVISION
+
+SCHEMA_REVISION = 3
+
+
+def write_metadata(connection: duckdb.DuckDBPyConnection, kind: str, value: dict) -> None:
+    """Write the authoritative identity and metadata for one artifact."""
+
+    connection.execute(
+        "CREATE TABLE metadata(schema_revision INTEGER PRIMARY KEY, kind VARCHAR NOT NULL, value JSON NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO metadata VALUES (?, ?, ?)",
+        [SCHEMA_REVISION, kind, json.dumps(value)],
+    )
 
 
 @contextlib.contextmanager

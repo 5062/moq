@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import pathlib
 import sys
 import tempfile
@@ -11,7 +10,7 @@ import duckdb
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
-from moq_trace.artifact import open_artifact  # noqa: E402
+from moq_trace.artifact import open_artifact, write_metadata  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
 
 
@@ -43,11 +42,7 @@ class AnalysisDatabaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = pathlib.Path(directory) / "analysis.duckdb"
             connection = duckdb.connect(str(database))
-            connection.execute("CREATE TABLE metadata(schema_revision INTEGER, kind VARCHAR, value JSON)")
-            connection.execute(
-                "INSERT INTO metadata VALUES (2, 'run', ?)",
-                [json.dumps({"workload": {"subscribers": 1, "object_size": 1024}})],
-            )
+            write_metadata(connection, "run", {"workload": {"subscribers": 1, "object_size": 1024}})
             connection.close()
 
             with open_artifact(database, "run") as (_connection, kind, metadata):
