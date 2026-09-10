@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import pathlib
-from collections.abc import Iterator
+from collections.abc import Generator
 
 import duckdb
 
@@ -17,7 +17,7 @@ from .schema import SCHEMA_REVISION
 def open_artifact(
     database: pathlib.Path,
     expected_kind: str | None = None,
-) -> Iterator[tuple[duckdb.DuckDBPyConnection, str, dict]]:
+) -> Generator[tuple[duckdb.DuckDBPyConnection, str, dict], None, None]:
     """Open a current-schema artifact and close it when the caller finishes."""
 
     connection = None
