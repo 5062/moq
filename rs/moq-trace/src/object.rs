@@ -1,33 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crate::{Direction, Event, Handle, PhaseEdge, now_ns};
-
-/// Metadata emitted once when a MoQ object lifecycle starts.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ObjectEvent {
-	/// Monotonic timestamp in nanoseconds from the local process clock.
-	pub timestamp_ns: u64,
-	/// Process-unique lifecycle identifier used by child and completion records.
-	pub trace_id: u64,
-	/// Process-unique identity shared by ingress and every outbound copy.
-	pub logical_id: LogicalId,
-	/// Process-local MoQ session ID when available.
-	pub session_id: Option<u64>,
-	/// Process-local transport connection ID when available.
-	pub connection_id: Option<u64>,
-	/// Whether this object is entering or leaving the relay.
-	pub direction: Direction,
-	/// moq-transport track alias or request ID on this session.
-	pub track_alias: u64,
-	/// moq-transport group ID.
-	pub group_id: u64,
-	/// moq-transport object ID.
-	pub object_id: u64,
-	/// QUIC stream ID when the backend exposes it.
-	pub stream_id: Option<u64>,
-	/// Inclusive stream byte offset where this object starts, when known.
-	pub stream_offset_start: Option<u64>,
-}
+use crate::{Direction, Handle, PhaseEdge, now_ns};
 
 /// Identity shared by ingress and every outbound copy of one logical object.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -57,21 +30,6 @@ impl std::fmt::Display for LogicalId {
 	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(formatter, "{}:{}", self.group, self.frame)
 	}
-}
-
-/// Final metadata emitted when a MoQ object lifecycle completes.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ObjectEndEvent {
-	/// Monotonic completion timestamp in nanoseconds.
-	pub timestamp_ns: u64,
-	/// Object lifecycle identifier from [`ObjectEvent::trace_id`].
-	pub trace_id: u64,
-	/// Exclusive stream byte offset where this object ends, when known.
-	pub stream_offset_end: Option<u64>,
-	/// Object payload size in bytes.
-	pub payload_bytes: u64,
-	/// Result of processing the object lifecycle.
-	pub outcome: ObjectOutcome,
 }
 
 /// A measured step in the moq-transport object lifecycle.
@@ -123,9 +81,9 @@ pub enum ObjectOutcome {
 /// Stable identity of one moq-transport object.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectIdentity {
-	track_alias: u64,
-	group_id: u64,
-	object_id: u64,
+	pub(crate) track_alias: u64,
+	pub(crate) group_id: u64,
+	pub(crate) object_id: u64,
 }
 
 impl ObjectIdentity {
@@ -141,15 +99,13 @@ impl ObjectIdentity {
 /// Stable metadata known before a moq-transport object trace starts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectContext {
-	logical_id: LogicalId,
-	session_id: Option<u64>,
-	connection_id: Option<u64>,
-	direction: Direction,
-	track_alias: u64,
-	group_id: u64,
-	object_id: u64,
-	stream_id: Option<u64>,
-	stream_offset_start: Option<u64>,
+	pub(crate) logical_id: LogicalId,
+	pub(crate) identity: ObjectIdentity,
+	pub(crate) session_id: Option<u64>,
+	pub(crate) connection_id: Option<u64>,
+	pub(crate) direction: Direction,
+	pub(crate) stream_id: Option<u64>,
+	pub(crate) stream_offset_start: Option<u64>,
 	payload_bytes: u64,
 }
 
@@ -157,12 +113,10 @@ impl ObjectContext {
 	pub fn new(direction: Direction, identity: ObjectIdentity, logical_id: LogicalId) -> Self {
 		Self {
 			logical_id,
+			identity,
 			session_id: None,
 			connection_id: None,
 			direction,
-			track_alias: identity.track_alias,
-			group_id: identity.group_id,
-			object_id: identity.object_id,
 			stream_id: None,
 			stream_offset_start: None,
 			payload_bytes: 0,
@@ -260,14 +214,9 @@ impl ObjectTrace {
 		let Some(state) = &self.0 else {
 			return;
 		};
-		state.handle.emit(Event::MoqObjectPhase(ObjectPhaseEvent {
-			timestamp_ns: now_ns(),
-			trace_id: state.trace_id,
-			span_id,
-			phase,
-			edge,
-			outcome,
-		}));
+		if let Some(backend) = &state.handle.inner {
+			backend.object_phase(now_ns(), state.trace_id, span_id, phase, edge, outcome);
+		}
 	}
 
 	/// Finish the object interval with the latest metadata and result.
@@ -281,13 +230,15 @@ impl ObjectTrace {
 
 impl ObjectTraceState {
 	fn emit_end(self, outcome: ObjectOutcome) {
-		self.handle.emit(Event::MoqObjectEnd(ObjectEndEvent {
-			timestamp_ns: now_ns(),
-			trace_id: self.trace_id,
-			stream_offset_end: self.stream_offset_end,
-			payload_bytes: self.payload_bytes,
-			outcome,
-		}));
+		if let Some(backend) = &self.handle.inner {
+			backend.object_end(
+				now_ns(),
+				self.trace_id,
+				self.stream_offset_end,
+				self.payload_bytes,
+				outcome,
+			);
+		}
 	}
 }
 
@@ -331,47 +282,20 @@ impl Drop for ObjectPhaseTrace<'_> {
 	}
 }
 
-/// moq-transport object phase fields.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ObjectPhaseEvent {
-	/// Monotonic boundary timestamp in nanoseconds.
-	pub timestamp_ns: u64,
-	/// Parent object lifecycle identifier.
-	pub trace_id: u64,
-	/// Process-unique phase span identifier shared by both boundaries.
-	pub span_id: u64,
-	/// Object lifecycle phase being measured.
-	pub phase: ObjectPhase,
-	/// Whether this boundary starts or completes the phase.
-	pub edge: PhaseEdge,
-	/// Completion result, present only when `edge` is `done`.
-	pub outcome: Option<ObjectOutcome>,
-}
-
 impl Handle {
 	/// Start a moq-transport object trace.
 	pub fn object(&self, context: ObjectContext) -> ObjectTrace {
-		if !crate::backend::object_enabled() {
-			return ObjectTrace::disabled();
-		}
 		let Some(inner) = self.inner.as_ref() else {
 			return ObjectTrace::disabled();
 		};
+		if !inner.object_enabled() {
+			return ObjectTrace::disabled();
+		}
+		let mut context = context;
+		context.session_id = context.session_id.or(self.session_id);
+		context.connection_id = context.connection_id.or(self.connection_id);
 		let trace_id = crate::NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed);
-		let object = ObjectEvent {
-			timestamp_ns: now_ns(),
-			trace_id,
-			logical_id: context.logical_id,
-			session_id: context.session_id.or(self.session_id),
-			connection_id: context.connection_id.or(self.connection_id),
-			direction: context.direction,
-			track_alias: context.track_alias,
-			group_id: context.group_id,
-			object_id: context.object_id,
-			stream_id: context.stream_id,
-			stream_offset_start: context.stream_offset_start,
-		};
-		inner.emit(Event::MoqObjectStart(object));
+		inner.object_start(now_ns(), trace_id, &context);
 		ObjectTrace(Some(ObjectTraceState {
 			handle: self.clone(),
 			trace_id,

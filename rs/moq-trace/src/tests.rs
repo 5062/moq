@@ -22,30 +22,30 @@ fn object_children_only_reference_the_start_record() {
 	object.finish(ObjectOutcome::Success);
 	let events = handle.events();
 	assert_eq!(events.len(), 4);
-	let trace_id = events[0].trace_id().unwrap();
-	assert!(events[1..].iter().all(|event| event.trace_id() == Some(trace_id)));
+	let trace_id = events[0].trace_id();
+	assert!(events[1..].iter().all(|event| event.trace_id() == trace_id));
 	assert!(matches!(
 		events.first(),
-		Some(Event::MoqObjectStart(ObjectEvent { logical_id, .. }))
+		Some(backend::Event::ObjectStart { logical_id, .. })
 			if logical_id.group() == 9 && logical_id.frame() == 4
 	));
 	assert!(matches!(
 		events.last(),
-		Some(Event::MoqObjectEnd(ObjectEndEvent {
+		Some(backend::Event::ObjectEnd {
 			payload_bytes: 44,
 			stream_offset_end: Some(144),
 			outcome: ObjectOutcome::Success,
 			..
-		}))
+		})
 	));
-	let Some(Event::MoqObjectPhase(start)) = events.get(1) else {
+	let Some(backend::Event::ObjectPhase { span_id: start, .. }) = events.get(1) else {
 		panic!("expected phase start");
 	};
-	let Some(Event::MoqObjectPhase(done)) = events.get(2) else {
+	let Some(backend::Event::ObjectPhase { span_id: done, .. }) = events.get(2) else {
 		panic!("expected phase completion");
 	};
-	assert_ne!(start.span_id, 0);
-	assert_eq!(start.span_id, done.span_id);
+	assert_ne!(*start, 0);
+	assert_eq!(start, done);
 }
 
 #[test]
@@ -60,10 +60,10 @@ fn dropping_an_object_records_abandonment() {
 
 	assert!(matches!(
 		handle.events().last(),
-		Some(Event::MoqObjectEnd(ObjectEndEvent {
+		Some(backend::Event::ObjectEnd {
 			outcome: ObjectOutcome::Abandoned,
 			..
-		}))
+		})
 	));
 }
 
@@ -76,22 +76,30 @@ fn packet_end_contains_metadata_discovered_after_start() {
 	packet.phase(PacketPhase::Routing).finish(PacketOutcome::Success);
 	packet.finish(PacketOutcome::Success);
 	let events = handle.events();
-	let Some(Event::PacketPhase(start)) = events.get(1) else {
+	assert!(matches!(
+		events.first(),
+		Some(backend::Event::PacketStart {
+			connection_id: 7,
+			direction: Direction::Rx,
+			..
+		})
+	));
+	let Some(backend::Event::PacketPhase { span_id: start, .. }) = events.get(1) else {
 		panic!("expected phase start");
 	};
-	let Some(Event::PacketPhase(finish)) = events.get(2) else {
+	let Some(backend::Event::PacketPhase { span_id: finish, .. }) = events.get(2) else {
 		panic!("expected phase completion");
 	};
-	assert_eq!(start.span_id, finish.span_id);
+	assert_eq!(start, finish);
 	assert!(matches!(
 		events.last(),
-		Some(Event::PacketEnd(PacketEndEvent {
+		Some(backend::Event::PacketEnd {
 			packet_number: Some(91),
 			packet_space: Some(PacketSpace::Data),
 			byte_len: Some(1200),
 			outcome: PacketOutcome::Success,
 			..
-		}))
+		})
 	));
 }
 

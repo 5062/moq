@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crate::{Direction, Event, Handle, PacketSpace, now_ns};
+use crate::{Direction, Handle, PacketSpace, now_ns};
 
 /// Result of packet or packet-phase processing.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -64,12 +64,13 @@ pub(crate) enum PhaseEdge {
 
 /// Metadata known when a packet trace begins.
 #[derive(Clone, Debug)]
+#[cfg_attr(not(all(feature = "lttng", target_os = "linux")), allow(dead_code))]
 pub struct PacketContext {
-	connection_id: u64,
-	direction: Direction,
-	packet_number: Option<u64>,
-	packet_space: Option<PacketSpace>,
-	byte_len: Option<usize>,
+	pub(crate) connection_id: u64,
+	pub(crate) direction: Direction,
+	pub(crate) packet_number: Option<u64>,
+	pub(crate) packet_space: Option<PacketSpace>,
+	pub(crate) byte_len: Option<usize>,
 	start_ns: Option<u64>,
 }
 
@@ -114,9 +115,9 @@ impl PacketContext {
 /// STREAM frame byte range carried by one QUIC packet.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamFrame {
-	stream_id: u64,
-	offset_start: u64,
-	offset_end: u64,
+	pub(crate) stream_id: u64,
+	pub(crate) offset_start: u64,
+	pub(crate) offset_end: u64,
 }
 
 impl StreamFrame {
@@ -130,83 +131,14 @@ impl StreamFrame {
 	}
 }
 
-/// Fields shared by every record for one QUIC packet.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PacketEvent {
-	/// Monotonic timestamp in nanoseconds from the local process clock.
-	pub timestamp_ns: u64,
-	/// Process-unique identifier shared by this packet's records.
-	pub trace_id: u64,
-	/// Quinn stable connection ID.
-	pub connection_id: u64,
-	/// Whether this packet is being received or transmitted.
-	pub direction: Direction,
-	/// QUIC packet number when known.
-	pub packet_number: Option<u64>,
-	/// QUIC packet number space when known.
-	pub packet_space: Option<PacketSpace>,
-	/// Encoded packet length in bytes when known.
-	pub byte_len: Option<usize>,
-}
-
-/// One boundary of a measured packet phase.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PacketPhaseEvent {
-	/// Monotonic timestamp in nanoseconds from the local process clock.
-	pub timestamp_ns: u64,
-	/// Packet lifecycle identifier from [`PacketEvent::trace_id`].
-	pub trace_id: u64,
-	/// Process-unique phase span identifier shared by both boundaries.
-	pub span_id: u64,
-	/// Packet lifecycle phase being measured.
-	pub phase: PacketPhase,
-	/// Whether this boundary starts or completes the phase.
-	pub edge: PhaseEdge,
-	/// Completion result, present only when `edge` is `done`.
-	pub outcome: Option<PacketOutcome>,
-}
-
-/// STREAM frame mapping emitted as a child of one packet trace.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct StreamFrameEvent {
-	/// Monotonic timestamp in nanoseconds from the local process clock.
-	pub timestamp_ns: u64,
-	/// Packet lifecycle identifier from [`PacketEvent::trace_id`].
-	pub trace_id: u64,
-	/// QUIC stream identifier.
-	pub stream_id: u64,
-	/// Inclusive stream byte offset.
-	pub offset_start: u64,
-	/// Exclusive stream byte offset.
-	pub offset_end: u64,
-	/// Result of processing this frame.
-	pub outcome: PacketOutcome,
-}
-
-/// Packet completion record with an explicit result.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PacketEndEvent {
-	/// Monotonic completion timestamp in nanoseconds.
-	pub timestamp_ns: u64,
-	/// Packet lifecycle identifier from [`PacketEvent::trace_id`].
-	pub trace_id: u64,
-	/// QUIC packet number discovered during processing.
-	pub packet_number: Option<u64>,
-	/// QUIC packet number space discovered during processing.
-	pub packet_space: Option<PacketSpace>,
-	/// Final encoded packet length in bytes.
-	pub byte_len: Option<usize>,
-	/// Result of processing the packet.
-	pub outcome: PacketOutcome,
-}
-
 /// A QUIC packet whose completion consumes the token.
 #[must_use = "dropping a packet trace records an abandoned packet"]
 pub struct PacketTrace(Option<PacketTraceState>);
 
 struct PacketTraceState {
 	handle: Handle,
-	packet: PacketEvent,
+	trace_id: u64,
+	context: PacketContext,
 }
 
 /// A packet phase whose completion consumes the token.
@@ -224,25 +156,18 @@ struct PacketPhaseTraceState {
 impl Handle {
 	/// Start a QUIC packet trace.
 	pub fn packet(&self, context: PacketContext) -> PacketTrace {
-		if !crate::backend::packet_enabled() {
-			return PacketTrace::disabled();
-		}
 		let Some(inner) = self.inner.as_ref() else {
 			return PacketTrace::disabled();
 		};
-		let packet = PacketEvent {
-			timestamp_ns: context.start_ns.unwrap_or_else(now_ns),
-			trace_id: crate::NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed),
-			connection_id: context.connection_id,
-			direction: context.direction,
-			packet_number: context.packet_number,
-			packet_space: context.packet_space,
-			byte_len: context.byte_len,
-		};
-		inner.emit(Event::PacketStart(packet.clone()));
+		if !inner.packet_enabled() {
+			return PacketTrace::disabled();
+		}
+		let trace_id = crate::NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed);
+		inner.packet_start(context.start_ns.unwrap_or_else(now_ns), trace_id, &context);
 		PacketTrace(Some(PacketTraceState {
 			handle: self.clone(),
-			packet,
+			trace_id,
+			context,
 		}))
 	}
 }
@@ -256,21 +181,21 @@ impl PacketTrace {
 	/// Record the packet number discovered during RX processing.
 	pub fn set_number(&mut self, number: u64) {
 		if let Some(state) = &mut self.0 {
-			state.packet.packet_number = Some(number);
+			state.context.packet_number = Some(number);
 		}
 	}
 
 	/// Record the packet number space discovered during RX processing.
 	pub fn set_space(&mut self, space: PacketSpace) {
 		if let Some(state) = &mut self.0 {
-			state.packet.packet_space = Some(space);
+			state.context.packet_space = Some(space);
 		}
 	}
 
 	/// Record the final encoded packet length.
 	pub fn set_byte_len(&mut self, byte_len: usize) {
 		if let Some(state) = &mut self.0 {
-			state.packet.byte_len = Some(byte_len);
+			state.context.byte_len = Some(byte_len);
 		}
 	}
 
@@ -285,17 +210,12 @@ impl PacketTrace {
 			return PacketPhaseTrace::disabled();
 		};
 		let span_id = crate::NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed);
-		state.handle.emit(Event::PacketPhase(PacketPhaseEvent {
-			timestamp_ns,
-			trace_id: state.packet.trace_id,
-			span_id,
-			phase,
-			edge: PhaseEdge::Start,
-			outcome: None,
-		}));
+		if let Some(backend) = &state.handle.inner {
+			backend.packet_phase(timestamp_ns, state.trace_id, span_id, phase, PhaseEdge::Start, None);
+		}
 		PacketPhaseTrace(Some(PacketPhaseTraceState {
 			handle: state.handle.clone(),
-			trace_id: state.packet.trace_id,
+			trace_id: state.trace_id,
 			span_id,
 			start_ns: timestamp_ns,
 			phase,
@@ -307,14 +227,9 @@ impl PacketTrace {
 		let Some(state) = &self.0 else {
 			return;
 		};
-		state.handle.emit(Event::StreamFrame(StreamFrameEvent {
-			timestamp_ns: now_ns(),
-			trace_id: state.packet.trace_id,
-			stream_id: frame.stream_id,
-			offset_start: frame.offset_start,
-			offset_end: frame.offset_end,
-			outcome,
-		}));
+		if let Some(backend) = &state.handle.inner {
+			backend.stream_frame(now_ns(), state.trace_id, frame, outcome);
+		}
 	}
 
 	/// Finish the packet with an explicit result.
@@ -327,14 +242,9 @@ impl PacketTrace {
 
 impl PacketTraceState {
 	fn emit_end(self, outcome: PacketOutcome) {
-		self.handle.emit(Event::PacketEnd(PacketEndEvent {
-			timestamp_ns: now_ns(),
-			trace_id: self.packet.trace_id,
-			packet_number: self.packet.packet_number,
-			packet_space: self.packet.packet_space,
-			byte_len: self.packet.byte_len,
-			outcome,
-		}));
+		if let Some(backend) = &self.handle.inner {
+			backend.packet_end(now_ns(), self.trace_id, &self.context, outcome);
+		}
 	}
 }
 
@@ -371,14 +281,16 @@ impl PacketPhaseTraceState {
 
 	fn emit_done_at(self, outcome: PacketOutcome, timestamp_ns: u64) {
 		debug_assert!(timestamp_ns >= self.start_ns);
-		self.handle.emit(Event::PacketPhase(PacketPhaseEvent {
-			timestamp_ns,
-			trace_id: self.trace_id,
-			span_id: self.span_id,
-			phase: self.phase,
-			edge: PhaseEdge::Done,
-			outcome: Some(outcome),
-		}));
+		if let Some(backend) = &self.handle.inner {
+			backend.packet_phase(
+				timestamp_ns,
+				self.trace_id,
+				self.span_id,
+				self.phase,
+				PhaseEdge::Done,
+				Some(outcome),
+			);
+		}
 	}
 }
 
