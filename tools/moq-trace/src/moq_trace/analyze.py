@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import tempfile
@@ -11,7 +12,7 @@ import pyarrow as pa
 
 from . import ctf
 from .coverage import resolve as _coverage
-from .errors import AnalyzeError
+from .errors import TraceError
 from .report import build as _build_report
 from .schema import SCHEMA_REVISION
 
@@ -25,7 +26,7 @@ def _count(connection: duckdb.DuckDBPyConnection, query: str, parameters=()) -> 
 def _require_zero(connection: duckdb.DuckDBPyConnection, query: str, message: str) -> None:
     count = _count(connection, query)
     if count:
-        raise AnalyzeError(f"{message}: {count}")
+        raise TraceError(f"{message}: {count}")
 
 
 def _ingest(
@@ -89,7 +90,7 @@ def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
         boundaries = _count(connection, f"SELECT count(*) FROM {table}")
         pairs = _count(connection, f"SELECT count(*) * 2 FROM {intervals}")
         if boundaries != pairs:
-            raise AnalyzeError(f"{table} contains unmatched phase boundaries")
+            raise TraceError(f"{table} contains unmatched phase boundaries")
         _require_zero(
             connection,
             f"SELECT count(*) FROM {intervals} WHERE end_ns < start_ns",
@@ -143,7 +144,7 @@ def _select_workload(
         [object_size],
     ).fetchone()
     if bounds[0] is None:
-        raise AnalyzeError(f"trace has no completed {object_size}-byte inbound objects")
+        raise TraceError(f"trace has no completed {object_size}-byte inbound objects")
     origin, last = map(int, bounds)
     start = min(origin + warmup_ns, 2**64 - 1)
     end = max(last - cooldown_ns, 0)
@@ -155,7 +156,7 @@ def _select_workload(
         [object_size, start, end],
     )
     if _count(connection, "SELECT count(*) FROM selected_rx") == 0:
-        raise AnalyzeError("steady-state window contains no complete objects")
+        raise TraceError("steady-state window contains no complete objects")
     bad = _count(
         connection,
         """SELECT count(*) FROM (
@@ -170,12 +171,12 @@ def _select_workload(
         [subscribers],
     )
     if bad:
-        raise AnalyzeError(f"{bad} steady-state objects do not have exactly {subscribers} outbound copies")
+        raise TraceError(f"{bad} steady-state objects do not have exactly {subscribers} outbound copies")
     groups = connection.execute(
         "SELECT count(DISTINCT group_id), min(group_id), max(group_id) FROM selected_rx"
     ).fetchone()
     if int(groups[0]) != int(groups[2]) - int(groups[1]) + 1:
-        raise AnalyzeError("steady-state groups are not contiguous")
+        raise TraceError("steady-state groups are not contiguous")
     connection.execute(
         """CREATE TABLE object_samples AS
            SELECT rx.group_id, rx.object_id, 'full_span' AS metric,
@@ -303,16 +304,18 @@ def _define_metrics(connection: duckdb.DuckDBPyConnection) -> None:
 def run(
     input_path: pathlib.Path,
     output: pathlib.Path,
+    *,
     object_size: int,
     subscribers: int,
     warmup_ns: int,
     cooldown_ns: int,
     expected_pid: int | None = None,
+    metadata: dict | None = None,
 ) -> dict:
     """Analyze CTF into one atomically published DuckDB database."""
 
     if output.exists():
-        raise AnalyzeError(f"analysis database already exists: {output}")
+        raise TraceError(f"analysis database already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".moq-trace-analysis-", dir=output.parent) as staging_name:
         staging = pathlib.Path(staging_name)
@@ -326,20 +329,30 @@ def run(
             _coverage(connection)
             _derive_samples(connection, origin)
             _define_metrics(connection)
-            connection.execute(
-                """CREATE TABLE metadata(
-                       schema_revision INTEGER PRIMARY KEY,
-                       object_size UBIGINT NOT NULL,
-                       subscribers UBIGINT NOT NULL,
-                       warmup_ns UBIGINT NOT NULL,
-                       cooldown_ns UBIGINT NOT NULL
-                   )"""
-            )
-            connection.execute(
-                "INSERT INTO metadata VALUES (?, ?, ?, ?, ?)",
-                [SCHEMA_REVISION, object_size, subscribers, warmup_ns, cooldown_ns],
-            )
             report = _build_report(connection)
+            value = dict(metadata or {})
+            value.setdefault(
+                "workload",
+                {
+                    "subscribers": subscribers,
+                    "object_size": object_size,
+                    "warmup_seconds": warmup_ns / 1_000_000_000,
+                    "cooldown_seconds": cooldown_ns / 1_000_000_000,
+                },
+            )
+            value["counts"] = {
+                "groups": report["group_count"],
+                "packets": report["packet_count"],
+                "correlated_objects": report["correlated_objects"],
+                "correlated_object_copies": report["correlated_object_copies"],
+            }
+            connection.execute(
+                "CREATE TABLE metadata(schema_revision INTEGER PRIMARY KEY, kind VARCHAR NOT NULL, value JSON NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO metadata VALUES (?, 'run', ?)",
+                [SCHEMA_REVISION, json.dumps(value)],
+            )
             connection.execute("CHECKPOINT")
         finally:
             connection.close()

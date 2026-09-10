@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import duckdb
 
-from .errors import AnalyzeError
+from .errors import TraceError
 
 
 def _count(connection: duckdb.DuckDBPyConnection, query: str) -> int:
@@ -21,7 +21,7 @@ def _statistics(connection: duckdb.DuckDBPyConnection, table: str) -> dict:
             FROM {table} GROUP BY metric ORDER BY metric"""
     ).fetchall()
     if not rows:
-        raise AnalyzeError(f"cannot summarize empty {table}")
+        raise TraceError(f"cannot summarize empty {table}")
     return {
         metric: {
             "count": int(count),
@@ -138,7 +138,7 @@ def _timelines(connection: duckdb.DuckDBPyConnection) -> list[dict]:
             "SELECT session_id FROM object_lifecycles WHERE trace_id = ?", [trace_id]
         ).fetchone()[0]
         if rx_session is None:
-            raise AnalyzeError(f"RX object trace {trace_id} is missing session_id")
+            raise TraceError(f"RX object trace {trace_id} is missing session_id")
         intervals = _intervals(connection, int(trace_id), "rx", int(rx_session), int(origin))
         tx_rows = connection.execute(
             """SELECT trace_id, session_id, (end_ns - ?) / 1000.0 AS full_span_us
@@ -151,7 +151,7 @@ def _timelines(connection: duckdb.DuckDBPyConnection) -> list[dict]:
         copies = []
         for ordinal, (tx_trace_id, session_id, full_span) in enumerate(tx_rows, 1):
             if session_id is None:
-                raise AnalyzeError(f"TX object trace {tx_trace_id} is missing session_id")
+                raise TraceError(f"TX object trace {tx_trace_id} is missing session_id")
             intervals.extend(_intervals(connection, int(tx_trace_id), "tx", int(session_id), int(origin)))
             copies.append(
                 {
@@ -184,7 +184,7 @@ def build(connection: duckdb.DuckDBPyConnection) -> dict:
     packet_statistics = _statistics(connection, "packet_samples")
     for required in ("rx_routing", "rx_scheduling"):
         if required not in packet_statistics:
-            raise AnalyzeError(f"Quinn trace is missing packet metric: {required}")
+            raise TraceError(f"Quinn trace is missing packet metric: {required}")
     return {
         "statistics": _statistics(connection, "object_samples"),
         "quic_object_statistics": _statistics(connection, "quic_object_samples"),

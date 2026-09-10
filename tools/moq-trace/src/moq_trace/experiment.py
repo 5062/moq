@@ -9,10 +9,13 @@ import os
 import pathlib
 import shlex
 
+import duckdb
+
 from .analyze import run as analyze
 from .capture import LttngSession, ManagedProcess, wait_for_log
 from .config import ComparisonConfig, ExperimentConfig
 from .render import render
+from .schema import SCHEMA_REVISION
 
 PROTOCOL = "moq-transport-19"
 
@@ -181,10 +184,6 @@ def _file_hash(path: pathlib.Path) -> str | None:
         return None
 
 
-def _write_json(path: pathlib.Path, value: object) -> None:
-    path.write_text(json.dumps(value, indent=2) + "\n")
-
-
 def run(config: ExperimentConfig) -> pathlib.Path:
     """Capture, analyze, and optionally render one workload."""
 
@@ -195,18 +194,7 @@ def run(config: ExperimentConfig) -> pathlib.Path:
     output.mkdir(parents=True)
     command = commands(config)
     ctf, relay_pid = _capture(config, command, output)
-    report = analyze(
-        ctf,
-        output / "analysis.duckdb",
-        config.object_size,
-        config.subscribers,
-        int(config.warmup_seconds * 1_000_000_000),
-        int(config.cooldown_seconds * 1_000_000_000),
-        relay_pid,
-    )
-
-    run_record = {
-        "schema_revision": 1,
+    metadata = {
         "protocol": PROTOCOL,
         "affinity": (
             {"mode": "unpinned"} if config.relay_cpu is None else {"mode": "single-core", "cpu": config.relay_cpu}
@@ -228,17 +216,21 @@ def run(config: ExperimentConfig) -> pathlib.Path:
             "bench_sha256": _file_hash(config.bench_bin),
         },
         "commands": dataclasses.asdict(command),
-        "counts": {
-            "groups": report["group_count"],
-            "packets": report["packet_count"],
-            "correlated_objects": report["correlated_objects"],
-            "correlated_object_copies": report["correlated_object_copies"],
-        },
     }
-    _write_json(output / "run.json", run_record)
+    database = output / "analysis.duckdb"
+    analyze(
+        ctf,
+        database,
+        object_size=config.object_size,
+        subscribers=config.subscribers,
+        warmup_ns=int(config.warmup_seconds * 1_000_000_000),
+        cooldown_ns=int(config.cooldown_seconds * 1_000_000_000),
+        expected_pid=relay_pid,
+        metadata=metadata,
+    )
     if config.render:
-        render(output)
-    return output
+        render(database)
+    return database
 
 
 def compare(config: ComparisonConfig) -> pathlib.Path:
@@ -258,16 +250,20 @@ def compare(config: ComparisonConfig) -> pathlib.Path:
                 "render": False,
             }
         )
-        runs.append(run(run_config).name)
-    _write_json(
-        output / "comparison.json",
-        {
-            "schema_revision": 1,
-            "dimension": config.dimension,
-            "values": config.values,
-            "runs": runs,
-        },
-    )
+        database = run(run_config)
+        runs.append({"value": value, "database": str(database.relative_to(output))})
+    database = output / "comparison.duckdb"
+    connection = duckdb.connect(str(database))
+    try:
+        connection.execute(
+            "CREATE TABLE metadata(schema_revision INTEGER PRIMARY KEY, kind VARCHAR NOT NULL, value JSON NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO metadata VALUES (?, 'comparison', ?)",
+            [SCHEMA_REVISION, json.dumps({"dimension": config.dimension, "runs": runs})],
+        )
+    finally:
+        connection.close()
     if config.experiment.render:
-        render(output)
-    return output
+        render(database)
+    return database

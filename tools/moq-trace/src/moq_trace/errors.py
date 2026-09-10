@@ -1,5 +1,5 @@
-"""Analysis errors shared across the offline pipeline."""
+"""Shared failures for trace analysis and artifact handling."""
 
 
-class AnalyzeError(RuntimeError):
-    """The trace violates an analyzer invariant."""
+class TraceError(RuntimeError):
+    """A trace could not be captured, analyzed, or rendered reliably."""

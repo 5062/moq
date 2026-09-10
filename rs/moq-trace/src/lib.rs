@@ -27,22 +27,6 @@ pub enum Direction {
 	Tx,
 }
 
-impl Direction {
-	/// Return the stable lowercase representation used by normalized traces.
-	pub const fn as_str(self) -> &'static str {
-		match self {
-			Self::Rx => "rx",
-			Self::Tx => "tx",
-		}
-	}
-}
-
-impl std::fmt::Display for Direction {
-	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		formatter.write_str(self.as_str())
-	}
-}
-
 /// QUIC packet number space.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PacketSpace {

@@ -40,8 +40,8 @@ def parser() -> argparse.ArgumentParser:
     analyze.add_argument("--cooldown-seconds", type=float, default=0.0)
     analyze.add_argument("--expected-pid", type=int)
 
-    plot = commands.add_parser("plot", help="Render figures from an experiment directory.")
-    plot.add_argument("input", type=pathlib.Path)
+    plot = commands.add_parser("plot", help="Render figures from a DuckDB artifact.")
+    plot.add_argument("database", type=pathlib.Path)
     return root
 
 
@@ -64,17 +64,17 @@ def _run(args: argparse.Namespace) -> None:
         run(
             args.input,
             args.output,
-            args.object_size,
-            args.subscribers,
-            int(args.warmup_seconds * 1_000_000_000),
-            int(args.cooldown_seconds * 1_000_000_000),
-            args.expected_pid,
+            object_size=args.object_size,
+            subscribers=args.subscribers,
+            warmup_ns=int(args.warmup_seconds * 1_000_000_000),
+            cooldown_ns=int(args.cooldown_seconds * 1_000_000_000),
+            expected_pid=args.expected_pid,
         )
         print(args.output.resolve())
     elif args.command == "plot":
         from .render import render
 
-        render(args.input)
+        render(args.database)
 
 
 def main() -> None:

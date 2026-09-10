@@ -42,14 +42,20 @@ impl Backend {
 		platform::socket_enabled()
 	}
 
-	pub(crate) fn object_start(&self, _timestamp_ns: u64, trace_id: u64, context: &ObjectContext) {
+	pub(crate) fn object_start(
+		&self,
+		_timestamp_ns: u64,
+		trace_id: u64,
+		_handle: &crate::Handle,
+		context: &ObjectContext,
+	) {
 		#[cfg(test)]
 		self.record(Event::ObjectStart {
 			trace_id,
 			logical_id: context.logical_id,
 		});
 		#[cfg(not(test))]
-		platform::object_start(_timestamp_ns, trace_id, context);
+		platform::object_start(_timestamp_ns, trace_id, _handle, context);
 	}
 
 	pub(crate) fn object_end(
@@ -265,13 +271,13 @@ mod platform {
 		unsafe { ffi::moq_trace_udp_socket_start_enabled() || ffi::moq_trace_udp_socket_end_enabled() }
 	}
 
-	pub(super) fn object_start(timestamp_ns: u64, trace_id: u64, context: &ObjectContext) {
+	pub(super) fn object_start(timestamp_ns: u64, trace_id: u64, handle: &crate::Handle, context: &ObjectContext) {
 		unsafe {
 			if !ffi::moq_trace_moq_object_start_enabled() {
 				return;
 			}
-			let (has_session_id, session_id) = optional(context.session_id);
-			let (has_connection_id, connection_id) = optional(context.connection_id);
+			let (has_session_id, session_id) = optional(handle.session_id);
+			let (has_connection_id, connection_id) = optional(handle.connection_id);
 			let (has_stream_id, stream_id) = optional(context.stream_id);
 			let (has_stream_offset_start, stream_offset_start) = optional(context.stream_offset_start);
 			ffi::moq_trace_moq_object_start(&ffi::moq_trace_moq_object_start {
@@ -572,7 +578,7 @@ mod platform {
 	pub(super) fn socket_enabled() -> bool {
 		false
 	}
-	pub(super) fn object_start(_: u64, _: u64, _: &ObjectContext) {}
+	pub(super) fn object_start(_: u64, _: u64, _: &crate::Handle, _: &ObjectContext) {}
 	pub(super) fn object_end(_: u64, _: u64, _: Option<u64>, _: u64, _: ObjectOutcome) {}
 	pub(super) fn object_phase(_: u64, _: u64, _: u64, _: ObjectPhase, _: PhaseEdge, _: Option<ObjectOutcome>) {}
 	pub(super) fn packet_start(_: u64, _: u64, _: &PacketContext) {}

@@ -3,16 +3,13 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 
+import duckdb
 import matplotlib
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
 from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
-
-from .analysis import Analysis, ObjectTimeline, PacketSample, Sample
-
-Samples = tuple[Sample | PacketSample, ...]
 
 
 def _color(index: int, count: int) -> tuple[float, float, float, float]:
@@ -29,15 +26,26 @@ class PlotOptions:
     relay_cpu: int | None
     subscribers: int
     object_size: int
-    fps: int
-    protocol: str
+    fps: int | None
+    protocol: str | None
+
+
+def _context(options: PlotOptions) -> str:
+    affinity = "unpinned" if options.relay_cpu is None else f"pinned CPU {options.relay_cpu}"
+    values = [affinity, f"{options.subscribers} subscriber(s)", f"{options.object_size} bytes"]
+    if options.fps is not None:
+        values.append(f"{options.fps} fps")
+    if options.protocol is not None:
+        values.append(options.protocol)
+    return " | ".join(values)
 
 
 @dataclasses.dataclass(frozen=True)
 class MetricPlot:
     """One metric layer and its plot presentation."""
 
-    samples: Samples
+    connection: duckdb.DuckDBPyConnection
+    table: str
     statistics: dict[str, dict[str, float | int]]
     labels: dict[str, str]
     title: str
@@ -49,7 +57,8 @@ class CdfSeries:
 
     metric: str
     label: str
-    samples: Samples
+    connection: duckdb.DuckDBPyConnection
+    table: str
     statistics: dict[str, dict[str, float | int]]
     color_index: int
     line_style: str
@@ -61,47 +70,89 @@ class PerCopyCdfRun:
     """Per-copy object latency samples for one comparison workload."""
 
     label: str
-    samples: tuple[Sample, ...]
-    quic_object_samples: tuple[Sample, ...]
+    connection: duckdb.DuckDBPyConnection
     statistics: dict[str, dict[str, float | int]]
     quic_object_statistics: dict[str, dict[str, float | int]]
 
 
-def plot_analysis(path: pathlib.Path, options: PlotOptions, analysis: Analysis) -> None:
+def _labels(connection: duckdb.DuckDBPyConnection, domain: str) -> dict[str, str]:
+    return dict(
+        connection.execute(
+            "SELECT metric, label FROM metric_definitions WHERE domain = ? ORDER BY display_order",
+            [domain],
+        ).fetchall()
+    )
+
+
+def _samples(
+    connection: duckdb.DuckDBPyConnection,
+    table: str,
+    metric: str,
+) -> list[tuple[float, float]]:
+    return connection.execute(
+        f"SELECT elapsed_ns / 1000000000.0, latency_ns / 1000000.0 FROM {table} WHERE metric = ? ORDER BY elapsed_ns",
+        [metric],
+    ).fetchall()
+
+
+def plot_analysis(
+    path: pathlib.Path,
+    options: PlotOptions,
+    connection: duckdb.DuckDBPyConnection,
+    report: dict,
+) -> None:
     """Render ECDF, percentile, and time-series latency panels."""
 
     plot_metrics(
         path,
         options,
-        MetricPlot(analysis.samples, analysis.statistics, analysis.labels, "MoQ relay latency"),
+        MetricPlot(
+            connection,
+            "object_samples",
+            report["statistics"],
+            _labels(connection, "object"),
+            "MoQ relay latency",
+        ),
     )
 
 
-def plot_quic_analysis(path: pathlib.Path, options: PlotOptions, analysis: Analysis) -> None:
+def plot_quic_analysis(
+    path: pathlib.Path,
+    options: PlotOptions,
+    connection: duckdb.DuckDBPyConnection,
+    report: dict,
+) -> None:
     """Render QUIC-inclusive object metric panels."""
 
     plot_metrics(
         path,
         options,
         MetricPlot(
-            analysis.quic_object_samples,
-            analysis.quic_object_statistics,
-            analysis.quic_object_labels,
+            connection,
+            "quic_object_samples",
+            report["quic_object_statistics"],
+            _labels(connection, "quic_object"),
             "QUIC-inclusive relay latency",
         ),
     )
 
 
-def plot_packet_analysis(path: pathlib.Path, options: PlotOptions, analysis: Analysis) -> None:
+def plot_packet_analysis(
+    path: pathlib.Path,
+    options: PlotOptions,
+    connection: duckdb.DuckDBPyConnection,
+    report: dict,
+) -> None:
     """Render QUIC packet span and phase diagnostic panels."""
 
     plot_metrics(
         path,
         options,
         MetricPlot(
-            analysis.packet_samples,
-            analysis.packet_statistics,
-            analysis.packet_labels,
+            connection,
+            "packet_samples",
+            report["packet_statistics"],
+            _labels(connection, "packet"),
             "QUIC packet diagnostics",
         ),
     )
@@ -112,7 +163,9 @@ def _plot_cdf_series(axis: Axes, series: CdfSeries) -> int:
 
     color = _color(series.color_index, 20)
     percentiles = (("p50", 0.50, "o"), ("p99", 0.99, "s"))
-    values_us = [sample.latency_us for sample in series.samples if sample.metric == series.metric]
+    values_us = [
+        latency_ms * 1_000 for _elapsed_s, latency_ms in _samples(series.connection, series.table, series.metric)
+    ]
     if len(values_us) == 0:
         raise ValueError(f"cannot plot CDF without {series.metric} samples")
     axis.ecdf(
@@ -144,16 +197,22 @@ def _plot_cdf_series(axis: Axes, series: CdfSeries) -> int:
     return len(values_us)
 
 
-def plot_latency_cdf(path: pathlib.Path, options: PlotOptions, analysis: Analysis) -> None:
+def plot_latency_cdf(
+    path: pathlib.Path,
+    options: PlotOptions,
+    connection: duckdb.DuckDBPyConnection,
+    report: dict,
+) -> None:
     """Render the empirical distributions of MoQ and QUIC-inclusive object latency."""
 
     series = (
-        CdfSeries("full_span", "MoQ", analysis.samples, analysis.statistics, 0, "-", 0),
+        CdfSeries("full_span", "MoQ", connection, "object_samples", report["statistics"], 0, "-", 0),
         CdfSeries(
             "quic_full_span",
             "QUIC",
-            analysis.quic_object_samples,
-            analysis.quic_object_statistics,
+            connection,
+            "quic_object_samples",
+            report["quic_object_statistics"],
             1,
             "--",
             1,
@@ -163,12 +222,7 @@ def plot_latency_cdf(path: pathlib.Path, options: PlotOptions, analysis: Analysi
     for item in series:
         _plot_cdf_series(axis, item)
 
-    affinity = "unpinned" if options.relay_cpu is None else f"pinned CPU {options.relay_cpu}"
-    fig.suptitle(
-        f"Object latency CDF | "
-        f"{affinity} | {options.subscribers} subscriber(s) | "
-        f"{options.object_size} bytes | {options.fps} fps | {options.protocol}"
-    )
+    fig.suptitle(f"Object latency CDF | {_context(options)}")
     axis.set_xlabel("Latency (µs)")
     axis.set_ylabel("CDF")
     axis.grid(alpha=0.25)
@@ -192,7 +246,7 @@ def plot_per_copy_latency_cdf(
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5.5), sharey=True)
     panels = (
-        (axes[0], "full_span", "MoQ", "samples", "statistics"),
+        (axes[0], "full_span", "MoQ", "object_samples", "statistics"),
         (
             axes[1],
             "quic_full_span",
@@ -202,14 +256,15 @@ def plot_per_copy_latency_cdf(
         ),
     )
     line_styles = ("-", "--", ":", "-.")
-    for axis, metric, title, samples_field, statistics_field in panels:
+    for axis, metric, title, table, statistics_field in panels:
         for index, run in enumerate(runs):
             _plot_cdf_series(
                 axis,
                 CdfSeries(
                     metric,
                     run.label,
-                    getattr(run, samples_field),
+                    run.connection,
+                    table,
                     getattr(run, statistics_field),
                     index,
                     line_styles[index % len(line_styles)],
@@ -222,25 +277,28 @@ def plot_per_copy_latency_cdf(
         axis.legend(fontsize=8)
     axes[0].set_ylabel("CDF")
 
-    affinity = "unpinned" if options.relay_cpu is None else f"pinned CPU {options.relay_cpu}"
-    fig.suptitle(
-        f"Per-copy object latency CDF | {affinity} | {comparison} | {options.fps} fps | {options.protocol} | n = copies"
-    )
+    fig.suptitle(f"Per-copy object latency CDF | {_context(options)} | {comparison} | n = copies")
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160)
     plt.close(fig)
 
 
-def plot_packet_latency_cdf(path: pathlib.Path, options: PlotOptions, analysis: Analysis) -> None:
+def plot_packet_latency_cdf(
+    path: pathlib.Path,
+    options: PlotOptions,
+    connection: duckdb.DuckDBPyConnection,
+    report: dict,
+) -> None:
     """Compare RX and TX packet processing at the QUIC connection layer."""
 
     series = (
         CdfSeries(
             "rx_packet_processing_span",
             "RX",
-            analysis.packet_samples,
-            analysis.packet_statistics,
+            connection,
+            "packet_samples",
+            report["packet_statistics"],
             0,
             "-",
             0,
@@ -248,8 +306,9 @@ def plot_packet_latency_cdf(path: pathlib.Path, options: PlotOptions, analysis: 
         CdfSeries(
             "tx_packet_span",
             "TX",
-            analysis.packet_samples,
-            analysis.packet_statistics,
+            connection,
+            "packet_samples",
+            report["packet_statistics"],
             1,
             "-",
             0,
@@ -263,12 +322,7 @@ def plot_packet_latency_cdf(path: pathlib.Path, options: PlotOptions, analysis: 
         axis.grid(alpha=0.25)
     axes[0].set_ylabel("CDF")
 
-    affinity = "unpinned" if options.relay_cpu is None else f"pinned CPU {options.relay_cpu}"
-    fig.suptitle(
-        f"QUIC packet processing latency CDF | "
-        f"{affinity} | {options.subscribers} subscriber(s) | "
-        f"{options.object_size} bytes | {options.fps} fps | {options.protocol}"
-    )
+    fig.suptitle(f"QUIC packet processing latency CDF | {_context(options)}")
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160)
@@ -287,8 +341,8 @@ def plot_metrics(
     if not present:
         raise ValueError("cannot plot a metric layer without samples")
     for index, metric in enumerate(present):
-        metric_samples = [sample for sample in plot.samples if sample.metric == metric]
-        values_ms = [sample.latency_us / 1_000 for sample in metric_samples]
+        metric_samples = _samples(plot.connection, plot.table, metric)
+        values_ms = [latency_ms for _elapsed_s, latency_ms in metric_samples]
         axes[0].ecdf(
             values_ms,
             label=plot.labels[metric],
@@ -320,10 +374,10 @@ def plot_metrics(
     axes[1].grid(axis="y", alpha=0.25)
 
     for index, metric in enumerate(present):
-        metric_samples = [sample for sample in plot.samples if sample.metric == metric]
+        metric_samples = _samples(plot.connection, plot.table, metric)
         axes[2].scatter(
-            [sample.elapsed_ms / 1_000 for sample in metric_samples],
-            [sample.latency_us / 1_000 for sample in metric_samples],
+            [elapsed_s for elapsed_s, _latency_ms in metric_samples],
+            [latency_ms for _elapsed_s, latency_ms in metric_samples],
             label=plot.labels[metric],
             color=_color(index, len(present)),
             s=8,
@@ -334,12 +388,7 @@ def plot_metrics(
     axes[2].set_ylabel("Latency (ms)")
     axes[2].grid(alpha=0.25)
 
-    affinity = "unpinned" if options.relay_cpu is None else f"pinned CPU {options.relay_cpu}"
-    fig.suptitle(
-        f"{plot.title} | "
-        f"{affinity} | {options.subscribers} subscriber(s) | "
-        f"{options.object_size} bytes | {options.fps} fps | {options.protocol}"
-    )
+    fig.suptitle(f"{plot.title} | {_context(options)}")
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160)
@@ -349,7 +398,7 @@ def plot_metrics(
 def plot_object_timelines(
     path: pathlib.Path,
     options: PlotOptions,
-    timelines: tuple[ObjectTimeline, ...],
+    timelines: tuple[dict, ...],
 ) -> None:
     """Render aligned lifecycle timelines for representative objects."""
 
@@ -375,7 +424,9 @@ def plot_object_timelines(
         ("tx", "quic_frame_encode", "TX QUIC Frame Encode"),
         ("tx", "quic_packet_encrypt", "TX QUIC Packet Encrypt"),
     )
-    present = {(interval.direction, interval.phase) for timeline in timelines for interval in timeline.intervals}
+    present = {
+        (interval["direction"], interval["phase"]) for timeline in timelines for interval in timeline["intervals"]
+    }
     rx_quic_rows = tuple(row for row in rx_quic_rows if row[:2] in present)
     tx_quic_rows = tuple(row for row in tx_quic_rows if row[:2] in present)
     phase_rows = rx_quic_rows + moq_rows + tx_quic_rows
@@ -385,8 +436,8 @@ def plot_object_timelines(
     figure_height = max(11.0, len(timelines) * len(phase_rows) * 0.28 + 2.5)
     fig, axes = plt.subplots(len(timelines), 1, figsize=(15, figure_height), sharex=True, squeeze=False)
     axes = axes[:, 0]
-    minimum = min(interval.start_us for timeline in timelines for interval in timeline.intervals)
-    maximum = max(interval.end_us for timeline in timelines for interval in timeline.intervals)
+    minimum = min(interval["start_us"] for timeline in timelines for interval in timeline["intervals"])
+    maximum = max(interval["end_us"] for timeline in timelines for interval in timeline["intervals"])
     padding = max(1.0, (maximum - minimum) * 0.03)
     x_min = min(0.0, minimum - padding)
     label_space = max(4.0, (maximum - minimum) * 0.12)
@@ -395,11 +446,11 @@ def plot_object_timelines(
     tx_palette = plt.get_cmap("Oranges")
 
     for axis, timeline in zip(axes, timelines, strict=True):
-        displayed_copies = (timeline.first_copy,)
-        if timeline.last_copy.session_id != timeline.first_copy.session_id:
-            displayed_copies += (timeline.last_copy,)
-        tx_sessions = [copy.session_id for copy in displayed_copies]
-        copy_by_session = {copy.session_id: copy for copy in displayed_copies}
+        displayed_copies = (timeline["first_copy"],)
+        if timeline["last_copy"]["session_id"] != timeline["first_copy"]["session_id"]:
+            displayed_copies += (timeline["last_copy"],)
+        tx_sessions = [copy["session_id"] for copy in displayed_copies]
+        copy_by_session = {copy["session_id"]: copy for copy in displayed_copies}
         tx_colors = {
             session_id: tx_palette(0.5 + 0.4 * index / max(1, len(tx_sessions) - 1))
             for index, session_id in enumerate(tx_sessions)
@@ -411,35 +462,35 @@ def plot_object_timelines(
         }
         phase_labels: dict[tuple[str, int, str], tuple[float, float, float]] = {}
 
-        for interval in timeline.intervals:
-            if interval.direction == "tx" and interval.session_id not in copy_by_session:
+        for interval in timeline["intervals"]:
+            if interval["direction"] == "tx" and interval["session_id"] not in copy_by_session:
                 continue
-            color = rx_color if interval.direction == "rx" else tx_colors[interval.session_id]
-            if interval.phase == "object":
-                axis.axvline(interval.start_us, color=color, linestyle=":", linewidth=0.9, alpha=0.55)
-                axis.axvline(interval.end_us, color=color, linestyle="--", linewidth=0.9, alpha=0.55)
+            color = rx_color if interval["direction"] == "rx" else tx_colors[interval["session_id"]]
+            if interval["phase"] == "object":
+                axis.axvline(interval["start_us"], color=color, linestyle=":", linewidth=0.9, alpha=0.55)
+                axis.axvline(interval["end_us"], color=color, linestyle="--", linewidth=0.9, alpha=0.55)
                 continue
 
-            key = (interval.direction, interval.phase)
+            key = (interval["direction"], interval["phase"])
             if key not in positions:
                 continue
             y = positions[key]
             height = 0.52
-            if interval.direction == "tx":
-                y += tx_offsets[interval.session_id]
+            if interval["direction"] == "tx":
+                y += tx_offsets[interval["session_id"]]
                 height = lane_height * 0.82
             axis.broken_barh(
-                [(interval.start_us, interval.end_us - interval.start_us)],
+                [(interval["start_us"], interval["end_us"] - interval["start_us"])],
                 (y - height / 2, height),
                 facecolors=color,
                 edgecolors="#334155",
                 linewidth=0.7,
                 alpha=0.88,
             )
-            duration_us = interval.end_us - interval.start_us
-            label_key = (interval.direction, interval.session_id, interval.phase)
-            previous_total, previous_end, _ = phase_labels.get(label_key, (0.0, interval.end_us, y))
-            phase_labels[label_key] = (previous_total + duration_us, max(previous_end, interval.end_us), y)
+            duration_us = interval["end_us"] - interval["start_us"]
+            label_key = (interval["direction"], interval["session_id"], interval["phase"])
+            previous_total, previous_end, _ = phase_labels.get(label_key, (0.0, interval["end_us"], y))
+            phase_labels[label_key] = (previous_total + duration_us, max(previous_end, interval["end_us"]), y)
 
         for total_us, end_us, y in phase_labels.values():
             axis.annotate(
@@ -466,7 +517,7 @@ def plot_object_timelines(
                 [0],
                 color=tx_colors[session_id],
                 linewidth=5,
-                label=f"TX #{copy_by_session[session_id].subscriber_ordinal}",
+                label=f"TX #{copy_by_session[session_id]['subscriber_ordinal']}",
             )
             for session_id in tx_sessions
         )
@@ -481,19 +532,16 @@ def plot_object_timelines(
         axis.set_xlim(x_min, x_max)
         axis.grid(axis="x", color="#CBD5E1", alpha=0.7, linewidth=0.7)
         axis.set_axisbelow(True)
-        selected = timeline.selection
+        selected = timeline["selection"]
         axis.set_title(
-            f"{selected.statistic} {selected.target_us:.2f} µs | object ({selected.group_id}, {selected.object_id}) ",
+            f"{selected['statistic']} {selected['target_us']:.2f} µs | "
+            f"object ({selected['group_id']}, {selected['object_id']}) ",
             fontsize=10,
             loc="left",
         )
 
     axes[-1].set_xlabel("Elapsed from first RX QUIC packet start (µs)")
-    fig.suptitle(
-        f"QUIC packet and MoQ object timelines | {options.object_size} bytes | "
-        f"{options.subscribers} subscriber(s) | {options.protocol}",
-        fontsize=14,
-    )
+    fig.suptitle(f"QUIC packet and MoQ object timelines | {_context(options)}", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.965))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160)

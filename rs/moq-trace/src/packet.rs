@@ -40,21 +40,6 @@ pub enum PacketPhase {
 	PacketEncrypt,
 }
 
-impl PacketPhase {
-	pub const fn as_str(self) -> &'static str {
-		match self {
-			Self::HeaderParse => "header_parse",
-			Self::Routing => "routing",
-			Self::Scheduling => "scheduling",
-			Self::HeaderUnprotect => "header_unprotect",
-			Self::PayloadDecrypt => "payload_decrypt",
-			Self::FrameProcess => "frame_process",
-			Self::FrameEncode => "frame_encode",
-			Self::PacketEncrypt => "packet_encrypt",
-		}
-	}
-}
-
 /// Whether a packet phase record starts or completes work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PhaseEdge {
@@ -136,7 +121,7 @@ impl StreamFrame {
 pub struct PacketTrace(Option<PacketTraceState>);
 
 struct PacketTraceState {
-	handle: Handle,
+	backend: std::sync::Arc<crate::backend::Backend>,
 	trace_id: u64,
 	context: PacketContext,
 }
@@ -146,7 +131,7 @@ struct PacketTraceState {
 pub struct PacketPhaseTrace(Option<PacketPhaseTraceState>);
 
 struct PacketPhaseTraceState {
-	handle: Handle,
+	backend: std::sync::Arc<crate::backend::Backend>,
 	trace_id: u64,
 	span_id: u64,
 	start_ns: u64,
@@ -165,7 +150,7 @@ impl Handle {
 		let trace_id = crate::NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed);
 		inner.packet_start(context.start_ns.unwrap_or_else(now_ns), trace_id, &context);
 		PacketTrace(Some(PacketTraceState {
-			handle: self.clone(),
+			backend: inner.clone(),
 			trace_id,
 			context,
 		}))
@@ -210,11 +195,11 @@ impl PacketTrace {
 			return PacketPhaseTrace::disabled();
 		};
 		let span_id = crate::NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed);
-		if let Some(backend) = &state.handle.inner {
-			backend.packet_phase(timestamp_ns, state.trace_id, span_id, phase, PhaseEdge::Start, None);
-		}
+		state
+			.backend
+			.packet_phase(timestamp_ns, state.trace_id, span_id, phase, PhaseEdge::Start, None);
 		PacketPhaseTrace(Some(PacketPhaseTraceState {
-			handle: state.handle.clone(),
+			backend: state.backend.clone(),
 			trace_id: state.trace_id,
 			span_id,
 			start_ns: timestamp_ns,
@@ -227,9 +212,7 @@ impl PacketTrace {
 		let Some(state) = &self.0 else {
 			return;
 		};
-		if let Some(backend) = &state.handle.inner {
-			backend.stream_frame(now_ns(), state.trace_id, frame, outcome);
-		}
+		state.backend.stream_frame(now_ns(), state.trace_id, frame, outcome);
 	}
 
 	/// Finish the packet with an explicit result.
@@ -242,9 +225,7 @@ impl PacketTrace {
 
 impl PacketTraceState {
 	fn emit_end(self, outcome: PacketOutcome) {
-		if let Some(backend) = &self.handle.inner {
-			backend.packet_end(now_ns(), self.trace_id, &self.context, outcome);
-		}
+		self.backend.packet_end(now_ns(), self.trace_id, &self.context, outcome);
 	}
 }
 
@@ -281,16 +262,14 @@ impl PacketPhaseTraceState {
 
 	fn emit_done_at(self, outcome: PacketOutcome, timestamp_ns: u64) {
 		debug_assert!(timestamp_ns >= self.start_ns);
-		if let Some(backend) = &self.handle.inner {
-			backend.packet_phase(
-				timestamp_ns,
-				self.trace_id,
-				self.span_id,
-				self.phase,
-				PhaseEdge::Done,
-				Some(outcome),
-			);
-		}
+		self.backend.packet_phase(
+			timestamp_ns,
+			self.trace_id,
+			self.span_id,
+			self.phase,
+			PhaseEdge::Done,
+			Some(outcome),
+		);
 	}
 }
 

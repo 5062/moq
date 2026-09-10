@@ -42,46 +42,57 @@ impl SocketStats {
 
 /// A UDP socket operation whose completion consumes the token.
 pub struct SocketTrace {
-	handle: Handle,
+	state: Option<SocketTraceState>,
+}
+
+struct SocketTraceState {
+	backend: std::sync::Arc<crate::backend::Backend>,
 	trace_id: u64,
-	finished: bool,
 }
 
 impl Handle {
 	/// Start a UDP socket operation.
-	pub fn socket(&self, direction: Direction, connection_id: Option<u64>) -> Option<SocketTrace> {
-		let inner = self.inner.as_ref()?;
+	pub fn socket(&self, direction: Direction, connection_id: Option<u64>) -> SocketTrace {
+		let Some(inner) = self.inner.as_ref() else {
+			return SocketTrace::disabled();
+		};
 		if !inner.socket_enabled() {
-			return None;
+			return SocketTrace::disabled();
 		}
 		let trace_id = crate::NEXT_TRACE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 		inner.socket_start(now_ns(), trace_id, direction, connection_id);
-		Some(SocketTrace {
-			handle: self.clone(),
-			trace_id,
-			finished: false,
-		})
+		SocketTrace {
+			state: Some(SocketTraceState {
+				backend: inner.clone(),
+				trace_id,
+			}),
+		}
 	}
 }
 
 impl SocketTrace {
-	/// Finish the socket operation with its result and batch measurements.
-	pub fn finish(mut self, outcome: SocketOutcome, stats: SocketStats) {
-		self.emit_end(outcome, stats);
-		self.finished = true;
+	fn disabled() -> Self {
+		Self { state: None }
 	}
 
-	fn emit_end(&self, outcome: SocketOutcome, stats: SocketStats) {
-		if let Some(backend) = &self.handle.inner {
-			backend.socket_end(now_ns(), self.trace_id, outcome, stats);
+	/// Finish the socket operation with its result and batch measurements.
+	pub fn finish(mut self, outcome: SocketOutcome, stats: SocketStats) {
+		if let Some(state) = self.state.take() {
+			state.emit_end(outcome, stats);
 		}
+	}
+}
+
+impl SocketTraceState {
+	fn emit_end(self, outcome: SocketOutcome, stats: SocketStats) {
+		self.backend.socket_end(now_ns(), self.trace_id, outcome, stats);
 	}
 }
 
 impl Drop for SocketTrace {
 	fn drop(&mut self) {
-		if !self.finished {
-			self.emit_end(SocketOutcome::Abandoned, SocketStats::default());
+		if let Some(state) = self.state.take() {
+			state.emit_end(SocketOutcome::Abandoned, SocketStats::default());
 		}
 	}
 }

@@ -5,7 +5,7 @@ from __future__ import annotations
 import duckdb
 import pyarrow as pa
 
-from .errors import AnalyzeError
+from .errors import TraceError
 
 
 def _subtract(gaps: list[tuple[int, int]], start: int, end: int) -> None:
@@ -75,9 +75,9 @@ def resolve(connection: duckdb.DuckDBPyConnection) -> None:
     rows = []
     for trace_id, connection_id, direction, stream_id, target_start, target_end in lifecycles:
         if None in (connection_id, stream_id, target_start, target_end):
-            raise AnalyzeError(f"object trace {trace_id} is missing transport metadata")
+            raise TraceError(f"object trace {trace_id} is missing transport metadata")
         if target_end <= target_start:
-            raise AnalyzeError(f"object trace {trace_id} has an empty transport range")
+            raise TraceError(f"object trace {trace_id} has an empty transport range")
         gaps = [(int(target_start), int(target_end))]
         packet_ids = []
         seen_packets = set()
@@ -97,9 +97,9 @@ def resolve(connection: duckdb.DuckDBPyConnection) -> None:
                 complete_end = int(packet_end)
                 break
         if first_start is None:
-            raise AnalyzeError(f"object trace {trace_id} has no covering packets")
+            raise TraceError(f"object trace {trace_id} has no covering packets")
         if complete_end is None:
-            raise AnalyzeError(f"object trace {trace_id} does not have complete packet coverage")
+            raise TraceError(f"object trace {trace_id} does not have complete packet coverage")
         rows.append(
             {
                 "trace_id": trace_id,

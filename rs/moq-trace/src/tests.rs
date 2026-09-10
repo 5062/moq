@@ -6,12 +6,10 @@ fn trace() -> Handle {
 
 #[test]
 fn object_children_only_reference_the_start_record() {
-	let handle = trace();
+	let handle = trace().with_session_id(7).with_connection_id(42);
 	let logical_id = LogicalId::new(9, 4);
 	let mut object = handle.object(
 		ObjectContext::new(Direction::Rx, ObjectIdentity::new(11, 12, 13), logical_id)
-			.with_session_id(7)
-			.with_connection_id(42)
 			.with_stream_id(16)
 			.with_stream_offset_start(100),
 	);
@@ -113,6 +111,9 @@ fn disabled_handle_is_noop() {
 			LogicalId::new(4, 5),
 		))
 		.finish(ObjectOutcome::Success);
+	handle
+		.socket(Direction::Rx, None)
+		.finish(SocketOutcome::Success, SocketStats::default());
 	assert!(handle.events().is_empty());
 }
 
@@ -122,11 +123,9 @@ fn trace_ids_are_unique_across_handles() {
 	let second = trace();
 	first
 		.socket(Direction::Rx, None)
-		.unwrap()
 		.finish(SocketOutcome::Success, SocketStats::default());
 	second
 		.socket(Direction::Rx, None)
-		.unwrap()
 		.finish(SocketOutcome::Success, SocketStats::default());
 	assert_ne!(first.events()[0].trace_id(), second.events()[0].trace_id());
 }

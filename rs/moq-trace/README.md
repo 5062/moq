@@ -132,7 +132,7 @@ moq-trace analyze relay.ctf \
 
 The analyzer atomically publishes one DuckDB database and refuses to overwrite
 it. The database is the authoritative derived artifact. It contains raw typed
-events, validated lifecycles, correlated samples, analysis metadata, and metric
+events, validated lifecycles, correlated samples, run metadata, and metric
 definitions. Durations remain integer nanoseconds in storage; conversion to
 display units happens only at presentation boundaries.
 
@@ -148,13 +148,13 @@ GROUP BY d.display_order, d.label
 ORDER BY d.display_order;
 ```
 
-Run directories additionally contain `run.json`, process logs, native CTF, and
-figures under `plots/`. Comparison directories contain `comparison.json`, one
-run directory per value, and `plots/comparison_cdf.png`. Regenerate figures
-without rerunning a workload with:
+Run directories additionally contain process logs, native CTF, and figures
+under `plots/`. Comparison directories contain `comparison.duckdb`, one run
+directory per value, and `plots/comparison_cdf.png`. Regenerate figures without
+rerunning a workload by passing the authoritative database:
 
 ```sh
-moq-trace plot target/moq-trace/baseline
+moq-trace plot target/moq-trace/baseline/analysis.duckdb
 ```
 
 The main correlated metrics are:
