@@ -48,6 +48,7 @@ Top-level layout only. Per-crate and per-package detail lives in the nested guid
 - `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. See `doc/bin/obs.md`.
 - `/demo/` - demos and test media: relay configs, the web demo, MoQ Boy, media hosting, and a network throttle script.
 - `/test/` - cross-language interop smoke tests (`test/smoke/`), run via `just test smoke[-full]`.
+- `/tools/` - installable developer tooling that is not part of a language binding. `tools/moq-trace` captures and analyzes relay traces.
 - `/doc/` - documentation site (VitePress, deployed via Cloudflare).
 - `/drafts/` - IETF Internet-Drafts (kramdown-rfc) for the MoQ protocols implemented here. Built and published to the datatracker via `just drafts`. See `drafts/CLAUDE.md`.
 

@@ -1021,7 +1021,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					track_stats.frame();
 					frame.finish()?;
 					object.set_stream_offset_end(stream.offset());
-					object.finish();
+					object.finish(trace::ObjectOutcome::Success);
 				} else if status == 3 && !group.flags.has_end {
 					break;
 				} else {
@@ -1057,7 +1057,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					}
 				}
 				object.set_stream_offset_end(stream.offset());
-				object.finish();
+				object.finish(trace::ObjectOutcome::Success);
 			}
 		}
 

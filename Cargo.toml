@@ -26,6 +26,7 @@ members = [
     "rs/moq-token",
     "rs/moq-token-cli",
     "rs/moq-trace",
+    "rs/moq-trace-lttng-sys",
     "rs/moq-transcode",
     "rs/moq-video",
     "rs/moq-wasm",
@@ -92,6 +93,7 @@ moq-srt = { version = "0.1.2", path = "rs/moq-srt" }
 moq-stats = { version = "0.1.0", path = "rs/moq-stats" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
 moq-trace = { version = "0.1.0", path = "rs/moq-trace", default-features = false }
+moq-trace-lttng-sys = { version = "0.1.0", path = "rs/moq-trace-lttng-sys" }
 # default-features off (the hardware codecs) on moq-transcode and moq-video so
 # each consumer opts in: binaries (libmoq, moq-boy, moq-cli) enable them, but a
 # self-compiler can leave them off to drop the CUDA / libva deps. Both crates

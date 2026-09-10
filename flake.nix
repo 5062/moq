@@ -114,8 +114,8 @@
           ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
             # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
             pkgs.release-plz
-            # moq-trace builds an LTTng-UST provider and uses these tools to
-            # record and inspect CTF traces during experiments.
+            # The trace crates build an LTTng-UST provider. The Python tool
+            # records and inspects CTF traces during experiments.
             pkgs.lttng-ust
             pkgs.lttng-tools
             pkgs.babeltrace2

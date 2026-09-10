@@ -1,13 +1,10 @@
 use std::sync::atomic::Ordering;
 
-use serde::{Deserialize, Serialize};
-
 use crate::{Direction, Event, Handle, PacketSpace, now_ns};
 
 /// Result of packet or packet-phase processing.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
-#[serde(rename_all = "snake_case")]
 pub enum PacketOutcome {
 	/// Processing completed successfully.
 	Success,
@@ -22,9 +19,8 @@ pub enum PacketOutcome {
 }
 
 /// A measured step in the QUIC packet lifecycle.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
-#[serde(rename_all = "snake_case")]
 pub enum PacketPhase {
 	/// Parse the protected packet header.
 	HeaderParse,
@@ -60,9 +56,8 @@ impl PacketPhase {
 }
 
 /// Whether a packet phase record starts or completes work.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PhaseEdge {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PhaseEdge {
 	Start,
 	Done,
 }
@@ -136,9 +131,8 @@ impl StreamFrame {
 }
 
 /// Fields shared by every record for one QUIC packet.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PacketEvent {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PacketEvent {
 	/// Monotonic timestamp in nanoseconds from the local process clock.
 	pub timestamp_ns: u64,
 	/// Process-unique identifier shared by this packet's records.
@@ -148,20 +142,16 @@ pub struct PacketEvent {
 	/// Whether this packet is being received or transmitted.
 	pub direction: Direction,
 	/// QUIC packet number when known.
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub packet_number: Option<u64>,
 	/// QUIC packet number space when known.
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub packet_space: Option<PacketSpace>,
 	/// Encoded packet length in bytes when known.
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub byte_len: Option<usize>,
 }
 
 /// One boundary of a measured packet phase.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PacketPhaseEvent {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PacketPhaseEvent {
 	/// Monotonic timestamp in nanoseconds from the local process clock.
 	pub timestamp_ns: u64,
 	/// Packet lifecycle identifier from [`PacketEvent::trace_id`].
@@ -173,14 +163,12 @@ pub struct PacketPhaseEvent {
 	/// Whether this boundary starts or completes the phase.
 	pub edge: PhaseEdge,
 	/// Completion result, present only when `edge` is `done`.
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub outcome: Option<PacketOutcome>,
 }
 
 /// STREAM frame mapping emitted as a child of one packet trace.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StreamFrameEvent {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StreamFrameEvent {
 	/// Monotonic timestamp in nanoseconds from the local process clock.
 	pub timestamp_ns: u64,
 	/// Packet lifecycle identifier from [`PacketEvent::trace_id`].
@@ -196,21 +184,17 @@ pub struct StreamFrameEvent {
 }
 
 /// Packet completion record with an explicit result.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PacketEndEvent {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PacketEndEvent {
 	/// Monotonic completion timestamp in nanoseconds.
 	pub timestamp_ns: u64,
 	/// Packet lifecycle identifier from [`PacketEvent::trace_id`].
 	pub trace_id: u64,
 	/// QUIC packet number discovered during processing.
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub packet_number: Option<u64>,
 	/// QUIC packet number space discovered during processing.
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub packet_space: Option<PacketSpace>,
 	/// Final encoded packet length in bytes.
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub byte_len: Option<usize>,
 	/// Result of processing the packet.
 	pub outcome: PacketOutcome,

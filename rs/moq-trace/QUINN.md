@@ -7,7 +7,7 @@ Fork:
 ```text
 https://github.com/5062/quinn
 branch: moq-trace/quinn-0.11
-rev: 29d6d093c454a3759cd09ea94512c2e757f6827a
+rev: 4751ef1067eee423beace786aa361b99441f814e
 ```
 
 Upstream base:
@@ -41,6 +41,6 @@ git rebase <new-upstream-tag-or-commit>
 # resolve MoQ trace hook conflicts, then run tests from the MoQ Nix shell
 ```
 
-After committing and pushing the refreshed fork branch, update the `quinn` and
-`quinn-proto` `rev` values in the root `Cargo.toml`, then refresh `Cargo.lock`
-and run the trace checks.
+After committing and pushing the refreshed fork branch, update the locked
+`quinn` and `quinn-proto` revisions with `cargo update`, then run the trace
+checks.

@@ -1,11 +1,8 @@
-use serde::{Deserialize, Serialize};
-
 use crate::{Direction, Event, Handle, now_ns};
 
 /// Result of one UDP socket operation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-#[serde(rename_all = "snake_case")]
 pub enum SocketOutcome {
 	/// The socket operation completed successfully.
 	Success,
@@ -22,7 +19,7 @@ pub enum SocketOutcome {
 }
 
 /// Batch measurements returned by one UDP socket operation.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SocketStats {
 	/// Number of buffers processed by the operation.
 	pub buffers: usize,
@@ -44,24 +41,21 @@ impl SocketStats {
 }
 
 /// Fields recorded when a UDP socket operation starts.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SocketEvent {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SocketEvent {
 	/// Monotonic timestamp in nanoseconds from the local process clock.
 	pub timestamp_ns: u64,
 	/// Process-unique identifier shared by this operation's records.
 	pub trace_id: u64,
 	/// Quinn stable connection ID when the operation belongs to one connection.
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub connection_id: Option<u64>,
 	/// Whether the operation receives or transmits datagrams.
 	pub direction: Direction,
 }
 
 /// Fields recorded when a UDP socket operation ends.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SocketEndEvent {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SocketEndEvent {
 	/// Monotonic completion timestamp in nanoseconds.
 	pub timestamp_ns: u64,
 	/// Socket operation identifier from [`SocketEvent::trace_id`].

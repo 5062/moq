@@ -1,21 +1,10 @@
 use std::sync::atomic::Ordering;
 
-use serde::{Deserialize, Serialize};
-
 use crate::{Direction, Event, Handle, PhaseEdge, now_ns};
 
-/// MoQ protocol family represented by an object event.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[non_exhaustive]
-#[serde(rename_all = "snake_case")]
-pub enum Protocol {
-	MoqTransport,
-}
-
 /// Metadata emitted once when a MoQ object lifecycle starts.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ObjectEvent {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ObjectEvent {
 	/// Monotonic timestamp in nanoseconds from the local process clock.
 	pub timestamp_ns: u64,
 	/// Process-unique lifecycle identifier used by child and completion records.
@@ -23,15 +12,11 @@ pub struct ObjectEvent {
 	/// Process-unique identity shared by ingress and every outbound copy.
 	pub logical_id: LogicalId,
 	/// Process-local MoQ session ID when available.
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub session_id: Option<u64>,
 	/// Process-local transport connection ID when available.
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub connection_id: Option<u64>,
 	/// Whether this object is entering or leaving the relay.
 	pub direction: Direction,
-	/// MoQ protocol family for this object.
-	pub protocol: Protocol,
 	/// moq-transport track alias or request ID on this session.
 	pub track_alias: u64,
 	/// moq-transport group ID.
@@ -39,16 +24,13 @@ pub struct ObjectEvent {
 	/// moq-transport object ID.
 	pub object_id: u64,
 	/// QUIC stream ID when the backend exposes it.
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub stream_id: Option<u64>,
 	/// Inclusive stream byte offset where this object starts, when known.
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub stream_offset_start: Option<u64>,
 }
 
 /// Identity shared by ingress and every outbound copy of one logical object.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LogicalId {
 	group: u64,
 	frame: u64,
@@ -78,24 +60,23 @@ impl std::fmt::Display for LogicalId {
 }
 
 /// Final metadata emitted when a MoQ object lifecycle completes.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ObjectEndEvent {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ObjectEndEvent {
 	/// Monotonic completion timestamp in nanoseconds.
 	pub timestamp_ns: u64,
 	/// Object lifecycle identifier from [`ObjectEvent::trace_id`].
 	pub trace_id: u64,
 	/// Exclusive stream byte offset where this object ends, when known.
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub stream_offset_end: Option<u64>,
 	/// Object payload size in bytes.
 	pub payload_bytes: u64,
+	/// Result of processing the object lifecycle.
+	pub outcome: ObjectOutcome,
 }
 
 /// A measured step in the moq-transport object lifecycle.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
-#[serde(rename_all = "snake_case")]
 pub enum ObjectPhase {
 	/// Parse an inbound object header.
 	HeaderParse,
@@ -127,10 +108,9 @@ impl ObjectPhase {
 	}
 }
 
-/// Result of an object lifecycle phase.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// Result of an object lifecycle or phase.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-#[serde(rename_all = "snake_case")]
 pub enum ObjectOutcome {
 	/// Processing completed successfully.
 	Success,
@@ -290,17 +270,32 @@ impl ObjectTrace {
 		}));
 	}
 
-	/// Finish the object interval with the latest metadata.
-	pub fn finish(mut self) {
+	/// Finish the object interval with the latest metadata and result.
+	pub fn finish(mut self, outcome: ObjectOutcome) {
 		let Some(state) = self.0.take() else {
 			return;
 		};
-		state.handle.emit(Event::MoqObjectEnd(ObjectEndEvent {
+		state.emit_end(outcome);
+	}
+}
+
+impl ObjectTraceState {
+	fn emit_end(self, outcome: ObjectOutcome) {
+		self.handle.emit(Event::MoqObjectEnd(ObjectEndEvent {
 			timestamp_ns: now_ns(),
-			trace_id: state.trace_id,
-			stream_offset_end: state.stream_offset_end,
-			payload_bytes: state.payload_bytes,
+			trace_id: self.trace_id,
+			stream_offset_end: self.stream_offset_end,
+			payload_bytes: self.payload_bytes,
+			outcome,
 		}));
+	}
+}
+
+impl Drop for ObjectTrace {
+	fn drop(&mut self) {
+		if let Some(state) = self.0.take() {
+			state.emit_end(ObjectOutcome::Abandoned);
+		}
 	}
 }
 
@@ -337,9 +332,8 @@ impl Drop for ObjectPhaseTrace<'_> {
 }
 
 /// moq-transport object phase fields.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ObjectPhaseEvent {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ObjectPhaseEvent {
 	/// Monotonic boundary timestamp in nanoseconds.
 	pub timestamp_ns: u64,
 	/// Parent object lifecycle identifier.
@@ -351,7 +345,6 @@ pub struct ObjectPhaseEvent {
 	/// Whether this boundary starts or completes the phase.
 	pub edge: PhaseEdge,
 	/// Completion result, present only when `edge` is `done`.
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub outcome: Option<ObjectOutcome>,
 }
 
@@ -372,7 +365,6 @@ impl Handle {
 			session_id: context.session_id.or(self.session_id),
 			connection_id: context.connection_id.or(self.connection_id),
 			direction: context.direction,
-			protocol: Protocol::MoqTransport,
 			track_alias: context.track_alias,
 			group_id: context.group_id,
 			object_id: context.object_id,

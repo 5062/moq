@@ -453,7 +453,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 
 			object.set_stream_offset_end(stream.offset());
-			object.finish();
+			object.finish(trace::ObjectOutcome::Success);
 		}
 
 		stream.finish()?;

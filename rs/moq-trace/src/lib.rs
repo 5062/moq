@@ -1,43 +1,28 @@
 //! Relay tracing for MoQ objects and QUIC packets.
 
+#[cfg(all(feature = "lttng", not(target_os = "linux")))]
+compile_error!("the lttng feature is supported only on Linux");
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-
-use serde::{Deserialize, Serialize};
 
 #[cfg_attr(test, allow(dead_code))]
 mod backend;
 
 mod object;
-pub use object::{
-	LogicalId, ObjectContext, ObjectEndEvent, ObjectEvent, ObjectIdentity, ObjectOutcome, ObjectPhase,
-	ObjectPhaseEvent, ObjectPhaseTrace, ObjectTrace, Protocol,
-};
+pub use object::{LogicalId, ObjectContext, ObjectIdentity, ObjectOutcome, ObjectPhase, ObjectPhaseTrace, ObjectTrace};
+use object::{ObjectEndEvent, ObjectEvent, ObjectPhaseEvent};
 
 mod packet;
-pub use packet::{
-	PacketContext, PacketEndEvent, PacketEvent, PacketOutcome, PacketPhase, PacketPhaseEvent, PacketPhaseTrace,
-	PacketTrace, PhaseEdge, StreamFrame, StreamFrameEvent,
-};
+pub use packet::{PacketContext, PacketOutcome, PacketPhase, PacketPhaseTrace, PacketTrace, StreamFrame};
+use packet::{PacketEndEvent, PacketEvent, PacketPhaseEvent, PhaseEdge, StreamFrameEvent};
 
 mod socket;
-pub use socket::{SocketEndEvent, SocketEvent, SocketOutcome, SocketStats, SocketTrace};
-
-/// Errors returned when installing process-global tracing.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum Error {
-	/// LTTng-UST tracing is only available on Linux.
-	#[error("LTTng-UST tracing is only available on Linux")]
-	UnsupportedPlatform,
-	/// Process-global tracing was already installed.
-	#[error("process-global tracing already installed")]
-	GlobalAlreadyInstalled,
-}
+use socket::{SocketEndEvent, SocketEvent};
+pub use socket::{SocketOutcome, SocketStats, SocketTrace};
 
 /// Trace event direction at the relay boundary.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Direction {
 	/// Event was observed while receiving from the peer.
 	Rx,
@@ -62,8 +47,7 @@ impl std::fmt::Display for Direction {
 }
 
 /// QUIC packet number space.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PacketSpace {
 	/// QUIC Initial packet space.
 	Initial,
@@ -76,39 +60,29 @@ pub enum PacketSpace {
 }
 
 /// One typed trace event used by instrumentation and offline analysis.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[non_exhaustive]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Event {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Event {
 	/// First byte of a moq-transport object was observed.
-	#[serde(rename = "moq_object_start")]
 	MoqObjectStart(ObjectEvent),
 	/// Final byte of a moq-transport object was observed.
-	#[serde(rename = "moq_object_end")]
 	MoqObjectEnd(ObjectEndEvent),
 	/// moq-transport object processing phase boundary.
-	#[serde(rename = "moq_object_phase")]
 	MoqObjectPhase(ObjectPhaseEvent),
 	/// QUIC packet processing started.
-	#[serde(rename = "quic_packet_start")]
 	PacketStart(PacketEvent),
 	/// QUIC packet processing completed.
-	#[serde(rename = "quic_packet_end")]
 	PacketEnd(PacketEndEvent),
 	/// QUIC packet processing phase boundary.
-	#[serde(rename = "quic_packet_phase")]
 	PacketPhase(PacketPhaseEvent),
 	/// QUIC STREAM frame mapped to its parent packet.
-	#[serde(rename = "quic_stream_frame")]
 	StreamFrame(StreamFrameEvent),
 	/// UDP socket operation started.
-	#[serde(rename = "udp_socket_start")]
 	SocketStart(SocketEvent),
 	/// UDP socket operation completed.
-	#[serde(rename = "udp_socket_end")]
 	SocketEnd(SocketEndEvent),
 }
 
+#[cfg(test)]
 impl Event {
 	/// Process-unique trace identifier for scoped socket and packet records.
 	pub fn trace_id(&self) -> Option<u64> {
@@ -216,24 +190,19 @@ impl Inner {
 
 static GLOBAL: OnceLock<Arc<Inner>> = OnceLock::new();
 
-/// Install process-global tracing for MoQ, QUIC, and socket instrumentation.
-#[cfg(target_os = "linux")]
-pub fn install() -> Result<(), Error> {
-	backend::initialize();
-	GLOBAL
-		.set(Arc::new(Inner::new()))
-		.map_err(|_| Error::GlobalAlreadyInstalled)
-}
-
-/// Install process-global tracing for MoQ, QUIC, and socket instrumentation.
-#[cfg(not(target_os = "linux"))]
-pub fn install() -> Result<(), Error> {
-	Err(Error::UnsupportedPlatform)
-}
-
 /// Return the process-global trace handle used by MoQ, QUIC, and socket hooks.
 pub fn global() -> Handle {
-	let inner = GLOBAL.get().cloned();
+	if !backend::available() {
+		return Handle::disabled();
+	}
+	let inner = Some(
+		GLOBAL
+			.get_or_init(|| {
+				backend::initialize();
+				Arc::new(Inner::new())
+			})
+			.clone(),
+	);
 	Handle {
 		inner,
 		session_id: None,

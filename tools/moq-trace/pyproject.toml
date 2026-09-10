@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moq-trace"
+version = "0.1.0"
+description = "Capture and analyze MoQ relay latency experiments."
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.4",
+    "matplotlib>=3.10",
+    "pyarrow>=20",
+    "pydantic>=2.11",
+]
+
+[project.scripts]
+moq-trace = "moq_trace.cli:main"
+
+[tool.setuptools.package-data]
+moq_trace = ["sql/*.sql"]

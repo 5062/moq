@@ -2,13 +2,20 @@
 
 use crate::Event;
 
-#[allow(dead_code, non_camel_case_types, non_upper_case_globals)]
-#[cfg(target_os = "linux")]
-mod ffi {
-	include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+#[cfg(all(feature = "lttng", target_os = "linux"))]
+pub(crate) const fn available() -> bool {
+	true
 }
 
-#[cfg(all(target_os = "linux", not(test)))]
+#[cfg(not(all(feature = "lttng", target_os = "linux")))]
+pub(crate) const fn available() -> bool {
+	false
+}
+
+#[cfg(all(feature = "lttng", target_os = "linux"))]
+use moq_trace_lttng_sys as ffi;
+
+#[cfg(all(feature = "lttng", target_os = "linux", not(test)))]
 pub(crate) fn object_enabled() -> bool {
 	unsafe {
 		ffi::moq_trace_moq_object_start_enabled()
@@ -17,7 +24,7 @@ pub(crate) fn object_enabled() -> bool {
 	}
 }
 
-#[cfg(all(target_os = "linux", not(test)))]
+#[cfg(all(feature = "lttng", target_os = "linux", not(test)))]
 pub(crate) fn packet_enabled() -> bool {
 	unsafe {
 		ffi::moq_trace_quic_packet_start_enabled()
@@ -27,12 +34,12 @@ pub(crate) fn packet_enabled() -> bool {
 	}
 }
 
-#[cfg(all(target_os = "linux", not(test)))]
+#[cfg(all(feature = "lttng", target_os = "linux", not(test)))]
 pub(crate) fn socket_enabled() -> bool {
 	unsafe { ffi::moq_trace_udp_socket_start_enabled() || ffi::moq_trace_udp_socket_end_enabled() }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 pub(crate) fn emit(event: &Event) -> bool {
 	unsafe {
 		match event {
@@ -51,7 +58,6 @@ pub(crate) fn emit(event: &Event) -> bool {
 					has_connection_id,
 					connection_id,
 					direction: direction(event.direction),
-					protocol: protocol(event.protocol),
 					track_alias: event.track_alias,
 					group_id: event.group_id,
 					object_id: event.object_id,
@@ -70,6 +76,7 @@ pub(crate) fn emit(event: &Event) -> bool {
 					has_stream_offset_end,
 					stream_offset_end,
 					payload_bytes: event.payload_bytes,
+					outcome: object_outcome(event.outcome),
 				});
 				true
 			}
@@ -172,30 +179,33 @@ pub(crate) fn emit(event: &Event) -> bool {
 	}
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 pub(crate) fn initialize() {
 	unsafe { ffi::moq_trace_provider_init() };
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(feature = "lttng", target_os = "linux")))]
 pub(crate) fn emit(_event: &Event) -> bool {
 	false
 }
 
-#[cfg(all(not(target_os = "linux"), not(test)))]
+#[cfg(all(not(all(feature = "lttng", target_os = "linux")), not(test)))]
 pub(crate) fn object_enabled() -> bool {
 	false
 }
 
-#[cfg(all(not(target_os = "linux"), not(test)))]
+#[cfg(all(not(all(feature = "lttng", target_os = "linux")), not(test)))]
 pub(crate) fn packet_enabled() -> bool {
 	false
 }
 
-#[cfg(all(not(target_os = "linux"), not(test)))]
+#[cfg(all(not(all(feature = "lttng", target_os = "linux")), not(test)))]
 pub(crate) fn socket_enabled() -> bool {
 	false
 }
+
+#[cfg(not(all(feature = "lttng", target_os = "linux")))]
+pub(crate) fn initialize() {}
 
 #[cfg(test)]
 pub(crate) fn object_enabled() -> bool {
@@ -212,16 +222,20 @@ pub(crate) fn socket_enabled() -> bool {
 	true
 }
 
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 fn optional(value: Option<u64>) -> (u8, u64) {
 	value.map_or((0, 0), |value| (1, value))
 }
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 fn optional_enum<T>(value: Option<T>, convert: fn(T) -> u8) -> (u8, u8) {
 	value.map_or((0, 0), |value| (1, convert(value)))
 }
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 fn to_u64(value: usize) -> u64 {
 	value.try_into().unwrap_or(u64::MAX)
 }
 
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 fn direction(value: crate::Direction) -> u8 {
 	match value {
 		crate::Direction::Rx => ffi::moq_trace_direction_MOQ_TRACE_DIRECTION_RX as u8,
@@ -229,12 +243,7 @@ fn direction(value: crate::Direction) -> u8 {
 	}
 }
 
-fn protocol(value: crate::Protocol) -> u8 {
-	match value {
-		crate::Protocol::MoqTransport => ffi::moq_trace_protocol_MOQ_TRACE_PROTOCOL_MOQ_TRANSPORT as u8,
-	}
-}
-
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 fn edge(value: crate::PhaseEdge) -> u8 {
 	match value {
 		crate::PhaseEdge::Start => ffi::moq_trace_edge_MOQ_TRACE_EDGE_START as u8,
@@ -242,6 +251,7 @@ fn edge(value: crate::PhaseEdge) -> u8 {
 	}
 }
 
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 fn packet_space(value: crate::PacketSpace) -> u8 {
 	match value {
 		crate::PacketSpace::Initial => ffi::moq_trace_packet_space_MOQ_TRACE_PACKET_SPACE_INITIAL as u8,
@@ -251,6 +261,7 @@ fn packet_space(value: crate::PacketSpace) -> u8 {
 	}
 }
 
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 fn object_phase(value: crate::ObjectPhase) -> u8 {
 	match value {
 		crate::ObjectPhase::HeaderParse => ffi::moq_trace_object_phase_MOQ_TRACE_OBJECT_PHASE_HEADER_PARSE as u8,
@@ -263,6 +274,7 @@ fn object_phase(value: crate::ObjectPhase) -> u8 {
 	}
 }
 
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 fn object_outcome(value: crate::ObjectOutcome) -> u8 {
 	match value {
 		crate::ObjectOutcome::Success => ffi::moq_trace_object_outcome_MOQ_TRACE_OBJECT_OUTCOME_SUCCESS as u8,
@@ -271,6 +283,7 @@ fn object_outcome(value: crate::ObjectOutcome) -> u8 {
 	}
 }
 
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 fn packet_phase(value: crate::PacketPhase) -> u8 {
 	match value {
 		crate::PacketPhase::HeaderParse => ffi::moq_trace_packet_phase_MOQ_TRACE_PACKET_PHASE_HEADER_PARSE as u8,
@@ -286,6 +299,7 @@ fn packet_phase(value: crate::PacketPhase) -> u8 {
 	}
 }
 
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 fn packet_outcome(value: crate::PacketOutcome) -> u8 {
 	match value {
 		crate::PacketOutcome::Success => ffi::moq_trace_packet_outcome_MOQ_TRACE_PACKET_OUTCOME_SUCCESS as u8,
@@ -298,6 +312,7 @@ fn packet_outcome(value: crate::PacketOutcome) -> u8 {
 	}
 }
 
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 fn socket_outcome(value: crate::SocketOutcome) -> u8 {
 	match value {
 		crate::SocketOutcome::Success => ffi::moq_trace_socket_outcome_MOQ_TRACE_SOCKET_OUTCOME_SUCCESS as u8,

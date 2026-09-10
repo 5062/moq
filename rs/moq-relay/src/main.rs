@@ -20,9 +20,6 @@ async fn main() -> anyhow::Result<()> {
 	config.server.quic.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
 
 	let mtls_enabled = !config.server.tls.root.is_empty();
-	#[cfg(feature = "trace")]
-	moq_trace::install()?;
-
 	#[allow(unused_mut)]
 	let mut server = config.server.init()?;
 	let client = config.client.clone().init()?;

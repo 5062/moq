@@ -10,6 +10,7 @@ mod py
 mod kt
 mod swift
 mod go
+mod trace 'tools/moq-trace'
 # OBS Studio plugin (C++). See doc/bin/obs.md.
 mod obs 'cpp/obs'
 # Unit tests per language (`just test`).
@@ -45,6 +46,7 @@ install:
 check *args:
     just js check
     just rs check {{ args }}
+    just trace check
     bun remark . --quiet --frail
     @if command -v shellcheck >/dev/null 2>&1 && command -v shfmt >/dev/null 2>&1; then shfmt --diff $(shfmt -f . | grep -v '\.direnv/') && shellcheck $(shfmt -f . | grep -v '\.direnv/'); fi
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format --check; fi
@@ -79,6 +81,7 @@ ci BASE="":
     	just js    ci "$files"
     	just rs    ci "$files"
     	just py    ci "$files"
+        just trace ci "$files"
     	just kt    ci "$files"
     	just swift ci "$files"
     	just go    ci "$files"
@@ -89,7 +92,7 @@ ci BASE="":
     # to `just rs ci` (plain cargo) and `checks` is unwired (see flake.nix) -- so
     # it's cheap. Gate it to Nix/Rust input changes anyway: a pure doc/JS PR
     # can't affect flake eval. Empty $files is a force-run, so run then.
-    if [[ -z "$files" ]] || echo "$files" | grep -qE '(^rs/|^Cargo\.(toml|lock)$|^flake\.lock$|\.nix$)'; then
+    if [[ -z "$files" ]] || echo "$files" | grep -qE '(^rs/|^tools/moq-trace/|^Cargo\.(toml|lock)$|^flake\.lock$|\.nix$)'; then
     	nix flake check
     else
     	echo "ci: no Nix/Rust inputs changed; skipping nix flake check."
@@ -111,6 +114,7 @@ ci BASE="":
 fix:
     just js fix
     just rs fix
+    just trace fix
     just py fix
     bun remark . --quiet --output
     @if command -v shfmt >/dev/null 2>&1; then shfmt --write $(shfmt -f . | grep -v '\.direnv/'); fi
@@ -124,6 +128,10 @@ build:
     just rs build
     if command -v uv &> /dev/null; then just py build; fi
     if command -v wasm-bindgen &> /dev/null; then just wasm; fi
+
+# Build the binaries consumed by a relay latency experiment.
+trace-build:
+    cargo build --release -p moq-relay --features trace -p moq-bench
 
 # Build browser/WASM bindings into @moq/wasm using the pinned wasm-bindgen toolchain.
 wasm:
@@ -139,6 +147,7 @@ clean:
     just rs clean
     just js clean
     just py clean
+    just trace clean
     just kt clean
     just swift clean
     just go clean

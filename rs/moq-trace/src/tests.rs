@@ -19,27 +19,52 @@ fn object_children_only_reference_the_start_record() {
 	phase.set_payload_bytes(44);
 	phase.set_stream_offset_end(144);
 	phase.finish(ObjectOutcome::Success);
-	object.finish();
+	object.finish(ObjectOutcome::Success);
 	let events = handle.events();
 	assert_eq!(events.len(), 4);
 	let trace_id = events[0].trace_id().unwrap();
 	assert!(events[1..].iter().all(|event| event.trace_id() == Some(trace_id)));
-	let start = serde_json::to_value(&events[0]).unwrap();
-	assert_eq!(start["logical_id"]["group"], 9);
-	assert_eq!(start["logical_id"]["frame"], 4);
+	assert!(matches!(
+		events.first(),
+		Some(Event::MoqObjectStart(ObjectEvent { logical_id, .. }))
+			if logical_id.group() == 9 && logical_id.frame() == 4
+	));
 	assert!(matches!(
 		events.last(),
 		Some(Event::MoqObjectEnd(ObjectEndEvent {
 			payload_bytes: 44,
 			stream_offset_end: Some(144),
+			outcome: ObjectOutcome::Success,
 			..
 		}))
 	));
-	let phase = serde_json::to_value(&events[1]).unwrap();
-	assert_ne!(phase["span_id"], 0);
-	assert_eq!(phase["span_id"], serde_json::to_value(&events[2]).unwrap()["span_id"]);
-	assert!(phase.get("session_id").is_none());
-	assert!(phase.get("direction").is_none());
+	let Some(Event::MoqObjectPhase(start)) = events.get(1) else {
+		panic!("expected phase start");
+	};
+	let Some(Event::MoqObjectPhase(done)) = events.get(2) else {
+		panic!("expected phase completion");
+	};
+	assert_ne!(start.span_id, 0);
+	assert_eq!(start.span_id, done.span_id);
+}
+
+#[test]
+fn dropping_an_object_records_abandonment() {
+	let handle = trace();
+	let object = handle.object(ObjectContext::new(
+		Direction::Rx,
+		ObjectIdentity::new(1, 2, 3),
+		LogicalId::new(4, 5),
+	));
+	drop(object);
+
+	assert!(matches!(
+		handle.events().last(),
+		Some(Event::MoqObjectEnd(ObjectEndEvent {
+			outcome: ObjectOutcome::Abandoned,
+			..
+		}))
+	));
 }
 
 #[test]
@@ -51,9 +76,13 @@ fn packet_end_contains_metadata_discovered_after_start() {
 	packet.phase(PacketPhase::Routing).finish(PacketOutcome::Success);
 	packet.finish(PacketOutcome::Success);
 	let events = handle.events();
-	let start = serde_json::to_value(&events[1]).unwrap();
-	let finish = serde_json::to_value(&events[2]).unwrap();
-	assert_eq!(start["span_id"], finish["span_id"]);
+	let Some(Event::PacketPhase(start)) = events.get(1) else {
+		panic!("expected phase start");
+	};
+	let Some(Event::PacketPhase(finish)) = events.get(2) else {
+		panic!("expected phase completion");
+	};
+	assert_eq!(start.span_id, finish.span_id);
 	assert!(matches!(
 		events.last(),
 		Some(Event::PacketEnd(PacketEndEvent {
@@ -67,17 +96,6 @@ fn packet_end_contains_metadata_discovered_after_start() {
 }
 
 #[test]
-fn strict_records_reject_unknown_fields() {
-	let json = r#"{"type":"moq_object_end","timestamp_ns":1,"trace_id":1,"stream_offset_end":null,"payload_bytes":1,"legacy":true}"#;
-	assert!(serde_json::from_str::<Event>(json).is_err());
-}
-
-#[test]
-fn strict_records_reject_unknown_event_types() {
-	assert!(serde_json::from_str::<Event>(r#"{"type":"future_event"}"#).is_err());
-}
-
-#[test]
 fn disabled_handle_is_noop() {
 	let handle = Handle::disabled();
 	handle
@@ -86,7 +104,7 @@ fn disabled_handle_is_noop() {
 			ObjectIdentity::new(1, 2, 3),
 			LogicalId::new(4, 5),
 		))
-		.finish();
+		.finish(ObjectOutcome::Success);
 	assert!(handle.events().is_empty());
 }
 
@@ -106,7 +124,15 @@ fn trace_ids_are_unique_across_handles() {
 }
 
 #[test]
-fn global_destination_is_install_once() {
-	install().unwrap();
-	assert!(matches!(install(), Err(Error::GlobalAlreadyInstalled)));
+#[cfg(not(feature = "lttng"))]
+fn disabled_global_is_a_noop_without_the_lttng_feature() {
+	let handle = global();
+	handle
+		.object(ObjectContext::new(
+			Direction::Rx,
+			ObjectIdentity::new(1, 2, 3),
+			LogicalId::new(4, 5),
+		))
+		.finish(ObjectOutcome::Success);
+	assert!(handle.events().is_empty());
 }

@@ -9,39 +9,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
 
-[[bin]]
-name = "moq-trace"
-path = "src/bin/moq-trace/main.rs"
-required-features = ["cli"]
-
 [features]
-default = ["cli"]
-cli = [
-    "dep:anyhow",
-    "dep:clap",
-    "dep:humantime",
-    "dep:parse-size",
-    "dep:serde_json",
-    "dep:strip-ansi-escapes",
-    "dep:toml",
-]
+default = []
+lttng = ["dep:moq-trace-lttng-sys"]
 
 [dependencies]
-anyhow = { version = "1.0.104", optional = true }
-clap = { version = "4.6.6", features = ["derive"], optional = true }
-humantime = { workspace = true, optional = true }
-parse-size = { workspace = true, optional = true }
-serde = { workspace = true }
-serde_json = { workspace = true, optional = true }
-strip-ansi-escapes = { workspace = true, optional = true }
-thiserror.workspace = true
-toml = { version = "1.1", optional = true }
-
-[build-dependencies]
-bindgen.workspace = true
-cc.workspace = true
-pkg-config.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true
-tempfile.workspace = true
+moq-trace-lttng-sys = { workspace = true, optional = true }
