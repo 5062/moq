@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pathlib
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 import duckdb
 import pyarrow as pa
@@ -10,17 +12,19 @@ import pyarrow as pa
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
-from moq_trace import ctf  # noqa: E402
+from moq_trace import coverage, ctf  # noqa: E402
 from moq_trace.analyze import (  # noqa: E402
-    _coverage,
     _define_lifecycle_views,
     _define_metrics,
     _define_timelines,
     _derive_samples,
-    _select_workload,
+    _select_window,
     _validate_raw,
+    run,
 )
+from moq_trace.artifact import open_artifact  # noqa: E402
 from moq_trace.coverage import _subtract  # noqa: E402
+from moq_trace.errors import TraceError  # noqa: E402
 
 
 class SqlAnalysisTests(unittest.TestCase):
@@ -124,8 +128,14 @@ class SqlAnalysisTests(unittest.TestCase):
         self.phase(3, "scheduling", 120_000, 130_000)
 
         _validate_raw(self.connection)
-        origin = _select_workload(self.connection, 16, 1, 0, 0)
-        _coverage(self.connection)
+        origin = _select_window(
+            self.connection,
+            object_size=16,
+            subscribers=1,
+            warmup_seconds=0,
+            cooldown_seconds=0,
+        )
+        coverage.resolve(self.connection)
         _derive_samples(self.connection, origin)
         _define_metrics(self.connection)
         _define_timelines(self.connection)
@@ -142,6 +152,53 @@ class SqlAnalysisTests(unittest.TestCase):
             220.0,
         )
         self.assertEqual(self.connection.execute("SELECT count(*) FROM timeline_selections").fetchone()[0], 3)
+
+    def batches(self, input_path, expected_pid=None, batch_size=65_536):
+        """Yield the fixture tables where ingest would read batches from CTF."""
+
+        for name in ctf.SCHEMAS:
+            yield name, self.connection.execute(f"SELECT * FROM {name}").arrow()
+
+    def test_run_publishes_a_queryable_database(self) -> None:
+        """The public entry point ingests and analyzes one trace into a run artifact."""
+
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.phase(3, "routing", 110_000, 120_000)
+        self.phase(3, "scheduling", 120_000, 130_000)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "analysis.duckdb"
+            with mock.patch.object(ctf, "batches", self.batches):
+                run(
+                    pathlib.Path("unused.ctf"),
+                    output,
+                    object_size=16,
+                    subscribers=1,
+                    warmup_seconds=0,
+                    cooldown_seconds=0,
+                )
+
+            with open_artifact(output, "run") as (connection, kind, metadata):
+                self.assertEqual(kind, "run")
+                self.assertEqual(metadata["counts"]["correlated_objects"], 1)
+                self.assertEqual(metadata["window"]["warmup_seconds"], 0)
+                self.assertEqual(
+                    connection.execute("SELECT count(*) FROM metric_statistics").fetchone()[0],
+                    9,
+                )
+
+    def test_run_rejects_impossible_inputs(self) -> None:
+        """The public entry point rejects values no capture could contain."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "analysis.duckdb"
+            with self.assertRaisesRegex(TraceError, "object size and subscribers must be positive"):
+                run(pathlib.Path("unused.ctf"), output, object_size=0, subscribers=1)
+            with self.assertRaisesRegex(TraceError, "warmup and cooldown must be nonnegative"):
+                run(pathlib.Path("unused.ctf"), output, object_size=16, subscribers=1, warmup_seconds=-1)
 
     def test_pairs_overlapping_phase_occurrences_by_span_id(self) -> None:
         for ctf_timestamp, timestamp, span_id, edge, outcome in (

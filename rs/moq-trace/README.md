@@ -70,13 +70,13 @@ One local experiment:
 output = "target/moq-trace/baseline"
 relay_bin = "target/release/moq-relay"
 bench_bin = "target/release/moq-bench"
-subscribers = 8
-fps = 30
-object_size = 16384
-duration_seconds = 20
-warmup_seconds = 1
-cooldown_seconds = 1
 relay_cpu = 2
+subscribers = 8
+object_size = 16384
+fps = 30
+warmup_seconds = 1
+duration_seconds = 20
+cooldown_seconds = 1
 ```
 
 ```sh

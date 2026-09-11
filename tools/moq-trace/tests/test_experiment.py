@@ -54,6 +54,28 @@ class ExperimentTests(unittest.TestCase):
                 subscriber=SubscriberHost(ssh="relay@example.com"),
             )
 
+    def test_experiment_validates_workload_and_window(self) -> None:
+        with self.assertRaises(ValidationError):
+            ExperimentConfig(output=pathlib.Path("run"), object_size=0)
+        with self.assertRaises(ValidationError):
+            ExperimentConfig(output=pathlib.Path("run"), warmup_seconds=-1)
+
+    def test_commands_use_the_workload_and_window(self) -> None:
+        config = ExperimentConfig(
+            output=pathlib.Path("run"),
+            subscribers=3,
+            object_size=1024,
+            fps=15,
+            warmup_seconds=2,
+            duration_seconds=10,
+            cooldown_seconds=3,
+        )
+
+        subscriber = commands(config).subscriber
+
+        self.assertEqual(subscriber[subscriber.index("--connections") + 1], "3")
+        self.assertEqual(subscriber[subscriber.index("--duration") + 1], "15s")
+
     def test_comparison_values_are_distinct(self) -> None:
         experiment = ExperimentConfig(output=pathlib.Path("run"))
         with self.assertRaises(ValidationError):

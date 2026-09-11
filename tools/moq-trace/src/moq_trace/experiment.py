@@ -55,6 +55,12 @@ def _bench_command(config: ExperimentConfig, url: str, binary: str) -> list[str]
     ]
 
 
+def _run_seconds(config: ExperimentConfig) -> float:
+    """Wall time the workload runs, warm up and cool down included."""
+
+    return config.warmup_seconds + config.duration_seconds + config.cooldown_seconds
+
+
 def commands(config: ExperimentConfig) -> Commands:
     """Construct exact argv arrays without invoking a shell."""
 
@@ -82,7 +88,6 @@ def commands(config: ExperimentConfig) -> Commands:
 
     subscriber_binary = config.subscriber.binary if config.subscriber is not None else bench_binary
     subscriber = _bench_command(config, config.relay_url or local_url, subscriber_binary)
-    total = config.warmup_seconds + config.duration_seconds + config.cooldown_seconds
     subscriber.extend(
         [
             "--name",
@@ -94,7 +99,7 @@ def commands(config: ExperimentConfig) -> Commands:
             "--subscribe",
             "1",
             "--duration",
-            f"{total:g}s",
+            f"{_run_seconds(config):g}s",
         ]
     )
     if config.subscriber is not None:
@@ -157,7 +162,7 @@ def _capture(config: ExperimentConfig, command: Commands, output: pathlib.Path) 
             "subscriber connections and subscriptions",
             20,
         )
-        subscriber.wait(config.warmup_seconds + config.duration_seconds + config.cooldown_seconds + 15)
+        subscriber.wait(_run_seconds(config) + 15)
         processes.remove(subscriber)
         subscriber.log_handle.close()
         publisher.stop(True)
@@ -200,12 +205,14 @@ def run(config: ExperimentConfig) -> pathlib.Path:
         ),
         "workload": {
             "publishers": 1,
-            "subscribers": config.subscribers,
             "objects_per_group": 1,
+            "subscribers": config.subscribers,
             "object_size": config.object_size,
             "fps": config.fps,
-            "duration_seconds": config.duration_seconds,
+        },
+        "window": {
             "warmup_seconds": config.warmup_seconds,
+            "duration_seconds": config.duration_seconds,
             "cooldown_seconds": config.cooldown_seconds,
         },
         "binaries": {
@@ -222,8 +229,8 @@ def run(config: ExperimentConfig) -> pathlib.Path:
         database,
         object_size=config.object_size,
         subscribers=config.subscribers,
-        warmup_ns=int(config.warmup_seconds * 1_000_000_000),
-        cooldown_ns=int(config.cooldown_seconds * 1_000_000_000),
+        warmup_seconds=config.warmup_seconds,
+        cooldown_seconds=config.cooldown_seconds,
         expected_pid=relay_pid,
         metadata=metadata,
     )

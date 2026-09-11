@@ -9,9 +9,8 @@ import tempfile
 import duckdb
 import pyarrow as pa
 
-from . import ctf
+from . import coverage, ctf
 from .artifact import write_metadata
-from .coverage import resolve as _coverage
 from .errors import TraceError
 
 
@@ -26,6 +25,8 @@ def _require_zero(connection: duckdb.DuckDBPyConnection, query: str, message: st
 
 
 def _define_lifecycle_views(connection: duckdb.DuckDBPyConnection) -> None:
+    """Pair raw starts and completions into validated lifecycle relations."""
+
     connection.execute(
         """CREATE VIEW object_lifecycles AS
            SELECT start.* EXCLUDE (ctf_timestamp_ns, timestamp_ns),
@@ -88,6 +89,8 @@ def _ingest(
     input_path: pathlib.Path,
     expected_pid: int | None,
 ) -> None:
+    """Create one table per event type and stream the CTF rows into it."""
+
     for name, schema in ctf.SCHEMAS.items():
         empty = pa.Table.from_batches([], schema=schema)
         connection.register("arrow_batch", empty)
@@ -100,6 +103,8 @@ def _ingest(
 
 
 def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
+    """Reject traces whose raw events cannot be correlated."""
+
     for table in ("moq_object_start", "moq_object_end", "quic_packet_start", "quic_packet_end"):
         _require_zero(
             connection,
@@ -184,13 +189,18 @@ def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
     )
 
 
-def _select_workload(
+def _select_window(
     connection: duckdb.DuckDBPyConnection,
+    *,
     object_size: int,
     subscribers: int,
-    warmup_ns: int,
-    cooldown_ns: int,
+    warmup_seconds: float,
+    cooldown_seconds: float,
 ) -> int:
+    """Select the steady-state window and return the trace origin."""
+
+    warmup_ns = round(warmup_seconds * 1_000_000_000)
+    cooldown_ns = round(cooldown_seconds * 1_000_000_000)
     bounds = connection.execute(
         """SELECT min(start_ns), max(start_ns)
            FROM object_lifecycles
@@ -231,25 +241,31 @@ def _select_workload(
     ).fetchone()
     if int(groups[0]) != int(groups[2]) - int(groups[1]) + 1:
         raise TraceError("steady-state groups are not contiguous")
+    return origin
+
+
+def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
+    """Derive per-copy object and packet latency samples from the window.
+
+    Elapsed time is measured from ``origin``, the first completed inbound
+    object in the trace, so every sample shares one time axis.
+    """
+
     connection.execute(
         """CREATE TABLE object_samples AS
            SELECT rx.group_id, rx.object_id, 'full_span' AS metric,
                   row_number() OVER (
                     PARTITION BY rx.trace_id ORDER BY tx.session_id, tx.trace_id
                   ) - 1 AS copy_ordinal,
-                  greatest(rx.start_ns::HUGEINT - ?, 0) AS elapsed_ns,
+                  greatest(rx.start_ns::HUGEINT - $origin, 0) AS elapsed_ns,
                   tx.end_ns - rx.start_ns AS latency_ns
            FROM selected_rx AS rx
            JOIN object_lifecycles AS tx
             ON tx.logical_group = rx.logical_group
            AND tx.logical_frame = rx.logical_frame
             AND tx.direction = 'tx' AND tx.outcome = 'success'""",
-        [origin],
+        {"origin": origin},
     )
-    return origin
-
-
-def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
     connection.execute(
         """CREATE TABLE quic_object_samples AS
            WITH copies AS (
@@ -270,7 +286,7 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
              JOIN object_packet_coverage AS outbound ON outbound.trace_id = tx.trace_id
            )
            SELECT group_id, object_id, metric, copy_ordinal,
-                  greatest(first_start_ns::HUGEINT - ?, 0) AS elapsed_ns,
+                  greatest(first_start_ns::HUGEINT - $origin, 0) AS elapsed_ns,
                   finish_ns - start_ns AS latency_ns
            FROM copies
            CROSS JOIN LATERAL (VALUES
@@ -278,7 +294,7 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
              ('quic_tail_gap', inbound_complete_end_ns, outbound_complete_end_ns),
              ('quic_full_span', first_start_ns, outbound_complete_end_ns)
            ) AS metric(metric, start_ns, finish_ns)""",
-        [origin],
+        {"origin": origin},
     )
     _require_zero(
         connection,
@@ -289,13 +305,13 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
         """CREATE TABLE packet_samples AS
            SELECT direction || '_packet_span' AS metric, direction, connection_id,
                   trace_id, 0 AS occurrence,
-                  greatest(start_ns::HUGEINT - ?, 0) AS elapsed_ns,
+                  greatest(start_ns::HUGEINT - $origin, 0) AS elapsed_ns,
                   end_ns - start_ns AS latency_ns
            FROM packet_lifecycles WHERE outcome = 'success'
            UNION ALL
            SELECT packet.direction || '_' || phase.phase, packet.direction,
                   packet.connection_id, packet.trace_id, phase.occurrence,
-                  greatest(phase.start_ns::HUGEINT - ?, 0),
+                  greatest(phase.start_ns::HUGEINT - $origin, 0),
                   phase.end_ns - phase.start_ns
            FROM packet_phase_intervals AS phase
            JOIN packet_lifecycles AS packet USING (trace_id)
@@ -303,7 +319,7 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
            UNION ALL
            SELECT 'rx_packet_processing_span', packet.direction, packet.connection_id,
                   packet.trace_id, 0,
-                  greatest(schedule.end_ns::HUGEINT - ?, 0),
+                  greatest(schedule.end_ns::HUGEINT - $origin, 0),
                   packet.end_ns - schedule.end_ns
            FROM packet_lifecycles AS packet
            JOIN (
@@ -314,11 +330,13 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
            ) AS schedule USING (trace_id)
            WHERE packet.direction = 'rx' AND packet.outcome = 'success'
              AND packet.end_ns >= schedule.end_ns""",
-        [origin, origin, origin],
+        {"origin": origin},
     )
 
 
 def _define_metrics(connection: duckdb.DuckDBPyConnection) -> None:
+    """Declare the metric catalog and its per-metric statistics."""
+
     definitions = (
         ("object", "full_span", "Full relay span", 0),
         ("quic_object", "quic_forward_start", "QUIC forward start", 0),
@@ -367,6 +385,8 @@ def _define_metrics(connection: duckdb.DuckDBPyConnection) -> None:
 
 
 def _define_timelines(connection: duckdb.DuckDBPyConnection) -> None:
+    """Select representative objects and their aligned timeline intervals."""
+
     connection.execute(
         """CREATE TEMP TABLE object_slowest AS
            SELECT rx.trace_id, rx.logical_group, rx.logical_frame, rx.group_id,
@@ -474,19 +494,73 @@ def _define_timelines(connection: duckdb.DuckDBPyConnection) -> None:
     )
 
 
+def _verify_quinn_metrics(connection: duckdb.DuckDBPyConnection) -> None:
+    """Require the Quinn packet phases the correlated metrics depend on."""
+
+    for required in ("rx_routing", "rx_scheduling"):
+        count = _count(connection, "SELECT count(*) FROM metric_statistics WHERE metric = ?", [required])
+        if count == 0:
+            raise TraceError(f"Quinn trace is missing packet metric: {required}")
+
+
+def _write_run_metadata(
+    connection: duckdb.DuckDBPyConnection,
+    metadata: dict,
+    *,
+    object_size: int,
+    subscribers: int,
+    warmup_seconds: float,
+    cooldown_seconds: float,
+) -> None:
+    """Record the workload, counts, and experiment provenance in the artifact."""
+
+    value = dict(metadata)
+    value.setdefault(
+        "workload",
+        {
+            "subscribers": subscribers,
+            "object_size": object_size,
+        },
+    )
+    value.setdefault(
+        "window",
+        {
+            "warmup_seconds": warmup_seconds,
+            "cooldown_seconds": cooldown_seconds,
+        },
+    )
+    value["counts"] = {
+        "groups": _count(connection, "SELECT count(DISTINCT group_id) FROM selected_rx"),
+        "packets": _count(connection, "SELECT count(*) FROM packet_lifecycles"),
+        "correlated_objects": _count(connection, "SELECT count(*) FROM selected_rx"),
+        "correlated_object_copies": _count(
+            connection,
+            "SELECT count(*) FROM quic_object_samples WHERE metric = 'quic_full_span'",
+        ),
+    }
+    write_metadata(connection, "run", value)
+
+
 def run(
     input_path: pathlib.Path,
     output: pathlib.Path,
     *,
     object_size: int,
     subscribers: int,
-    warmup_ns: int,
-    cooldown_ns: int,
+    warmup_seconds: float = 0.0,
+    cooldown_seconds: float = 0.0,
     expected_pid: int | None = None,
     metadata: dict | None = None,
 ) -> None:
-    """Analyze CTF into one atomically published DuckDB database."""
+    """Analyze CTF into one atomically published DuckDB database.
 
+    The margins default to no trimming, so a capture is measured as it was taken.
+    """
+
+    if object_size <= 0 or subscribers <= 0:
+        raise TraceError("object size and subscribers must be positive")
+    if warmup_seconds < 0 or cooldown_seconds < 0:
+        raise TraceError("warmup and cooldown must be nonnegative")
     if output.exists():
         raise TraceError(f"analysis database already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -498,34 +572,26 @@ def run(
             _ingest(connection, input_path, expected_pid)
             _define_lifecycle_views(connection)
             _validate_raw(connection)
-            origin = _select_workload(connection, object_size, subscribers, warmup_ns, cooldown_ns)
-            _coverage(connection)
+            origin = _select_window(
+                connection,
+                object_size=object_size,
+                subscribers=subscribers,
+                warmup_seconds=warmup_seconds,
+                cooldown_seconds=cooldown_seconds,
+            )
+            coverage.resolve(connection)
             _derive_samples(connection, origin)
             _define_metrics(connection)
-            for required in ("rx_routing", "rx_scheduling"):
-                if _count(connection, "SELECT count(*) FROM metric_statistics WHERE metric = ?", [required]) == 0:
-                    raise TraceError(f"Quinn trace is missing packet metric: {required}")
+            _verify_quinn_metrics(connection)
             _define_timelines(connection)
-            value = dict(metadata or {})
-            value.setdefault(
-                "workload",
-                {
-                    "subscribers": subscribers,
-                    "object_size": object_size,
-                    "warmup_seconds": warmup_ns / 1_000_000_000,
-                    "cooldown_seconds": cooldown_ns / 1_000_000_000,
-                },
+            _write_run_metadata(
+                connection,
+                dict(metadata or {}),
+                object_size=object_size,
+                subscribers=subscribers,
+                warmup_seconds=warmup_seconds,
+                cooldown_seconds=cooldown_seconds,
             )
-            value["counts"] = {
-                "groups": _count(connection, "SELECT count(DISTINCT group_id) FROM selected_rx"),
-                "packets": _count(connection, "SELECT count(*) FROM packet_lifecycles"),
-                "correlated_objects": _count(connection, "SELECT count(*) FROM selected_rx"),
-                "correlated_object_copies": _count(
-                    connection,
-                    "SELECT count(*) FROM quic_object_samples WHERE metric = 'quic_full_span'",
-                ),
-            }
-            write_metadata(connection, "run", value)
             connection.execute("CHECKPOINT")
         finally:
             connection.close()

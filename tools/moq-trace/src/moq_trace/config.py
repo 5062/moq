@@ -32,10 +32,11 @@ class ExperimentConfig(StrictModel):
     subscriber: SubscriberHost | None = None
     relay_cpu: int | None = Field(default=None, ge=0)
     subscribers: int = Field(default=1, gt=0)
-    fps: int = Field(default=30, gt=0)
     object_size: int = Field(default=16_384, gt=0)
-    duration_seconds: float = Field(default=20.0, gt=0)
+    fps: int = Field(default=30, gt=0)
+    # A second at each end keeps connection and subscription ramp-up out of the measurement.
     warmup_seconds: float = Field(default=1.0, ge=0)
+    duration_seconds: float = Field(default=20.0, gt=0)
     cooldown_seconds: float = Field(default=1.0, ge=0)
     port: int = Field(default=4443, gt=0, le=65_535)
     render: bool = True

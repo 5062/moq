@@ -57,17 +57,13 @@ def _run(args: argparse.Namespace) -> None:
     elif args.command == "analyze":
         from .analyze import run
 
-        if args.object_size <= 0 or args.subscribers <= 0:
-            raise ValueError("object size and subscribers must be positive")
-        if args.warmup_seconds < 0 or args.cooldown_seconds < 0:
-            raise ValueError("warmup and cooldown must be nonnegative")
         run(
             args.input,
             args.output,
             object_size=args.object_size,
             subscribers=args.subscribers,
-            warmup_ns=int(args.warmup_seconds * 1_000_000_000),
-            cooldown_ns=int(args.cooldown_seconds * 1_000_000_000),
+            warmup_seconds=args.warmup_seconds,
+            cooldown_seconds=args.cooldown_seconds,
             expected_pid=args.expected_pid,
         )
         print(args.output.resolve())
