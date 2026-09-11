@@ -241,6 +241,8 @@ def _select_window(
     ).fetchone()
     if int(groups[0]) != int(groups[2]) - int(groups[1]) + 1:
         raise TraceError("steady-state groups are not contiguous")
+    connection.execute("CREATE TABLE analysis_window(origin_ns UBIGINT, start_ns UBIGINT, end_ns UBIGINT)")
+    connection.execute("INSERT INTO analysis_window VALUES (?, ?, ?)", [origin, start, end])
     return origin
 
 
@@ -302,26 +304,33 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
         "QUIC object metrics are negative",
     )
     connection.execute(
+        """CREATE VIEW selected_packets AS
+           SELECT * FROM packet_lifecycles
+           SEMI JOIN (
+             SELECT DISTINCT unnest(packet_ids) AS trace_id FROM object_packet_coverage
+           ) AS selected USING (trace_id)"""
+    )
+    connection.execute(
         """CREATE TABLE packet_samples AS
            SELECT direction || '_packet_span' AS metric, direction, connection_id,
                   trace_id, 0 AS occurrence,
                   greatest(start_ns::HUGEINT - $origin, 0) AS elapsed_ns,
                   end_ns - start_ns AS latency_ns
-           FROM packet_lifecycles WHERE outcome = 'success'
+           FROM selected_packets WHERE outcome = 'success'
            UNION ALL
            SELECT packet.direction || '_' || phase.phase, packet.direction,
                   packet.connection_id, packet.trace_id, phase.occurrence,
                   greatest(phase.start_ns::HUGEINT - $origin, 0),
                   phase.end_ns - phase.start_ns
            FROM packet_phase_intervals AS phase
-           JOIN packet_lifecycles AS packet USING (trace_id)
+           JOIN selected_packets AS packet USING (trace_id)
            WHERE phase.outcome = 'success'
            UNION ALL
            SELECT 'rx_packet_processing_span', packet.direction, packet.connection_id,
                   packet.trace_id, 0,
                   greatest(schedule.end_ns::HUGEINT - $origin, 0),
                   packet.end_ns - schedule.end_ns
-           FROM packet_lifecycles AS packet
+           FROM selected_packets AS packet
            JOIN (
              SELECT trace_id, max(end_ns) AS end_ns
              FROM packet_phase_intervals
@@ -529,9 +538,16 @@ def _write_run_metadata(
             "cooldown_seconds": cooldown_seconds,
         },
     )
+    value["population"] = {
+        "object": "selected_object_copies",
+        "quic_object": "selected_object_copies",
+        "packet": "selected_object_packets",
+        "timeline": "slowest_copy_per_selected_object",
+    }
     value["counts"] = {
         "groups": _count(connection, "SELECT count(DISTINCT group_id) FROM selected_rx"),
         "packets": _count(connection, "SELECT count(*) FROM packet_lifecycles"),
+        "selected_packets": _count(connection, "SELECT count(*) FROM selected_packets"),
         "correlated_objects": _count(connection, "SELECT count(*) FROM selected_rx"),
         "correlated_object_copies": _count(
             connection,

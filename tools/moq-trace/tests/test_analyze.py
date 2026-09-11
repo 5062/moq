@@ -190,6 +190,54 @@ class SqlAnalysisTests(unittest.TestCase):
                     9,
                 )
 
+    def test_packet_metrics_exclude_unrelated_capture_packets(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.packet(5, "rx", 99)
+        self.phase(5, "routing", 110_000, 120_000)
+        origin = _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+        coverage.resolve(self.connection)
+        _derive_samples(self.connection, origin)
+        self.assertEqual(
+            self.connection.execute("SELECT DISTINCT trace_id FROM packet_samples ORDER BY trace_id").fetchall(),
+            [(3,), (4,)],
+        )
+
+    def test_packet_metrics_follow_trimmed_object_window(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.phase(3, "routing", 110_000, 120_000)
+        self.phase(3, "scheduling", 120_000, 130_000)
+        self.object_start(11, "rx", 11)
+        self.object_start(12, "tx", 12)
+        self.packet(13, "rx", 11)
+        self.packet(14, "tx", 12)
+        self.phase(13, "routing", 110_000, 120_000)
+        self.phase(13, "scheduling", 120_000, 130_000)
+        for name in ctf.SCHEMAS:
+            self.connection.execute(f"UPDATE {name} SET timestamp_ns = timestamp_ns + 1000000000 WHERE trace_id >= 10")
+        self.connection.execute("UPDATE moq_object_start SET logical_group = 8, group_id = 5 WHERE trace_id >= 10")
+        with tempfile.TemporaryDirectory() as directory:
+            trimmed = pathlib.Path(directory) / "trimmed.duckdb"
+            with mock.patch.object(ctf, "batches", self.batches):
+                run(pathlib.Path("unused.ctf"), trimmed, object_size=16, subscribers=1, warmup_seconds=0.5)
+            with open_artifact(trimmed) as (connection, _, metadata):
+                self.assertEqual(metadata["counts"]["correlated_objects"], 1)
+                self.assertEqual(metadata["window"]["warmup_seconds"], 0.5)
+                self.assertEqual(
+                    connection.execute("SELECT DISTINCT trace_id FROM packet_samples ORDER BY trace_id").fetchall(),
+                    [(13,), (14,)],
+                )
+                self.assertEqual(metadata["population"]["packet"], "selected_object_packets")
+                self.assertEqual(
+                    connection.execute("SELECT * FROM analysis_window").fetchall(),
+                    [(100_000, 500_100_000, 1_000_100_000)],
+                )
+
     def test_run_rejects_impossible_inputs(self) -> None:
         """The public entry point rejects values no capture could contain."""
 

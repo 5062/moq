@@ -137,6 +137,14 @@ statistics, and representative timeline rows. Durations remain integer
 nanoseconds in storage; conversion to display units happens only at
 presentation boundaries.
 
+The artifact records metric populations. `analysis_window` stores the inclusive
+object-start bounds and time origin in nanoseconds. Packet statistics include the distinct packets
+in the coverage prefixes of selected inbound objects and their outbound copies,
+including packets crossing the window boundaries. Object statistics measure
+individual copies; representative timelines select by the slowest copy of each
+object. All raw packets remain available in `packet_lifecycles` for capture-wide
+queries.
+
 Query it directly:
 
 ```sql
