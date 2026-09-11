@@ -11,7 +11,7 @@ import shlex
 import duckdb
 
 from .analyze import run as analyze
-from .artifact import write_metadata
+from .artifact import open_artifact, write_metadata
 from .capture import LttngSession, ManagedProcess, wait_for_log
 from .config import ComparisonConfig, ExperimentConfig
 from .render import render
@@ -188,6 +188,15 @@ def _file_hash(path: pathlib.Path) -> str | None:
         return None
 
 
+def _validate_workload(database: pathlib.Path) -> None:
+    with open_artifact(database, "run") as (connection, _, _metadata):
+        count, first, last = connection.execute(
+            "SELECT count(DISTINCT group_id), min(group_id), max(group_id) FROM selected_rx"
+        ).fetchone()
+        if count != last - first + 1:
+            raise ExperimentError("steady-state groups are not contiguous")
+
+
 def run(config: ExperimentConfig) -> pathlib.Path:
     """Capture, analyze, and optionally render one workload."""
 
@@ -234,6 +243,7 @@ def run(config: ExperimentConfig) -> pathlib.Path:
         expected_pid=relay_pid,
         metadata=metadata,
     )
+    _validate_workload(database)
     if config.render:
         render(database)
     return database

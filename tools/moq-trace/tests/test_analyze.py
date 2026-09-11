@@ -119,6 +119,27 @@ class SqlAnalysisTests(unittest.TestCase):
                 outcome=outcome,
             )
 
+    def test_analysis_accepts_unused_incomplete_socket_operations(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.insert("udp_socket_start", trace_id=99)
+        self.insert("udp_socket_start", trace_id=99)
+        _validate_raw(self.connection)
+
+    def test_analysis_accepts_nonconsecutive_groups(self) -> None:
+        for trace_id, direction in ((1, "rx"), (2, "tx"), (3, "rx"), (4, "tx")):
+            self.object_start(trace_id, direction, trace_id)
+        self.connection.execute("UPDATE moq_object_start SET logical_group = 9, group_id = 6 WHERE trace_id >= 3")
+        _validate_raw(self.connection)
+        _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM selected_rx").fetchone()[0], 2)
+
+    def test_coverage_requires_packets_for_selected_objects(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+        with self.assertRaisesRegex(TraceError, "does not have complete packet coverage"):
+            coverage.resolve(self.connection)
+
     def test_derives_correlated_metrics(self) -> None:
         self.object_start(1, "rx", 1)
         self.object_start(2, "tx", 2)
@@ -279,6 +300,26 @@ class SqlAnalysisTests(unittest.TestCase):
         _subtract(gaps, 60, 100)
         _subtract(gaps, 0, 40)
         self.assertEqual(gaps, [])
+
+
+class CtfRecordTests(unittest.TestCase):
+    def message(self, **payload):
+        return mock.Mock(event=mock.Mock(payload_field=payload), default_clock_snapshot=mock.Mock(ns_from_origin=1))
+
+    def test_ignores_additional_fields_without_decoding_them(self) -> None:
+        message = self.message(timestamp_ns=2, trace_id=3, connection_id=4, direction=0, future_field=object())
+        record = ctf._record(message, "udp_socket_start")
+        self.assertEqual(set(record), set(ctf.SCHEMAS["udp_socket_start"].names))
+
+    def test_optional_fields_respect_presence_flags(self) -> None:
+        message = self.message(timestamp_ns=2, trace_id=3, connection_id=4, has_connection_id=0, direction=0)
+        self.assertIsNone(ctf._record(message, "udp_socket_start")["connection_id"])
+        message.event.payload_field["has_connection_id"] = 1
+        self.assertEqual(ctf._record(message, "udp_socket_start")["connection_id"], 4)
+
+    def test_requires_expected_fields(self) -> None:
+        with self.assertRaisesRegex(ctf.CtfError, "missing=.*connection_id"):
+            ctf._record(self.message(timestamp_ns=2, trace_id=3, direction=0), "udp_socket_start")
 
 
 if __name__ == "__main__":

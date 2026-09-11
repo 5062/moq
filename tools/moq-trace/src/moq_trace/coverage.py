@@ -96,8 +96,6 @@ def resolve(connection: duckdb.DuckDBPyConnection) -> None:
             if not gaps:
                 complete_end = int(packet_end)
                 break
-        if first_start is None:
-            raise TraceError(f"object trace {trace_id} has no covering packets")
         if complete_end is None:
             raise TraceError(f"object trace {trace_id} does not have complete packet coverage")
         rows.append(

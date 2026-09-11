@@ -167,19 +167,6 @@ def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
     )
     _require_zero(
         connection,
-        """SELECT count(*) FROM udp_socket_start AS start
-           FULL JOIN udp_socket_end AS finish USING (trace_id)
-           WHERE start.trace_id IS NULL OR finish.trace_id IS NULL""",
-        "socket operations are incomplete or duplicated",
-    )
-    for table in ("udp_socket_start", "udp_socket_end"):
-        _require_zero(
-            connection,
-            f"SELECT count(*) FROM (SELECT trace_id FROM {table} GROUP BY trace_id HAVING count(*) <> 1)",
-            f"{table} contains duplicate trace IDs",
-        )
-    _require_zero(
-        connection,
         """SELECT count(*) FROM (
              SELECT logical_group, logical_frame,
                     count(*) FILTER (direction = 'rx') AS ingress
@@ -236,11 +223,6 @@ def _select_window(
     )
     if bad:
         raise TraceError(f"{bad} steady-state objects do not have exactly {subscribers} outbound copies")
-    groups = connection.execute(
-        "SELECT count(DISTINCT group_id), min(group_id), max(group_id) FROM selected_rx"
-    ).fetchone()
-    if int(groups[0]) != int(groups[2]) - int(groups[1]) + 1:
-        raise TraceError("steady-state groups are not contiguous")
     connection.execute("CREATE TABLE analysis_window(origin_ns UBIGINT, start_ns UBIGINT, end_ns UBIGINT)")
     connection.execute("INSERT INTO analysis_window VALUES (?, ?, ?)", [origin, start, end])
     return origin

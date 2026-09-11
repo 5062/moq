@@ -5,18 +5,32 @@ import sys
 import tempfile
 import unittest
 
+import duckdb
 from pydantic import ValidationError
 
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
+from moq_trace.artifact import write_metadata  # noqa: E402
 from moq_trace.capture import _provider_listed  # noqa: E402
 from moq_trace.config import ComparisonConfig, ExperimentConfig, SubscriberHost  # noqa: E402
-from moq_trace.experiment import commands  # noqa: E402
+from moq_trace.experiment import ExperimentError, _validate_workload, commands  # noqa: E402
 
 
 class ExperimentTests(unittest.TestCase):
     """Exercise configuration and command construction through stable interfaces."""
+
+    def test_experiment_requires_contiguous_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = pathlib.Path(directory) / "analysis.duckdb"
+            with duckdb.connect(str(database)) as connection:
+                write_metadata(connection, "run", {})
+                connection.execute("CREATE TABLE selected_rx AS SELECT unnest([4, 6]) AS group_id")
+            with self.assertRaisesRegex(ExperimentError, "groups are not contiguous"):
+                _validate_workload(database)
+            with duckdb.connect(str(database)) as connection:
+                connection.execute("INSERT INTO selected_rx VALUES (5)")
+            _validate_workload(database)
 
     def test_remote_subscriber_uses_standard_shell_quoting(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

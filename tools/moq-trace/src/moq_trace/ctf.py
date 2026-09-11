@@ -117,19 +117,15 @@ def _scalar(value):
 
 def _record(message, name: str) -> dict:
     payload = message.event.payload_field
-    record = {key: _scalar(payload[key]) for key in payload}
-    for key in tuple(record):
-        if key.startswith("has_"):
-            value_key = key[4:]
-            record[value_key] = record[value_key] if record.pop(key) else None
+    expected = set(SCHEMAS[name].names) - {"ctf_timestamp_ns"}
+    missing = expected - set(payload)
+    if missing:
+        raise CtfError(f"moq_trace:{name} fields do not match the analyzer schema: missing={sorted(missing)}")
+    record = {
+        key: None if f"has_{key}" in payload and not _scalar(payload[f"has_{key}"]) else _scalar(payload[key])
+        for key in expected
+    }
     record["ctf_timestamp_ns"] = int(message.default_clock_snapshot.ns_from_origin)
-    expected = set(SCHEMAS[name].names)
-    actual = set(record)
-    if actual != expected:
-        raise CtfError(
-            f"moq_trace:{name} fields do not match the analyzer schema: "
-            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
-        )
     return record
 
 
