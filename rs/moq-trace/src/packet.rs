@@ -121,7 +121,7 @@ impl StreamFrame {
 pub struct PacketTrace(Option<PacketTraceState>);
 
 struct PacketTraceState {
-	backend: std::sync::Arc<crate::backend::Backend>,
+	backend: crate::backend::Handle,
 	trace_id: u64,
 	context: PacketContext,
 }
@@ -131,7 +131,7 @@ struct PacketTraceState {
 pub struct PacketPhaseTrace(Option<PacketPhaseTraceState>);
 
 struct PacketPhaseTraceState {
-	backend: std::sync::Arc<crate::backend::Backend>,
+	backend: crate::backend::Handle,
 	trace_id: u64,
 	span_id: u64,
 	start_ns: u64,
@@ -186,7 +186,13 @@ impl PacketTrace {
 
 	/// Start a measured packet lifecycle phase.
 	pub fn phase(&self, phase: PacketPhase) -> PacketPhaseTrace {
-		self.phase_at(phase, now_ns())
+		let Some(state) = &self.0 else {
+			return PacketPhaseTrace::disabled();
+		};
+		if !state.backend.packet_phase_enabled() {
+			return PacketPhaseTrace::disabled();
+		}
+		Self::start_phase_at(state, phase, now_ns())
 	}
 
 	/// Start a measured packet phase at a previously captured timestamp.
@@ -194,7 +200,14 @@ impl PacketTrace {
 		let Some(state) = &self.0 else {
 			return PacketPhaseTrace::disabled();
 		};
-		let span_id = crate::NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed);
+		if !state.backend.packet_phase_enabled() {
+			return PacketPhaseTrace::disabled();
+		}
+		Self::start_phase_at(state, phase, timestamp_ns)
+	}
+
+	fn start_phase_at(state: &PacketTraceState, phase: PacketPhase, timestamp_ns: u64) -> PacketPhaseTrace {
+		let span_id = crate::next_span_id();
 		state
 			.backend
 			.packet_phase(timestamp_ns, state.trace_id, span_id, phase, PhaseEdge::Start, None);
@@ -212,6 +225,9 @@ impl PacketTrace {
 		let Some(state) = &self.0 else {
 			return;
 		};
+		if !state.backend.stream_frame_enabled() {
+			return;
+		}
 		state.backend.stream_frame(now_ns(), state.trace_id, frame, outcome);
 	}
 
@@ -243,8 +259,10 @@ impl PacketPhaseTrace {
 	}
 
 	/// Finish the phase with an explicit result.
-	pub fn finish(self, outcome: PacketOutcome) {
-		self.finish_at(outcome, now_ns());
+	pub fn finish(mut self, outcome: PacketOutcome) {
+		if let Some(state) = self.0.take() {
+			state.emit_done(outcome);
+		}
 	}
 
 	/// Finish the phase at a previously captured timestamp.

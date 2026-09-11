@@ -130,7 +130,7 @@ impl ObjectContext {
 pub struct ObjectTrace(Option<ObjectTraceState>);
 
 struct ObjectTraceState {
-	backend: std::sync::Arc<crate::backend::Backend>,
+	backend: crate::backend::Handle,
 	trace_id: u64,
 	payload_bytes: u64,
 	stream_offset_end: Option<u64>,
@@ -165,10 +165,13 @@ impl ObjectTrace {
 
 	/// Start a measured object lifecycle phase.
 	pub fn phase(&mut self, phase: ObjectPhase) -> ObjectPhaseTrace<'_> {
-		let state = self.0.as_ref().map(|_| {
-			let span_id = crate::NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed);
+		let state = self.0.as_ref().and_then(|state| {
+			if !state.backend.object_phase_enabled() {
+				return None;
+			}
+			let span_id = crate::next_span_id();
 			self.emit_phase(span_id, phase, PhaseEdge::Start, None);
-			(span_id, phase)
+			Some((span_id, phase))
 		});
 		ObjectPhaseTrace { object: self, state }
 	}

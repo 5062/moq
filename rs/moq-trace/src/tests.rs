@@ -118,6 +118,68 @@ fn disabled_handle_is_noop() {
 }
 
 #[test]
+fn disabled_packet_phase_does_not_read_the_clock() {
+	let packet = PacketTrace::disabled();
+	reset_bookkeeping_counts();
+	packet.phase(PacketPhase::Routing).finish(PacketOutcome::Success);
+	assert_eq!(clock_reads(), 0);
+	assert_eq!(span_ids(), 0);
+}
+
+#[test]
+fn disabled_packet_phase_event_does_not_do_bookkeeping() {
+	let handle = trace();
+	handle.enable_only(backend::Tracepoint::PacketStart);
+	let packet = handle.packet(PacketContext::new(Direction::Rx, 7));
+	reset_bookkeeping_counts();
+	packet.phase(PacketPhase::Routing).finish(PacketOutcome::Success);
+	assert_eq!(clock_reads(), 0);
+	assert_eq!(span_ids(), 0);
+}
+
+#[test]
+fn disabled_object_phase_event_does_not_do_bookkeeping() {
+	let handle = trace();
+	handle.enable_only(backend::Tracepoint::ObjectStart);
+	let mut object = handle.object(ObjectContext::new(
+		Direction::Rx,
+		ObjectIdentity::new(1, 2, 3),
+		LogicalId::new(4, 5),
+	));
+	reset_bookkeeping_counts();
+	object.phase(ObjectPhase::PayloadRead).finish(ObjectOutcome::Success);
+	assert_eq!(clock_reads(), 0);
+	assert_eq!(span_ids(), 0);
+}
+
+#[test]
+fn disabled_stream_frame_event_does_not_read_the_clock() {
+	let handle = trace();
+	handle.enable_only(backend::Tracepoint::PacketStart);
+	let packet = handle.packet(PacketContext::new(Direction::Rx, 7));
+	reset_bookkeeping_counts();
+	packet.stream_frame(StreamFrame::new(1, 0, 10), PacketOutcome::Success);
+	assert_eq!(clock_reads(), 0);
+}
+
+#[test]
+fn packet_phase_enablement_is_checked_when_the_phase_starts() {
+	let handle = trace();
+	handle.enable_only(backend::Tracepoint::PacketStart);
+	let packet = handle.packet(PacketContext::new(Direction::Rx, 7));
+	handle.set_enabled(backend::Tracepoint::PacketPhase, true);
+	packet.phase(PacketPhase::Routing).finish(PacketOutcome::Success);
+	assert_eq!(
+		handle
+			.events()
+			.iter()
+			.filter(|event| matches!(event, backend::Event::PacketPhase { .. }))
+			.count(),
+		2
+	);
+}
+
+#[test]
 fn trace_ids_are_unique_across_handles() {
 	let first = trace();
 	let second = trace();

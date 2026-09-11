@@ -5,10 +5,64 @@ use crate::{
 	SocketOutcome, SocketStats, StreamFrame,
 };
 
+/// Internal backend ownership without production reference counting.
+#[derive(Clone)]
+pub(crate) enum Handle {
+	Shared(&'static Backend),
+	#[cfg(test)]
+	Owned(std::sync::Arc<Backend>),
+}
+
+impl Handle {
+	#[cfg(test)]
+	pub(crate) fn owned(inner: Backend) -> Self {
+		Self::Owned(std::sync::Arc::new(inner))
+	}
+
+	pub(crate) fn shared(inner: &'static Backend) -> Self {
+		Self::Shared(inner)
+	}
+}
+
+impl std::ops::Deref for Handle {
+	type Target = Backend;
+
+	fn deref(&self) -> &Self::Target {
+		match self {
+			Self::Shared(inner) => inner,
+			#[cfg(test)]
+			Self::Owned(inner) => inner,
+		}
+	}
+}
+
 /// Concrete trace backend shared by cloned instrumentation handles.
 pub(crate) struct Backend {
 	#[cfg(test)]
 	events: std::sync::Mutex<Vec<Event>>,
+	#[cfg(test)]
+	enabled: std::sync::atomic::AtomicU16,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum Tracepoint {
+	ObjectStart,
+	ObjectPhase,
+	ObjectEnd,
+	PacketStart,
+	PacketPhase,
+	StreamFrame,
+	PacketEnd,
+	SocketStart,
+	SocketEnd,
+}
+
+#[cfg(test)]
+impl Tracepoint {
+	const fn mask(self) -> u16 {
+		1 << self as u16
+	}
 }
 
 impl Backend {
@@ -18,28 +72,84 @@ impl Backend {
 		Self {
 			#[cfg(test)]
 			events: std::sync::Mutex::new(Vec::new()),
+			#[cfg(test)]
+			enabled: std::sync::atomic::AtomicU16::new(u16::MAX),
 		}
+	}
+
+	#[cfg(test)]
+	pub(crate) fn enable_only(&self, tracepoint: Tracepoint) {
+		self.enabled
+			.store(tracepoint.mask(), std::sync::atomic::Ordering::Relaxed);
+	}
+
+	#[cfg(test)]
+	pub(crate) fn set_enabled(&self, tracepoint: Tracepoint, enabled: bool) {
+		if enabled {
+			self.enabled
+				.fetch_or(tracepoint.mask(), std::sync::atomic::Ordering::Relaxed);
+		} else {
+			self.enabled
+				.fetch_and(!tracepoint.mask(), std::sync::atomic::Ordering::Relaxed);
+		}
+	}
+
+	#[cfg(test)]
+	fn any_enabled(&self, tracepoints: &[Tracepoint]) -> bool {
+		let enabled = self.enabled.load(std::sync::atomic::Ordering::Relaxed);
+		tracepoints.iter().any(|tracepoint| enabled & tracepoint.mask() != 0)
+	}
+
+	#[cfg(test)]
+	fn enabled(&self, tracepoint: Tracepoint) -> bool {
+		self.any_enabled(&[tracepoint])
 	}
 
 	pub(crate) fn object_enabled(&self) -> bool {
 		#[cfg(test)]
-		return true;
+		return self.any_enabled(&[Tracepoint::ObjectStart, Tracepoint::ObjectPhase, Tracepoint::ObjectEnd]);
 		#[cfg(not(test))]
 		platform::object_enabled()
 	}
 
 	pub(crate) fn packet_enabled(&self) -> bool {
 		#[cfg(test)]
-		return true;
+		return self.any_enabled(&[
+			Tracepoint::PacketStart,
+			Tracepoint::PacketPhase,
+			Tracepoint::StreamFrame,
+			Tracepoint::PacketEnd,
+		]);
 		#[cfg(not(test))]
 		platform::packet_enabled()
 	}
 
 	pub(crate) fn socket_enabled(&self) -> bool {
 		#[cfg(test)]
-		return true;
+		return self.any_enabled(&[Tracepoint::SocketStart, Tracepoint::SocketEnd]);
 		#[cfg(not(test))]
 		platform::socket_enabled()
+	}
+
+	pub(crate) fn object_phase_enabled(&self) -> bool {
+		#[cfg(test)]
+		return self.enabled(Tracepoint::ObjectPhase);
+		#[cfg(not(test))]
+		platform::object_phase_enabled()
+	}
+
+	pub(crate) fn packet_phase_enabled(&self) -> bool {
+		#[cfg(test)]
+		return self.enabled(Tracepoint::PacketPhase);
+		#[cfg(not(test))]
+		platform::packet_phase_enabled()
+	}
+
+	pub(crate) fn stream_frame_enabled(&self) -> bool {
+		#[cfg(test)]
+		return self.enabled(Tracepoint::StreamFrame);
+		#[cfg(not(test))]
+		platform::stream_frame_enabled()
 	}
 
 	pub(crate) fn object_start(
@@ -269,6 +379,18 @@ mod platform {
 
 	pub(super) fn socket_enabled() -> bool {
 		unsafe { ffi::moq_trace_udp_socket_start_enabled() || ffi::moq_trace_udp_socket_end_enabled() }
+	}
+
+	pub(super) fn object_phase_enabled() -> bool {
+		unsafe { ffi::moq_trace_moq_object_phase_enabled() }
+	}
+
+	pub(super) fn packet_phase_enabled() -> bool {
+		unsafe { ffi::moq_trace_quic_packet_phase_enabled() }
+	}
+
+	pub(super) fn stream_frame_enabled() -> bool {
+		unsafe { ffi::moq_trace_quic_stream_frame_enabled() }
 	}
 
 	pub(super) fn object_start(timestamp_ns: u64, trace_id: u64, handle: &crate::Handle, context: &ObjectContext) {
@@ -576,6 +698,15 @@ mod platform {
 		false
 	}
 	pub(super) fn socket_enabled() -> bool {
+		false
+	}
+	pub(super) fn object_phase_enabled() -> bool {
+		false
+	}
+	pub(super) fn packet_phase_enabled() -> bool {
+		false
+	}
+	pub(super) fn stream_frame_enabled() -> bool {
 		false
 	}
 	pub(super) fn object_start(_: u64, _: u64, _: &crate::Handle, _: &ObjectContext) {}

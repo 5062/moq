@@ -46,7 +46,7 @@ pub struct SocketTrace {
 }
 
 struct SocketTraceState {
-	backend: std::sync::Arc<crate::backend::Backend>,
+	backend: crate::backend::Handle,
 	trace_id: u64,
 }
 
