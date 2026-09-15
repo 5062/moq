@@ -3919,9 +3919,9 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libc"
-version = "0.2.186"
+version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libloading"
@@ -4649,6 +4649,7 @@ name = "moq-trace"
 version = "0.1.0"
 dependencies = [
  "moq-trace-lttng-sys",
+ "quic-trace",
 ]
 
 [[package]]
@@ -6427,6 +6428,23 @@ dependencies = [
  "wasi",
  "web-sys",
  "winapi",
+]
+
+[[package]]
+name = "quic-trace"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "quic-trace-lttng-sys",
+]
+
+[[package]]
+name = "quic-trace-lttng-sys"
+version = "0.1.0"
+dependencies = [
+ "bindgen 0.73.2",
+ "cc",
+ "pkg-config",
 ]
 
 [[package]]

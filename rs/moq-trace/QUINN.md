@@ -22,8 +22,9 @@ crate versions this repository previously vendored. Cargo patches both crates to
 the same fork revision so Quinn uses one coherent workspace source.
 
 The fork declares an optional `moq-trace` dependency by version. This repository
-patches crates.io `moq-trace` back to `rs/moq-trace` so Quinn and MoQ share the
-same trace crate instance and the same process-global trace handle.
+patches crates.io `moq-trace` to the sibling tracing toolkit during local
+development. MoQ and transport hooks therefore use the same process-global
+facade and emit the toolkit's `moq_trace:*` and `quic_trace:*` providers.
 
 The RX packet envelope starts before Quinn's initial protected-header parse.
 `routing` covers the remainder of endpoint processing through the connection

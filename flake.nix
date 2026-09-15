@@ -266,7 +266,6 @@
             moq-relay
             moq-cli
             moq-bench
-            moq-trace
             moq-token
             moq-token-cli
             moq-boy

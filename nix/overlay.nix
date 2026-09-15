@@ -75,37 +75,6 @@ let
     cargoExtraArgs = "-p moq-bench";
   };
 
-  moqTracePackage = final.python3Packages.buildPythonApplication {
-    pname = "moq-trace";
-    version = "0.1.0";
-    pyproject = true;
-    src = ../tools/moq-trace;
-    build-system = [ final.python3Packages.setuptools ];
-    dependencies = with final.python3Packages; [
-      babeltrace2
-      duckdb
-      matplotlib
-      pyarrow
-      pydantic
-    ];
-    nativeBuildInputs = [ final.makeWrapper ];
-    postFixup = ''
-      wrapProgram $out/bin/moq-trace \
-        --prefix PATH : ${
-          final.lib.makeBinPath [
-            final.lttng-tools
-            final.openssh
-            final.util-linux
-          ]
-        }
-    '';
-    meta = {
-      description = "Capture and analyze MoQ relay latency experiments";
-      mainProgram = "moq-trace";
-      platforms = final.lib.platforms.linux;
-    };
-  };
-
   libmoqInfo = crateInfo ../rs/libmoq/Cargo.toml;
 
   # The native libraries an external linker must pass alongside libmoq.a.
@@ -297,8 +266,6 @@ in
 
   moq-bench = craneLib.buildPackage moqBenchArgs;
   moq-bench-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqBenchArgs);
-
-  moq-trace = moqTracePackage;
 
   moq-token = moqTokenPackage;
   moq-token-cli = moqTokenPackage;
