@@ -116,11 +116,8 @@
           ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
             # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
             pkgs.release-plz
-            # The trace crates build an LTTng-UST provider. The Python tool
-            # records and inspects CTF traces during experiments.
+            # The trace crates (`--features trace`) build an LTTng-UST provider.
             pkgs.lttng-ust
-            pkgs.lttng-tools
-            pkgs.babeltrace2
             # cpal's `alsa-sys` (moq-audio `capture` feature) links libasound on
             # Linux via pkg-config; macOS uses CoreAudio, so no dep there.
             pkgs.alsa-lib
@@ -151,17 +148,7 @@
         # Python dependencies
         pyDeps = with pkgs; [
           uv
-          (python3.withPackages (
-            pythonPackages:
-            with pythonPackages;
-            [
-              duckdb
-              matplotlib
-              pyarrow
-              pydantic
-            ]
-            ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [ babeltrace2 ]
-          ))
+          python3
         ];
 
         # CDN/deployment dependencies
