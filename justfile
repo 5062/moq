@@ -125,6 +125,17 @@ build:
     if command -v uv &> /dev/null; then just py build; fi
     if command -v wasm-bindgen &> /dev/null; then just wasm; fi
 
+# Build the traced relay against the transport forks in rs/trace.toml.
+trace-build *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # The fork patches rewrite Cargo.lock; put the committed one back afterwards.
+    lock=$(mktemp)
+    cp Cargo.lock "$lock"
+    trap 'mv "$lock" Cargo.lock' EXIT
+    cargo build --release --config rs/trace.toml -p moq-relay --features moq-relay/trace {{ args }}
+
 # Build browser/WASM bindings into @moq/wasm using the pinned wasm-bindgen toolchain.
 wasm:
     cargo build -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release

@@ -30,6 +30,7 @@ pub fn start<S: web_transport_trait::Session>(
 	// GOAWAY channel; `None` lets the uni loop read the SETUP itself.
 	peer_setup: Option<Reader<S::RecvStream, crate::Version>>,
 ) -> Result<MaybeSendBox<'static, Result<(), Error>>, Error> {
+	let trace = crate::trace::session_handle(&session);
 	let driver = async move {
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
@@ -46,9 +47,16 @@ pub fn start<S: web_transport_trait::Session>(
 				let control = Control::new(request_id_max, client);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
-				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), stats.clone(), version);
+				let publisher = Publisher::new(
+					adapter.clone(),
+					publish,
+					control.clone(),
+					stats.clone(),
+					trace.clone(),
+					version,
+				);
 				let (tasks, mut task_set) = TaskSet::new();
-				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, stats, version, tasks);
+				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, stats, trace, version, tasks);
 
 				let dispatch_session = adapter.clone();
 				let mut sub_ns = subscriber.clone();
@@ -119,9 +127,16 @@ pub fn start<S: web_transport_trait::Session>(
 				};
 
 				let control = Control::new(None, client);
-				let publisher = Publisher::new(session.clone(), publish, control.clone(), stats.clone(), version);
+				let publisher = Publisher::new(
+					session.clone(),
+					publish,
+					control.clone(),
+					stats.clone(),
+					trace.clone(),
+					version,
+				);
 				let (tasks, mut task_set) = TaskSet::new();
-				let subscriber = Subscriber::new(session.clone(), subscribe, control, stats, version, tasks);
+				let subscriber = Subscriber::new(session.clone(), subscribe, control, stats, trace, version, tasks);
 
 				let sub_ns_session = session.clone();
 				let mut sub_ns = subscriber.clone();

@@ -1,3 +1,4 @@
+use crate::trace;
 use crate::{group, origin, stats, track};
 use std::{collections::HashMap, task::Poll};
 
@@ -20,6 +21,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	origin: origin::Consumer,
 	control: Control,
 	stats: stats::Handle,
+	trace: trace::Handle,
 	/// Per-session egress broadcast-subscription tracker. Each downstream
 	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts
 	/// the distinct sessions (viewers) watching each broadcast.
@@ -28,13 +30,21 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
-	pub fn new(session: S, origin: origin::Consumer, control: Control, stats: stats::Handle, version: Version) -> Self {
+	pub fn new(
+		session: S,
+		origin: origin::Consumer,
+		control: Control,
+		stats: stats::Handle,
+		trace: trace::Handle,
+		version: Version,
+	) -> Self {
 		let broadcasts = stats.publisher_broadcasts();
 		Self {
 			session,
 			origin,
 			control,
 			stats,
+			trace,
 			broadcasts,
 			version,
 		}
@@ -315,6 +325,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let priority = track.subscription().priority;
+			let trace = self.trace.clone();
 			tasks.push(
 				Self::run_group(
 					self.session.clone(),
@@ -322,6 +333,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					priority,
 					group,
 					track_stats.clone(),
+					trace,
 					self.version,
 				)
 				.map(|_| ()),
@@ -335,6 +347,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		priority: u8,
 		mut group: group::Consumer,
 		track_stats: std::sync::Arc<stats::PublisherTrack>,
+		trace: trace::Handle,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
@@ -344,8 +357,24 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		stream.encode(&msg).await?;
 		track_stats.group();
+		let mut object_id = 0;
 
 		loop {
+			// Waiting borrows the stream, so capture its transport position first.
+			let offset_start = stream.offset();
+			let stream_id = stream.stream_id();
+			let context = |frame: group::FrameIdentity| {
+				let context = trace::ObjectContext::new(
+					trace::Direction::Tx,
+					trace::ObjectIdentity::new(msg.track_alias, msg.group_id, object_id),
+					trace::LogicalId::new(frame.group, frame.frame),
+				)
+				.with_stream_offset_start(offset_start);
+				match stream_id {
+					Some(stream_id) => context.with_stream_id(stream_id),
+					None => context,
+				}
+			};
 			// Wait for the next frame, bailing if the peer closes the stream first.
 			let frame = {
 				let mut closed = std::pin::pin!(stream.closed());
@@ -353,35 +382,41 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					if waiter.poll_future(closed.as_mut()).is_ready() {
 						return Poll::Ready(Err(Error::Cancel));
 					}
-					group.poll_next_frame(waiter)
+					group.poll_next_frame_traced(waiter, &trace, context)
 				})
 				.await
 			};
 
-			let mut frame = match frame? {
+			let (mut frame, mut object) = match frame? {
 				Some(frame) => frame,
 				None => break,
 			};
+			object_id += 1;
+			// Flow control can block the header write, so only the polls that encode count.
+			object
+				.measure(trace::ObjectPhase::HeaderEncode, async {
+					// Object ID delta is always 0.
+					stream.encode(&0u64).await?;
 
-			// object id delta is always 0.
-			stream.encode(&0u64).await?;
+					// Per-object extension headers carry the frame presentation timestamp.
+					if msg.flags.has_extensions {
+						let mut ext = bytes::BytesMut::new();
+						ietf::encode_object_time(&mut ext, frame.timestamp, version)?;
+						stream.encode(&(ext.len() as u64)).await?;
+						stream.write_chunk(ext.freeze()).await?;
+					}
 
-			// Per-object extension headers carry the frame's presentation timestamp.
-			if msg.flags.has_extensions {
-				let mut ext = bytes::BytesMut::new();
-				ietf::encode_object_time(&mut ext, frame.timestamp, version)?;
-				stream.encode(&(ext.len() as u64)).await?;
-				stream.write_chunk(ext.freeze()).await?;
-			}
-
-			// Write the size of the frame.
-			stream.encode(&frame.size).await?;
+					stream.encode(&frame.size).await?;
+					if frame.size == 0 {
+						stream.encode(&0u8).await?;
+					}
+					Ok::<_, Error>(())
+				})
+				.await?;
+			object.set_stream_offset_end(stream.offset());
 			track_stats.frame();
 
-			if frame.size == 0 {
-				// Have to write the object status too.
-				stream.encode(&0u8).await?;
-			} else {
+			if frame.size != 0 {
 				// Stream each chunk of the frame.
 				loop {
 					let chunk = {
@@ -398,13 +433,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					match chunk? {
 						Some(chunk) => {
 							let n = chunk.len() as u64;
-							stream.write_chunk(chunk).await?;
+							// Time blocked on flow control belongs to no phase.
+							object
+								.measure(trace::ObjectPhase::PayloadWrite, stream.write_chunk(chunk))
+								.await?;
+							object.set_stream_offset_end(stream.offset());
 							track_stats.bytes(n);
 						}
 						None => break,
 					}
 				}
 			}
+
+			object.finish(trace::ObjectOutcome::Success);
 		}
 
 		stream.finish()?;

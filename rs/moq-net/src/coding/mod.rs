@@ -2,12 +2,16 @@
 
 mod decode;
 mod encode;
+mod position;
 mod reader;
 mod size;
 mod stream;
 mod varint;
 mod version;
 mod writer;
+
+#[cfg(all(test, feature = "trace"))]
+mod test;
 
 pub use decode::*;
 pub use encode::*;

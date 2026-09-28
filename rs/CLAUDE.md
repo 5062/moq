@@ -51,6 +51,17 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 
 When you change `moq-ffi`'s surface, mirror it in `libmoq` and the language wrappers (see the Cross-Package Sync table in root).
 
+## Tracing (moq-trace)
+
+`moq-trace` is not a workspace crate. It lives in the external toolkit ([5062/moq-trace](https://github.com/5062/moq-trace)), which owns the event providers, Rust and C++ facades, capture tool, and analysis. This repository only owns hook placement in `moq-net`, `moq-relay`, and the Quinn fork. Events are emitted under `moq_trace:*` (MoQ objects) and `quic_trace:*` (transport).
+
+- **Opt-in**: `moq-trace` is a git dependency of `moq-net`. Without `lttng` it is a pure-Rust no-op facade, so default builds type-check the hook sites against the real API while emitting nothing; `moq-net`'s `trace` feature turns on `moq-trace/lttng`. Default builds use upstream `quinn` and `web-transport-*`. `Cargo.lock` pins the toolkit revision; `cargo update -p moq-trace` picks up newer commits.
+- **Forks**: `trace` needs the transport forks, which `rs/trace.toml` patches in (`cargo --config rs/trace.toml`). They report stream and connection identity through `web-transport-trait` and emit `quic_trace:*` events whenever they are compiled, so no fork-side feature exists for this workspace to name (Cargo rejects a feature reference that upstream lacks, even when unused). `quinn` and `quinn-proto` come from [5062/quinn](https://github.com/5062/quinn) branch `moq-trace/quinn-0.11` (based on `quinn` 0.11.11); `web-transport-quinn` and `web-transport-trait` from [5062/web-transport](https://github.com/5062/web-transport). `rs/trace.toml` pins each by `rev`: to refresh, rebase the branch onto the new upstream tag, push, and update the `rev`. The forks depend on `moq-trace` by version, and the crates.io patch there points at the same git source as the workspace dependency, so MoQ and transport hooks share one process-global facade.
+- **Local checkouts**: point the `rs/trace.toml` entries at `path = "..."` (add a `[patch."https://github.com/5062/moq-trace"]` entry for `moq-trace` too), and don't commit that.
+- **CI**: `trace` can't build against upstream crates, so `just rs ci` enables every workspace feature except `trace` instead of `--all-features`.
+- **Build**: `just trace-build` builds the instrumented relay with `rs/trace.toml`, then restores the committed `Cargo.lock` (the patches rewrite it). Extra args pass through to `cargo build`. The benchmark peers live in the toolkit's `moq-bench/`, not in `rs/moq-bench`.
+- **Outside consumers**: patches apply only at the workspace root, so a workspace that depends on this branch (such as the toolkit's `moq-bench/`) must repeat the `rs/trace.toml` patches and also patch the `moq-trace` git source, or it links two separate facades.
+
 ## Producer / Consumer Model (moq-net)
 
 The whole stack is built on a split-handle pattern: a `Producer` writes, one or more `Consumer`s read, state is shared via `kio`. This recurs in moq-net, moq-mux, moq-json.

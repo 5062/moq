@@ -14,6 +14,8 @@ use crate::{Timescale, track};
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
+#[cfg(feature = "trace")]
+use std::sync::OnceLock;
 use std::task::{Poll, ready};
 
 use crate::{Error, IntoBytes, Result, Timestamp};
@@ -24,6 +26,16 @@ use crate::{Error, IntoBytes, Result, Timestamp};
 /// larger declared size is refused before allocating), so one maximum-size frame can
 /// fill a group's cache.
 const MAX_GROUP_CACHE: u64 = 32 * 1024 * 1024; // 32 MB
+
+/// The process-unique trace identity of a group, shared by every handle to it.
+///
+/// It stays unset until a traced ingress path claims the group, and outbound copies
+/// are traced only once it is set. A group that arrived by an uninstrumented path
+/// therefore produces no outbound trace, because the analysis requires every
+/// outbound copy to pair with exactly one inbound lifecycle. Handles share the cell
+/// rather than copying a value, so a consumer created before the claim still sees it.
+#[cfg(feature = "trace")]
+type TraceInstance = Arc<OnceLock<u64>>;
 
 /// A group contains a sequence number because they can arrive out of order.
 ///
@@ -82,6 +94,12 @@ impl From<u16> for Info {
 pub(crate) struct Partial {
 	timestamp: Timestamp,
 	buf: FrameBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FrameIdentity {
+	pub(crate) group: u64,
+	pub(crate) frame: u64,
 }
 
 /// Shared group state. `pub(crate)` so [`frame`] handles can observe the abort flag
@@ -220,6 +238,10 @@ pub struct Producer {
 	// timestamp into the track scale before it enters the stream. Threaded down by
 	// value from [`track::Producer::create_group`] / `append_group`.
 	track: track::Info,
+
+	// Trace identity shared with every consumer of this group.
+	#[cfg(feature = "trace")]
+	trace_instance: TraceInstance,
 }
 
 impl std::ops::Deref for Producer {
@@ -246,7 +268,13 @@ impl Producer {
 		let weak = state.weak();
 		let charge = track.broadcast.origin.pool.register(Box::new(move || evict(&weak)));
 		state.write().ok().expect("a new group is open").charge = charge;
-		Self { info, state, track }
+		Self {
+			info,
+			state,
+			track,
+			#[cfg(feature = "trace")]
+			trace_instance: TraceInstance::default(),
+		}
 	}
 
 	/// The group header.
@@ -257,6 +285,24 @@ impl Producer {
 	/// The parent track's timescale.
 	pub fn timescale(&self) -> Timescale {
 		self.track.timescale
+	}
+
+	/// Return the trace identity of the next frame, claiming the group for tracing.
+	///
+	/// Only a traced ingress path may call this, because the claim is what lets
+	/// consumers trace their outbound copies of the group's frames.
+	#[cfg(feature = "trace")]
+	pub(crate) fn next_frame_identity(&self) -> FrameIdentity {
+		let group = *self.trace_instance.get_or_init(crate::trace::next_logical_group);
+		FrameIdentity {
+			group,
+			frame: self.frame_count() as u64,
+		}
+	}
+
+	#[cfg(not(feature = "trace"))]
+	pub(crate) fn next_frame_identity(&self) -> FrameIdentity {
+		FrameIdentity { group: 0, frame: 0 }
 	}
 
 	/// A helper method to write a frame from a single byte buffer.
@@ -402,6 +448,8 @@ impl Producer {
 			info: self.info,
 			state: self.state.consume(),
 			track: self.track.clone(),
+			#[cfg(feature = "trace")]
+			trace_instance: self.trace_instance.clone(),
 			index: 0,
 			prefetch: Prefetch::default(),
 		}
@@ -434,6 +482,8 @@ impl Clone for Producer {
 			info: self.info,
 			state: self.state.clone(),
 			track: self.track.clone(),
+			#[cfg(feature = "trace")]
+			trace_instance: self.trace_instance.clone(),
 		}
 	}
 }
@@ -531,6 +581,10 @@ pub struct Consumer {
 	// wire publisher emit per-frame timestamps at the right scale for a fetched group.
 	track: track::Info,
 
+	// Trace identity shared with the group producer.
+	#[cfg(feature = "trace")]
+	trace_instance: TraceInstance,
+
 	// The number of frames we've read.
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
 	index: usize,
@@ -547,6 +601,8 @@ impl Clone for Consumer {
 			state: self.state.clone(),
 			info: self.info,
 			track: self.track.clone(),
+			#[cfg(feature = "trace")]
+			trace_instance: self.trace_instance.clone(),
 			index: self.index,
 			prefetch: Prefetch::default(),
 		}
@@ -562,6 +618,21 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
+	/// Return the trace identity of the frame at `index`, if a traced ingress path
+	/// has claimed the group.
+	#[cfg(feature = "trace")]
+	fn frame_identity(&self, index: usize) -> Option<FrameIdentity> {
+		self.trace_instance.get().map(|&group| FrameIdentity {
+			group,
+			frame: index as u64,
+		})
+	}
+
+	#[cfg(not(feature = "trace"))]
+	fn frame_identity(&self, _index: usize) -> Option<FrameIdentity> {
+		None
+	}
+
 	/// The parent track's timescale.
 	pub fn timescale(&self) -> Timescale {
 		self.track.timescale
@@ -588,6 +659,40 @@ impl Consumer {
 	///
 	/// Returns None if the group is finished and the index is out of range.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+		let Some((info, source)) = ready!(self.poll_next_frame_source(waiter)?) else {
+			return Poll::Ready(Ok(None));
+		};
+		Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))))
+	}
+
+	/// Poll for the next frame and start an outbound trace of it.
+	///
+	/// `context` builds the trace metadata from the frame's identity. The identity is
+	/// read only once the frame is ready, because the ingress path claims the group
+	/// just before creating its first frame, which may be after this consumer began
+	/// waiting. A group no traced ingress path claimed yields a disabled trace.
+	pub(crate) fn poll_next_frame_traced(
+		&mut self,
+		waiter: &kio::Waiter,
+		trace: &crate::trace::Handle,
+		context: impl Fn(FrameIdentity) -> crate::trace::ObjectContext,
+	) -> Poll<Result<Option<(frame::Consumer, crate::trace::ObjectTrace)>>> {
+		// The source poll advances `index` past the frame it returns.
+		let index = self.index;
+		let Some((info, source)) = ready!(self.poll_next_frame_source(waiter)?) else {
+			return Poll::Ready(Ok(None));
+		};
+		let mut object = match self.frame_identity(index) {
+			Some(identity) => trace.object(context(identity).with_payload_bytes(info.size)),
+			None => crate::trace::ObjectTrace::disabled(),
+		};
+		let clone = object.phase(crate::trace::ObjectPhase::Clone);
+		let frame = frame::Consumer::new(self.state.clone(), info, source);
+		clone.finish(crate::trace::ObjectOutcome::Success);
+		Poll::Ready(Ok(Some((frame, object))))
+	}
+
+	fn poll_next_frame_source(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<(frame::Info, frame::Source)>>> {
 		// Hand out any frames a prior read_frame prefetched before touching the tail.
 		if let Some(frame) = self.prefetch.pop() {
 			self.index += 1;
@@ -595,17 +700,16 @@ impl Consumer {
 				size: frame.payload.len() as u64,
 				timestamp: frame.timestamp,
 			};
-			let source = frame::Source::Complete(frame.payload);
-			return Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))));
+			return Poll::Ready(Ok(Some((info, frame::Source::Complete(frame.payload)))));
 		}
 
 		let index = self.index;
-		let Some((info, source)) = ready!(self.poll(waiter, |state| state.poll_frame_source(index))?) else {
+		let Some(source) = ready!(self.poll(waiter, |state| state.poll_frame_source(index))?) else {
 			return Poll::Ready(Ok(None));
 		};
 
 		self.index += 1;
-		Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))))
+		Poll::Ready(Ok(Some(source)))
 	}
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.
@@ -904,6 +1008,60 @@ mod test {
 		assert_eq!(state.offset, 1);
 		assert_eq!(state.frames.len(), 1);
 		assert_eq!(state.frames[0].payload.len(), MAX_GROUP_CACHE as usize);
+	}
+
+	#[cfg(feature = "trace")]
+	#[test]
+	fn producer_and_consumers_derive_the_same_frame_identity() {
+		let mut producer = Info { sequence: 0 }.produce();
+		// Consumers created before the claim must still see it.
+		let mut consumer = producer.consume();
+		let clone = consumer.clone();
+		assert_eq!(consumer.frame_identity(consumer.index), None);
+
+		let first = producer.next_frame_identity();
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+			.unwrap();
+
+		assert_eq!(consumer.frame_identity(consumer.index), Some(first));
+		assert_eq!(clone.frame_identity(clone.index), Some(first));
+		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+
+		assert_eq!(
+			consumer.frame_identity(consumer.index),
+			Some(producer.next_frame_identity())
+		);
+	}
+
+	/// A group no traced ingress path claimed yields untraced outbound frames, so an
+	/// outbound copy never lacks an inbound lifecycle to pair with.
+	#[cfg(feature = "trace")]
+	#[test]
+	fn unclaimed_groups_trace_no_outbound_frames() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+			.unwrap();
+		let mut consumer = producer.consume();
+
+		let waiter = kio::Waiter::noop();
+		let trace = crate::trace::Handle::disabled();
+		let built = std::cell::Cell::new(false);
+		let polled = consumer.poll_next_frame_traced(&waiter, &trace, |identity| {
+			built.set(true);
+			crate::trace::ObjectContext::new(
+				crate::trace::Direction::Tx,
+				crate::trace::ObjectIdentity::new(0, 0, 0),
+				crate::trace::LogicalId::new(identity.group, identity.frame),
+			)
+		});
+
+		assert!(matches!(polled, Poll::Ready(Ok(Some(_)))));
+		assert!(
+			!built.get(),
+			"an unclaimed group must not build outbound trace metadata"
+		);
 	}
 
 	#[test]

@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 
+use super::position::Position;
 use crate::{Error, coding::*, ietf};
 
 /// A wrapper around a [web_transport_trait::SendStream] that will reset on Drop.
@@ -7,16 +8,32 @@ pub struct Writer<S: web_transport_trait::SendStream, V> {
 	stream: Option<S>,
 	buffer: bytes::BytesMut,
 	version: V,
+	position: Position,
 }
 
 impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 	/// Create a new writer for the given stream and version.
 	pub fn new(stream: S, version: V) -> Self {
 		Self {
+			position: Position::send(&stream),
 			stream: Some(stream),
 			buffer: Default::default(),
 			version,
 		}
+	}
+
+	/// Return the underlying transport stream ID, when available.
+	pub(crate) fn stream_id(&self) -> Option<u64> {
+		self.position.stream_id()
+	}
+
+	/// Return the transport stream byte offset written by this writer.
+	pub(crate) fn offset(&self) -> u64 {
+		self.position.offset()
+	}
+
+	fn advance(&mut self, amount: usize) {
+		self.position.advance(amount);
 	}
 
 	/// Encode the given message to the stream.
@@ -28,24 +45,29 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		msg.encode(&mut self.buffer, self.version.clone())?;
 
 		while !self.buffer.is_empty() {
-			self.stream
+			let n = self
+				.stream
 				.as_mut()
 				.unwrap()
 				.write_buf(&mut self.buffer)
 				.await
 				.map_err(Error::from_transport)?;
+			self.advance(n);
 		}
 
 		Ok(())
 	}
 
 	pub(crate) async fn write<Buf: bytes::Buf + Send>(&mut self, buf: &mut Buf) -> Result<usize, Error> {
-		self.stream
+		let n = self
+			.stream
 			.as_mut()
 			.unwrap()
 			.write_buf(buf)
 			.await
-			.map_err(Error::from_transport)
+			.map_err(Error::from_transport)?;
+		self.advance(n);
+		Ok(n)
 	}
 
 	/// Write the entire `Buf` to the stream.
@@ -60,12 +82,15 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 
 	/// Write the entire [`bytes::Bytes`] chunk to the stream.
 	pub async fn write_chunk(&mut self, chunk: bytes::Bytes) -> Result<(), Error> {
+		let len = chunk.len();
 		self.stream
 			.as_mut()
 			.unwrap()
 			.write_chunk(chunk)
 			.await
-			.map_err(Error::from_transport)
+			.map_err(Error::from_transport)?;
+		self.advance(len);
+		Ok(())
 	}
 
 	/// Mark the stream as finished.
@@ -101,6 +126,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 			stream: self.stream.take(),
 			buffer: std::mem::take(&mut self.buffer),
 			version,
+			position: self.position,
 		}
 	}
 }
@@ -119,5 +145,21 @@ impl<S: web_transport_trait::SendStream, V> Drop for Writer<S, V> {
 			// Unlike the Quinn default, we abort the stream on drop.
 			stream.reset(Error::Cancel.to_code());
 		}
+	}
+}
+
+#[cfg(all(test, feature = "trace"))]
+mod tests {
+	use super::*;
+	use crate::coding::test;
+
+	#[tokio::test]
+	async fn transport_identity_uses_transport_offset() {
+		let mut writer = Writer::new(test::SendStream, ());
+
+		assert_eq!(writer.stream_id(), Some(17));
+		assert_eq!(writer.offset(), 3);
+		writer.write_chunk(bytes::Bytes::from_static(b"hello")).await.unwrap();
+		assert_eq!(writer.offset(), 8);
 	}
 }

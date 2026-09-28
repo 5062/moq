@@ -105,6 +105,8 @@
             cargo-semver-checks
             cargo-deny
             cargo-nextest
+            # `just rs ci` lists workspace features from `cargo metadata`.
+            jq
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just wasm`).
             # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the
             # crate is pinned to nixpkgs' CLI version); bump both together.
@@ -114,6 +116,8 @@
           ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
             # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
             pkgs.release-plz
+            # The trace crates (`--features trace`) build an LTTng-UST provider.
+            pkgs.lttng-ust
             # cpal's `alsa-sys` (moq-audio `capture` feature) links libasound on
             # Linux via pkg-config; macOS uses CoreAudio, so no dep there.
             pkgs.alsa-lib

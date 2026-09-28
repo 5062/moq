@@ -14,6 +14,8 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
+use crate::trace::{self, FinishResult as _};
+
 use super::{Message, Version};
 
 use web_async::Lock;
@@ -86,6 +88,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	origin: origin::Producer,
 	control: Control,
 	stats: stats::Handle,
+	trace: trace::Handle,
 	/// Per-session ingress broadcast-subscription tracker. Each upstream
 	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
 	/// distinct upstream sessions feeding each broadcast.
@@ -125,6 +128,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		origin: origin::Producer,
 		control: Control,
 		stats: stats::Handle,
+		trace: trace::Handle,
 		version: Version,
 		tasks: Tasks,
 	) -> Self {
@@ -134,6 +138,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			origin,
 			control,
 			stats,
+			trace,
 			broadcasts,
 			session_origin: crate::Origin::random(),
 			state: Default::default(),
@@ -951,48 +956,100 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		mut producer: group::Producer,
 		track_stats: Arc<stats::SubscriberTrack>,
 	) -> Result<(), Error> {
-		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
-			if id_delta != 0 {
-				tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
-				return Err(Error::Unsupported);
+		let mut object_id = 0;
+
+		loop {
+			if !stream.has_more().await? {
+				break;
 			}
+			let object_start = stream.offset();
+			let frame = producer.next_frame_identity();
+			let mut context = trace::ObjectContext::new(
+				trace::Direction::Rx,
+				trace::ObjectIdentity::new(group.track_alias, group.group_id, object_id),
+				trace::LogicalId::new(frame.group, frame.frame),
+			)
+			.with_stream_offset_start(object_start);
+			if let Some(stream_id) = stream.stream_id() {
+				context = context.with_stream_id(stream_id);
+			}
+			let mut object = self.trace.object(context);
+			object_id += 1;
+			// The header can straddle packets, so only the polls that parse count.
+			let version = self.version;
+			let (timestamp, size, status) = object
+				.measure(trace::ObjectPhase::HeaderParse, async {
+					let id_delta = stream.decode::<u64>().await?;
+					if id_delta != 0 {
+						tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
+						return Err(Error::Unsupported);
+					}
 
-			// Per-object extension headers may carry the frame's presentation timestamp
-			// (Timestamp/Timescale Object Properties). Absent it, stamp the local receive time.
-			let timestamp = if group.flags.has_extensions {
-				let size: usize = stream.decode().await?;
-				let mut ext = stream.read_exact(size).await?;
-				ietf::decode_object_time(&mut ext, self.version)?
-			} else {
-				None
-			};
+					// Per-object extension headers may carry the frame presentation timestamp.
+					// Absent it, stamp the local receive time.
+					let timestamp = if group.flags.has_extensions {
+						let size: usize = stream.decode().await?;
+						let mut ext = stream.read_exact(size).await?;
+						ietf::decode_object_time(&mut ext, version)?
+					} else {
+						None
+					};
 
-			let size: u64 = stream.decode().await?;
-			if size == 0 {
-				let status: u64 = stream.decode().await?;
+					let size: u64 = stream.decode().await?;
+					let status = if size == 0 {
+						Some(stream.decode::<u64>().await?)
+					} else {
+						None
+					};
+					Ok::<_, Error>((timestamp, size, status))
+				})
+				.await?;
+			object.set_payload_bytes(size);
+			object.set_stream_offset_end(stream.offset());
+
+			if let Some(status) = status {
 				if status == 0 {
 					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-					let frame = producer.create_frame(frame::Info { size: 0, timestamp })?;
+					let frame = object
+						.phase(trace::ObjectPhase::Create)
+						.finish_result(producer.create_frame(frame::Info { size: 0, timestamp }))?;
 					track_stats.frame();
-					frame.finish()?;
+					object
+						.phase(trace::ObjectPhase::FrameCommit)
+						.finish_result(frame.finish())?;
+					object.set_stream_offset_end(stream.offset());
+					object.finish(trace::ObjectOutcome::Success);
 				} else if status == 3 && !group.flags.has_end {
+					// An end-of-group marker is a real wire object that carries only a
+					// header: nothing enters the model and nothing is forwarded, so its
+					// lifecycle ends here. Finishing it keeps it from reading as abandoned.
+					object.set_stream_offset_end(stream.offset());
+					object.finish(trace::ObjectOutcome::Success);
 					break;
 				} else {
+					object.finish(trace::ObjectOutcome::Failed);
 					return Err(Error::Unsupported);
 				}
 			} else {
-				// `create_frame` is the allocation chokepoint and rejects an oversized
-				// `size` before allocating, so no pre-check is needed.
+				// `create_frame` rejects an oversized `size` before allocating.
 				let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-				let mut frame = producer.create_frame(frame::Info { size, timestamp })?;
+				let mut frame = object
+					.phase(trace::ObjectPhase::Create)
+					.finish_result(producer.create_frame(frame::Info { size, timestamp }))?;
 				track_stats.frame();
 
-				if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
+				if let Err(err) = self.run_frame(stream, &mut frame, &track_stats, &mut object).await {
 					let _ = frame.abort(err.clone());
 					return Err(err);
 				}
 
-				frame.finish()?;
+				// Completion wakes consumers waiting for the whole frame, so it gets a
+				// final commit phase of its own.
+				object
+					.phase(trace::ObjectPhase::FrameCommit)
+					.finish_result(frame.finish())?;
+				object.set_stream_offset_end(stream.offset());
+				object.finish(trace::ObjectOutcome::Success);
 			}
 		}
 
@@ -1004,15 +1061,27 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		frame: &mut frame::Producer<'_>,
 		track_stats: &stats::SubscriberTrack,
+		object: &mut trace::ObjectTrace,
 	) -> Result<(), Error> {
 		while frame.remaining() > 0 {
-			match stream.read_chunk(frame.remaining()).await? {
-				Some(chunk) if !chunk.is_empty() => {
-					track_stats.bytes(chunk.len() as u64);
-					frame.write(chunk)?;
-				}
-				_ => return Err(Error::WrongSize),
-			}
+			// Only the polls that hand over bytes count; waiting for them does not.
+			let remaining = frame.remaining();
+			let chunk = object
+				.measure(trace::ObjectPhase::PayloadRead, async {
+					match stream.read_chunk(remaining).await? {
+						Some(chunk) if !chunk.is_empty() => Ok(chunk),
+						_ => Err(Error::WrongSize),
+					}
+				})
+				.await?;
+			object.set_stream_offset_end(stream.offset());
+			track_stats.bytes(chunk.len() as u64);
+
+			// Writing a chunk wakes consumers streaming the partial frame, so it is
+			// commit work rather than part of the read.
+			object
+				.phase(trace::ObjectPhase::FrameCommit)
+				.finish_result(frame.write(chunk))?;
 		}
 		Ok(())
 	}

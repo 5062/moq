@@ -362,6 +362,16 @@ pub enum AdapterSend<S: web_transport_trait::Session> {
 impl<S: web_transport_trait::Session> web_transport_trait::SendStream for AdapterSend<S> {
 	type Error = crate::Error;
 
+	// A virtual stream is multiplexed over the control stream, so it has no
+	// transport stream identity of its own.
+	#[cfg(feature = "trace")]
+	fn stream_id(&self) -> Option<web_transport_trait::StreamId> {
+		match self {
+			Self::Real(s) => s.stream_id(),
+			Self::Virtual(_) => None,
+		}
+	}
+
 	async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
 		match self {
 			Self::Real(s) => s.write(buf).await.map_err(|_| crate::Error::Closed),
@@ -419,6 +429,16 @@ pub enum AdapterRecv<S: web_transport_trait::Session> {
 
 impl<S: web_transport_trait::Session> web_transport_trait::RecvStream for AdapterRecv<S> {
 	type Error = crate::Error;
+
+	// A virtual stream is multiplexed over the control stream, so it has no
+	// transport stream identity of its own.
+	#[cfg(feature = "trace")]
+	fn stream_id(&self) -> Option<web_transport_trait::StreamId> {
+		match self {
+			Self::Real(s) => s.stream_id(),
+			Self::Virtual(_) => None,
+		}
+	}
 
 	async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
 		match self {

@@ -1,0 +1,14 @@
+# Cargo config for traced builds: `cargo build --config rs/trace.toml --features trace`.
+#
+# Swaps in the transport forks that carry the moq-trace hooks and expose stream
+# and connection identity. Patches rewrite Cargo.lock, so `just trace-build`
+# restores the committed lockfile afterwards; the fork revisions are pinned here.
+#
+# moq-trace must keep the same source as the workspace dependency, so the forks'
+# crates.io requirement resolves to the one process-global facade moq-net uses.
+[patch.crates-io]
+moq-trace = { git = "https://github.com/5062/moq-trace", branch = "main" }
+quinn = { git = "https://github.com/5062/quinn", rev = "8fdd327360992222590af37ce64375040c8337a1" }
+quinn-proto = { git = "https://github.com/5062/quinn", rev = "8fdd327360992222590af37ce64375040c8337a1" }
+web-transport-quinn = { git = "https://github.com/5062/web-transport", rev = "bf84a684d69ea255d315cc62eac5dce02600d830" }
+web-transport-trait = { git = "https://github.com/5062/web-transport", rev = "bf84a684d69ea255d315cc62eac5dce02600d830" }

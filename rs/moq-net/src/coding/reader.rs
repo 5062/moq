@@ -2,6 +2,7 @@ use std::{cmp, fmt::Debug, io};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+use super::position::Position;
 use crate::{Error, coding::*};
 
 /// A reader for decoding messages from a stream.
@@ -9,15 +10,31 @@ pub struct Reader<S: web_transport_trait::RecvStream, V> {
 	stream: S,
 	buffer: BytesMut,
 	version: V,
+	position: Position,
 }
 
 impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	pub fn new(stream: S, version: V) -> Self {
 		Self {
+			position: Position::recv(&stream),
 			stream,
 			buffer: Default::default(),
 			version,
 		}
+	}
+
+	/// Return the underlying transport stream ID, when available.
+	pub(crate) fn stream_id(&self) -> Option<u64> {
+		self.position.stream_id()
+	}
+
+	/// Return the transport stream byte offset consumed by this reader.
+	pub(crate) fn offset(&self) -> u64 {
+		self.position.offset()
+	}
+
+	fn advance(&mut self, amount: usize) {
+		self.position.advance(amount);
 	}
 
 	/// Decode the next message from the stream.
@@ -29,7 +46,9 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 			let mut cursor = io::Cursor::new(&self.buffer);
 			match T::decode(&mut cursor, self.version.clone()) {
 				Ok(msg) => {
-					self.buffer.advance(cursor.position() as usize);
+					let consumed = cursor.position();
+					self.buffer.advance(consumed as usize);
+					self.advance(consumed as usize);
 					return Ok(msg);
 				}
 				Err(DecodeError::Short) => {
@@ -90,15 +109,21 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	pub async fn read_chunk(&mut self, max: usize) -> Result<Option<Bytes>, Error> {
 		if !self.buffer.is_empty() {
 			let n = cmp::min(self.buffer.len(), max);
+			self.advance(n);
 			return Ok(Some(self.buffer.split_to(n).freeze()));
 		}
-		self.stream.read_chunk(max).await.map_err(Error::from_transport)
+		let chunk = self.stream.read_chunk(max).await.map_err(Error::from_transport)?;
+		if let Some(chunk) = &chunk {
+			self.advance(chunk.len());
+		}
+		Ok(chunk)
 	}
 
 	/// Read exactly the given number of bytes from the stream.
 	pub async fn read_exact(&mut self, size: usize) -> Result<Bytes, Error> {
 		// An optimization to avoid a copy if we have enough data in the buffer
 		if self.buffer.len() >= size {
+			self.advance(size);
 			return Ok(self.buffer.split_to(size).freeze());
 		}
 
@@ -107,11 +132,14 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 
 		let size = cmp::min(buf.remaining_mut(), self.buffer.len());
 		let data = self.buffer.split_to(size);
+		self.advance(size);
 		buf.put(data);
 
 		while buf.has_remaining_mut() {
 			match self.stream.read_buf(&mut buf).await {
-				Ok(Some(_)) => {}
+				Ok(Some(n)) => {
+					self.advance(n);
+				}
 				Ok(None) => return Err(DecodeError::Short.into()),
 				Err(e) => return Err(Error::from_transport(e)),
 			}
@@ -130,7 +158,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	}
 
 	/// Returns true if there is more data available in the buffer or stream.
-	async fn has_more(&mut self) -> Result<bool, Error> {
+	pub(crate) async fn has_more(&mut self) -> Result<bool, Error> {
 		if !self.buffer.is_empty() {
 			return Ok(true);
 		}
@@ -158,6 +186,37 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 			stream: self.stream,
 			buffer: self.buffer,
 			version,
+			position: self.position,
 		}
+	}
+}
+
+#[cfg(all(test, feature = "trace"))]
+mod tests {
+	use super::*;
+	use crate::coding::test;
+
+	#[tokio::test]
+	async fn transport_identity_uses_transport_offset() {
+		let mut reader = Reader::new(test::RecvStream::new(b"hello"), ());
+
+		assert_eq!(reader.stream_id(), Some(17));
+		assert_eq!(reader.offset(), 3);
+		assert_eq!(reader.read_chunk(5).await.unwrap().unwrap(), b"hello"[..]);
+		assert_eq!(reader.offset(), 8);
+	}
+
+	#[tokio::test]
+	async fn has_more_buffers_without_advancing_offset() {
+		let mut reader = Reader::new(
+			test::RecvStream::new(b"\x07"),
+			crate::Version::Ietf(crate::ietf::Version::Draft19),
+		);
+
+		assert!(reader.has_more().await.unwrap());
+		assert_eq!(reader.offset(), 3);
+		assert_eq!(reader.decode::<u64>().await.unwrap(), 7);
+		assert_eq!(reader.offset(), 4);
+		assert!(!reader.has_more().await.unwrap());
 	}
 }

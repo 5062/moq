@@ -85,6 +85,7 @@ mod util;
 mod version;
 
 pub mod stats;
+mod trace;
 
 pub use client::*;
 pub use coding::{BoundsExceeded, DecodeError, EncodeError, VarInt};
