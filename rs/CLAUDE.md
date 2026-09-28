@@ -39,7 +39,6 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 - `moq-srt` (lib): bidirectional SRT gateway (MPEG-TS via `srt-tokio` + `moq-mux`).
 - `moq-hls` (lib): HLS / LL-HLS gateway (import + export, playlists + fMP4 via `moq-mux`).
 - `moq-bench` (bin): relay load generator. `JoinSet`-spawned staggered connections, rand sampling.
-- `moq-trace`: opt-in instrumentation supplied by the sibling tracing toolkit. This repository owns the MoQ and Quinn hook placement; the toolkit owns the event providers, facades, capture orchestration, and analysis.
 - `moq-boy` (bin): crowd-controlled Game Boy emulator publisher (blocking emulator thread + async monitor tasks).
 - `moq-token` (lib) / `moq-token` (bin from the `moq-token-cli` crate): JWT auth. `Claims`, `Algorithm`, `KeyType` (EC/RSA/OCT/OKP), JWKS. CLI does generate/sign/verify.
 
@@ -51,6 +50,15 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 - `moq-wasm` (cdylib+rlib): browser/WASM bindings, `wasm-bindgen` over `moq-net`. Consumed by `js/wasm` (`@moq/wasm`); build via `just wasm`.
 
 When you change `moq-ffi`'s surface, mirror it in `libmoq` and the language wrappers (see the Cross-Package Sync table in root).
+
+## Tracing (moq-trace)
+
+`moq-trace` is not a workspace crate. It lives in the external toolkit ([5062/moq-trace](https://github.com/5062/moq-trace)), which owns the event providers, Rust and C++ facades, capture tool, and analysis. This repository only owns hook placement in `moq-net`, `moq-relay`, and the Quinn fork. Events are emitted under `moq_trace:*` (MoQ objects) and `quic_trace:*` (transport).
+
+- **Source**: root `Cargo.toml` `[patch.crates-io]` pulls `moq-trace` from the toolkit's `main` branch; `Cargo.lock` pins the revision. `cargo update -p moq-trace` picks up newer toolkit commits. To build against a local checkout, pass `--config 'patch.crates-io.moq-trace.path="../moq-trace2/crates/moq-trace"'`; that rewrites `Cargo.lock`, so restore it before committing.
+- **Quinn fork**: `quinn` and `quinn-proto` are both patched to the same revision of [5062/quinn](https://github.com/5062/quinn) branch `moq-trace/quinn-0.11` (based on `quinn-proto-0.11.16`, i.e. `quinn` 0.11.11). The fork depends on `moq-trace` by version, so the same crates.io patch makes MoQ and transport hooks share one process-global facade. To refresh it, rebase that branch onto the new upstream tag, push, then `cargo update -p quinn -p quinn-proto`.
+- **RX timing**: the RX packet envelope starts before Quinn's initial protected-header parse. `routing` covers the rest of endpoint processing through the connection channel send; `scheduling` covers the channel wait until the connection task enters the datagram handler, and can overlap QUIC processing of earlier packets queued to the same connection.
+- **Build**: `just trace-build` builds the instrumented relay (`--features trace`) and `moq-bench`.
 
 ## Producer / Consumer Model (moq-net)
 
