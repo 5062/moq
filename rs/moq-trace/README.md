@@ -2,12 +2,16 @@
 
 This repository keeps the instrumentation calls in `moq-net`, `moq-relay`, and
 the pinned Quinn fork. The event providers, Rust and C++ facades, capture tool,
-and combined analysis live in the sibling `moq-trace2` repository during local
-development.
+and combined analysis live in the
+[moq-trace](https://github.com/5062/moq-trace) toolkit repository.
 
-The workspace resolves `moq-trace` from
-`../moq-trace2/crates/moq-trace`. Once the toolkit has a published repository,
-replace that bootstrap path with a pinned remote or registry dependency.
+The workspace resolves `moq-trace` from that repository's `main` branch through
+`[patch.crates-io]`, and `Cargo.lock` pins the revision. Run
+`cargo update -p moq-trace` to pick up newer toolkit commits. To build against a
+local toolkit checkout instead, pass
+`--config 'patch.crates-io.moq-trace.path="../moq-trace2/crates/moq-trace"'`.
+That rewrites `Cargo.lock` to the local path, so restore it before committing.
+Once the toolkit ships a registry release, replace the git source with it.
 
 Build the instrumented relay and benchmark with:
 

@@ -360,16 +360,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut object_id = 0;
 
 		loop {
-			let frame = group.next_frame_identity();
-			let mut context = trace::ObjectContext::new(
-				trace::Direction::Tx,
-				trace::ObjectIdentity::new(msg.track_alias, msg.group_id, object_id),
-				trace::LogicalId::new(frame.group, frame.frame),
-			)
-			.with_stream_offset_start(stream.offset());
-			if let Some(stream_id) = stream.stream_id() {
-				context = context.with_stream_id(stream_id);
-			}
+			// Waiting borrows the stream, so capture its transport position first.
+			let offset_start = stream.offset();
+			let stream_id = stream.stream_id();
+			let context = |frame: group::FrameIdentity| {
+				let context = trace::ObjectContext::new(
+					trace::Direction::Tx,
+					trace::ObjectIdentity::new(msg.track_alias, msg.group_id, object_id),
+					trace::LogicalId::new(frame.group, frame.frame),
+				)
+				.with_stream_offset_start(offset_start);
+				match stream_id {
+					Some(stream_id) => context.with_stream_id(stream_id),
+					None => context,
+				}
+			};
 			// Wait for the next frame, bailing if the peer closes the stream first.
 			let frame = {
 				let mut closed = std::pin::pin!(stream.closed());
@@ -377,7 +382,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					if waiter.poll_future(closed.as_mut()).is_ready() {
 						return Poll::Ready(Err(Error::Cancel));
 					}
-					group.poll_next_frame_traced(waiter, &trace, &context)
+					group.poll_next_frame_traced(waiter, &trace, context)
 				})
 				.await
 			};
