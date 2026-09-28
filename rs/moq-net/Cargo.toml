@@ -16,13 +16,14 @@ categories = ["multimedia", "network-programming", "web-programming"]
 ignored = ["getrandom"]
 
 [features]
+# Object tracing over LTTng. Needs the transport forks: build with `--config rs/trace.toml`.
 trace = ["moq-trace/lttng"]
 
 [dependencies]
 bytes = "1"
 futures = "0.3"
 kio = { workspace = true }
-moq-trace.workspace = true
+moq-trace = { workspace = true }
 num_enum = "0.7"
 rand = "0.10.1"
 serde = { workspace = true }

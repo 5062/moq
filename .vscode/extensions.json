@@ -2,6 +2,7 @@
 	"recommendations": [
 		// General
 		"jnoortheen.nix-ide",
+		"mkhl.direnv",
 		"EditorConfig.EditorConfig",
 
 		// Rust

@@ -364,6 +364,7 @@ impl<S: web_transport_trait::Session> web_transport_trait::SendStream for Adapte
 
 	// A virtual stream is multiplexed over the control stream, so it has no
 	// transport stream identity of its own.
+	#[cfg(feature = "trace")]
 	fn stream_id(&self) -> Option<web_transport_trait::StreamId> {
 		match self {
 			Self::Real(s) => s.stream_id(),
@@ -431,6 +432,7 @@ impl<S: web_transport_trait::Session> web_transport_trait::RecvStream for Adapte
 
 	// A virtual stream is multiplexed over the control stream, so it has no
 	// transport stream identity of its own.
+	#[cfg(feature = "trace")]
 	fn stream_id(&self) -> Option<web_transport_trait::StreamId> {
 		match self {
 			Self::Real(s) => s.stream_id(),

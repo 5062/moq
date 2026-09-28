@@ -30,11 +30,7 @@ pub fn start<S: web_transport_trait::Session>(
 	// GOAWAY channel; `None` lets the uni loop read the SETUP itself.
 	peer_setup: Option<Reader<S::RecvStream, crate::Version>>,
 ) -> Result<MaybeSendBox<'static, Result<(), Error>>, Error> {
-	let trace = crate::trace::session_handle().with_new_session_id();
-	let trace = match session.connection_id() {
-		Some(connection_id) => trace.with_connection_id(connection_id.into_inner()),
-		None => trace,
-	};
+	let trace = crate::trace::session_handle(&session);
 	let driver = async move {
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces

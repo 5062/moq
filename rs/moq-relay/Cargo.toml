@@ -24,7 +24,8 @@ jemalloc = ["moq-native/jemalloc"]
 noq = ["moq-native/noq"]
 quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
-trace = ["moq-native/trace", "moq-net/trace"]
+# MoQ object tracing. Build with `just trace-build`, which applies rs/trace.toml.
+trace = ["moq-net/trace"]
 websocket = ["moq-native/websocket", "dep:qmux", "axum/ws"]
 # Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
 # default set; drop via --no-default-features on platforms without Unix sockets.

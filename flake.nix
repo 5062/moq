@@ -105,6 +105,8 @@
             cargo-semver-checks
             cargo-deny
             cargo-nextest
+            # `just rs ci` lists workspace features from `cargo metadata`.
+            jq
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just wasm`).
             # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the
             # crate is pinned to nixpkgs' CLI version); bump both together.
