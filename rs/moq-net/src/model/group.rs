@@ -16,8 +16,6 @@ use std::mem::MaybeUninit;
 use std::sync::Arc;
 #[cfg(feature = "trace")]
 use std::sync::OnceLock;
-#[cfg(feature = "trace")]
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Poll, ready};
 
 use crate::{Error, IntoBytes, Result, Timestamp};
@@ -28,8 +26,6 @@ use crate::{Error, IntoBytes, Result, Timestamp};
 /// larger declared size is refused before allocating), so one maximum-size frame can
 /// fill a group's cache.
 const MAX_GROUP_CACHE: u64 = 32 * 1024 * 1024; // 32 MB
-#[cfg(feature = "trace")]
-static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The process-unique trace identity of a group, shared by every handle to it.
 ///
@@ -299,7 +295,7 @@ impl Producer {
 	pub(crate) fn next_frame_identity(&self) -> FrameIdentity {
 		let group = *self
 			.trace_instance
-			.get_or_init(|| NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed));
+			.get_or_init(crate::trace::next_logical_group);
 		FrameIdentity {
 			group,
 			frame: self.frame_count() as u64,
