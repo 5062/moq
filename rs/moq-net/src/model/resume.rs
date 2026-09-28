@@ -212,6 +212,14 @@ impl Producer {
 		state.switch(track, start)
 	}
 
+	/// The latest group sequence across the segments, clamped to their bounds.
+	///
+	/// The producer half of [`Consumer::latest`], for callers that have to know
+	/// whether the segments have produced anything yet.
+	pub(crate) fn latest(&self) -> Option<u64> {
+		self.state.read().latest()
+	}
+
 	/// Mark the logical track as complete: no further switches. Subscribers see a
 	/// clean end once the final segment's track finishes.
 	pub fn finish(&mut self) -> Result<()> {

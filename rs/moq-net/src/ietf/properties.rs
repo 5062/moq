@@ -13,10 +13,9 @@ use bytes::Buf;
 use crate::coding::{Decode, DecodeError};
 
 use super::Version;
+use super::parameters::skip_value;
 
 const MAX_PROPERTIES: u64 = 64;
-/// Maximum byte value length per spec Section 1.4.3.
-const MAX_KVP_VALUE_LEN: usize = (1 << 16) - 1;
 
 /// Parse and discard Track Properties from the remaining bytes of a message.
 ///
@@ -49,20 +48,7 @@ pub fn skip<R: Buf>(r: &mut R, version: Version) -> Result<(), DecodeError> {
 		prev_type = abs;
 		i += 1;
 
-		if abs % 2 == 0 {
-			// Even type: single varint value
-			let _ = u64::decode(r, version)?;
-		} else {
-			// Odd type: length-prefixed bytes
-			let len = u64::decode(r, version)? as usize;
-			if len > MAX_KVP_VALUE_LEN {
-				return Err(DecodeError::BoundsExceeded);
-			}
-			if r.remaining() < len {
-				return Err(DecodeError::Short);
-			}
-			r.advance(len);
-		}
+		skip_value(r, abs, version)?;
 	}
 
 	Ok(())

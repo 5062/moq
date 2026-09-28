@@ -939,10 +939,10 @@ impl Producer {
 	}
 }
 
-/// How many times serving a single track may fail before it is spliced in (the
-/// source rejected it, or its info never resolved) before the track is aborted
-/// instead of retried. Bounds the retry loop against a source that keeps
-/// rejecting one track.
+/// How many times serving a single track may fail without delivering a group
+/// before the track is aborted instead of retried. Bounds the retry loop against
+/// a source that keeps rejecting one track, whether it refuses the request, lets
+/// its info go unresolved, or accepts the request and then kills the copy.
 const MAX_TRACK_RETRIES: u32 = 3;
 
 /// One attached source in a [`FrontState`] table.
@@ -1226,11 +1226,12 @@ async fn run_front(
 
 /// Serves one spliced logical track: splices in the best source's copy of the
 /// track, re-splicing on handover or failure, until the track completes or the
-/// front closes. A rejection before a successful splice (the source refused the
-/// track, or its info never resolved) counts toward [`MAX_TRACK_RETRIES`] and
-/// then aborts the track as [`Error::Unroutable`]; failures after a splice (a
-/// serving session dying mid-stream) are normal failover and re-splice from the
-/// next source at the first missing group.
+/// front closes. A failure counts toward [`MAX_TRACK_RETRIES`], which aborts the
+/// track as [`Error::Unroutable`], until a copy delivers a group. A copy that
+/// dies after serving is normal failover and re-splices at the boundary; one
+/// that dies without serving anything was rejected, only too late for the
+/// pre-splice checks to see it, and re-splicing it forever would hammer the
+/// source with requests for a track it is not going to serve.
 async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resume: super::resume::Producer) {
 	enum Step {
 		Closed,
@@ -1242,6 +1243,9 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 	let mut fails = 0u32;
 	// The source whose copy is currently spliced in, and that copy.
 	let mut serving: Option<(u64, track::Consumer)> = None;
+	// The logical track's newest delivered group when the current copy was
+	// spliced in. A copy that dies without moving it served nothing.
+	let mut delivered = resume.latest();
 	// A source whose splice failed because it had already closed. Its watcher is
 	// about to detach it, so wait for the table to move on rather than burning
 	// the strike budget on a corpse (ids are never reused, so this cannot wedge).
@@ -1300,8 +1304,18 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 				return;
 			}
 			Step::Failed => {
-				// The spliced copy died mid-serve: failover, not a strike.
-				// Re-splice from the (possibly same) active source.
+				// A copy that delivered a group died mid-serve: failover, and the
+				// next source picks the track up at the boundary. One that died
+				// without delivering anything served nothing, so it was a rejection
+				// the pre-splice checks were too early to see.
+				if resume.latest() == delivered {
+					fails += 1;
+					if fails >= MAX_TRACK_RETRIES {
+						tracing::debug!(name = %name, "aborting unservable track");
+						let _ = resume.abort(Error::Unroutable);
+						return;
+					}
+				}
 				serving = None;
 			}
 			Step::Splice(id, source) => {
@@ -1353,9 +1367,14 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 							// aborted); nothing left to serve.
 							return;
 						}
-						// A successful splice proves the track servable: reset
-						// the strike budget.
-						fails = 0;
+						// The track moving past the last splice means a copy served, so
+						// the budget starts over. Splicing alone proves nothing: the copy
+						// can still die before it serves anything and strike above.
+						let latest = resume.latest();
+						if latest > delivered {
+							fails = 0;
+						}
+						delivered = latest;
 						dead = None;
 						serving = Some((id, track));
 					}
@@ -2520,14 +2539,18 @@ mod tests {
 		let subscribing = broadcast.track("video").unwrap().subscribe(None);
 
 		// Alternate a pre-splice failure with a successful splice, well past the
-		// retry cap; the resets keep the track alive.
-		for _ in 0..2 * MAX_TRACK_RETRIES {
+		// retry cap; each splice that serves a group resets the budget.
+		for sequence in 0..2 * MAX_TRACK_RETRIES as u64 {
 			let request = tokio::time::timeout(std::time::Duration::from_secs(1), dynamic.requested_track())
 				.await
 				.expect("timed out waiting for a retry")
 				.unwrap();
 			request.reject(Error::NotFound);
-			let producer = accept_track(&mut dynamic, "video").await;
+			let mut producer = accept_track(&mut dynamic, "video").await;
+			settle().await;
+			// Each accepted copy serves the next group before it dies, which is what
+			// makes its failure failover rather than a rejection.
+			producer.create_group(group::Info { sequence }).unwrap();
 			settle().await;
 			drop(producer);
 		}
@@ -2536,6 +2559,47 @@ mod tests {
 		settle().await;
 		let mut sub = subscribing.await.unwrap();
 		sub.assert_not_closed();
+	}
+
+	/// A source that accepts the track and then kills the copy without serving
+	/// anything is rejecting it, just too late for the pre-splice checks: it burns
+	/// the retry budget instead of driving a re-splice loop that never delivers.
+	#[tokio::test]
+	async fn test_serve_strikes_on_a_copy_that_never_serves() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+
+		// The first accepted copy establishes the subscription, then dies empty
+		// like every copy after it.
+		let first = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+		drop(first);
+		settle().await;
+
+		// The track never serves a group, so it must be aborted rather than
+		// re-spliced forever.
+		for _ in 1..MAX_TRACK_RETRIES {
+			let copy = accept_track(&mut dynamic, "video").await;
+			settle().await;
+			drop(copy);
+			settle().await;
+		}
+
+		sub.assert_error();
+		settle().await;
+		dynamic.assert_no_request();
 	}
 
 	/// A better source attaching mid-subscription takes the track over at an

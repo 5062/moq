@@ -10,7 +10,32 @@ use super::{FilterType, Location};
 
 const MAX_PARAMS: u64 = 64;
 /// Maximum byte value length in Key-Value-Pairs per spec Section 1.4.3.
-const MAX_KVP_VALUE_LEN: usize = (1 << 16) - 1;
+pub(crate) const MAX_KVP_VALUE_LEN: usize = (1 << 16) - 1;
+
+/// Skip the value of a Key-Value-Pair whose Type this version does not define.
+///
+/// The Type parity picks the encoding: even types carry a varint, odd types a
+/// length-prefixed byte string. Only the meaning is dropped; the value is still
+/// checked for framing so a skipped pair cannot desync the reader.
+pub(crate) fn skip_value<R: Buf>(r: &mut R, key: u64, version: Version) -> Result<(), DecodeError> {
+	if key % 2 == 0 {
+		u64::decode(r, version)?;
+		return Ok(());
+	}
+
+	let len = u64::decode(r, version)?;
+	if len > MAX_KVP_VALUE_LEN as u64 {
+		return Err(DecodeError::BoundsExceeded);
+	}
+
+	let len = len as usize;
+	if r.remaining() < len {
+		return Err(DecodeError::Short);
+	}
+
+	r.advance(len);
+	Ok(())
+}
 
 // ---- Setup Parameters (used in CLIENT_SETUP/SERVER_SETUP) ----
 
@@ -443,8 +468,12 @@ macro_rules! encode_params {
 /// optional parameters (defaults to `None` when absent) and bare types like `u8`
 /// for parameters where `T::default()` is an acceptable fallback.
 ///
-/// Unknown parameters cause `DecodeError::InvalidValue`.
-/// Duplicate parameters cause `DecodeError::Duplicate`.
+/// Parameters that aren't declared here are skipped, not rejected: a peer may
+/// send one that is only legal in another message type, or one this version does
+/// not model, and dropping the whole message over it loses the exchange. Skipped
+/// values are still checked for framing, so a malformed pair is still an error.
+///
+/// Duplicate parameters of a declared key cause `DecodeError::Duplicate`.
 ///
 /// ```ignore
 /// decode_params!(r, version,
@@ -505,7 +534,7 @@ macro_rules! decode_params {
 						}
 						$name = Some(<$ty as $crate::ietf::Param>::param_decode($r, _version)?);
 					})*
-					_ => return Err($crate::coding::DecodeError::InvalidValue),
+					_ => $crate::ietf::parameters::skip_value($r, _key, _version)?,
 				}
 			}
 		}
@@ -607,6 +636,15 @@ mod tests {
 		let mut bytes = buf.freeze();
 		decode_fn(&mut bytes, version).unwrap();
 		assert!(!bytes.has_remaining(), "buffer not fully consumed for {version}");
+	}
+
+	/// Encode one parameter key, delta-encoded from `prev` for draft-16 and later.
+	fn encode_key(w: &mut BytesMut, version: Version, prev: &mut u64, key: u64) {
+		match version {
+			Version::Draft14 | Version::Draft15 => key.encode(w, version).unwrap(),
+			_ => (key - *prev).encode(w, version).unwrap(),
+		}
+		*prev = key;
 	}
 
 	#[test]
@@ -861,8 +899,10 @@ mod tests {
 	}
 
 	#[test]
-	fn test_param_unknown_rejected() {
-		// Manually encode one param at key 0x10, try to decode expecting key 0x20
+	fn test_param_unknown_skipped() -> Result<(), DecodeError> {
+		// Undeclared keys are skipped: an even key carries a varint value, an odd key
+		// a length-prefixed one. Both sit on either side of the declared key so the
+		// loop has to keep its place mid-message.
 		for version in [
 			Version::Draft14,
 			Version::Draft15,
@@ -871,9 +911,46 @@ mod tests {
 			Version::Draft18,
 		] {
 			let mut buf = BytesMut::new();
+			3usize.encode(&mut buf, version).unwrap();
+
+			let mut prev = 0u64;
+			encode_key(&mut buf, version, &mut prev, 0x18);
+			7u64.encode(&mut buf, version).unwrap();
+
+			encode_key(&mut buf, version, &mut prev, 0x20);
+			200u8.param_encode(&mut buf, version).unwrap();
+
+			encode_key(&mut buf, version, &mut prev, 0x25);
+			2u64.encode(&mut buf, version).unwrap();
+			buf.extend_from_slice(&[0xAA, 0xBB]);
+
+			let mut bytes = buf.freeze();
+			decode_params!(&mut bytes, version, 0x20 => val: Option<u8>);
+			assert_eq!(val, Some(200), "declared key lost in {version}");
+			assert!(!bytes.has_remaining(), "unknown values not fully skipped in {version}");
+		}
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_param_unknown_value_validated() {
+		// Skipping drops the meaning, not the framing: a truncated value and an
+		// over-long length are still rejected.
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
+			// Length-prefixed (odd) value claiming 4 bytes with only 2 present.
+			let mut buf = BytesMut::new();
 			1usize.encode(&mut buf, version).unwrap();
-			0x10u64.encode(&mut buf, version).unwrap();
-			true.param_encode(&mut buf, version).unwrap();
+			let mut prev = 0u64;
+			encode_key(&mut buf, version, &mut prev, 0x25);
+			4u64.encode(&mut buf, version).unwrap();
+			buf.extend_from_slice(&[0xAA, 0xBB]);
 
 			let mut bytes = buf.freeze();
 			let result: Result<(), DecodeError> = (|| {
@@ -882,8 +959,26 @@ mod tests {
 				Ok(())
 			})();
 			assert!(
-				matches!(result, Err(DecodeError::InvalidValue)),
-				"expected InvalidValue for unknown param in {version}"
+				matches!(result, Err(DecodeError::Short)),
+				"expected Short for {version}"
+			);
+
+			// Length one past the 2^16-1 maximum.
+			let mut buf = BytesMut::new();
+			1usize.encode(&mut buf, version).unwrap();
+			let mut prev = 0u64;
+			encode_key(&mut buf, version, &mut prev, 0x25);
+			(1u64 << 16).encode(&mut buf, version).unwrap();
+
+			let mut bytes = buf.freeze();
+			let result: Result<(), DecodeError> = (|| {
+				decode_params!(&mut bytes, version, 0x20 => val: Option<u8>);
+				let _ = val;
+				Ok(())
+			})();
+			assert!(
+				matches!(result, Err(DecodeError::BoundsExceeded)),
+				"expected BoundsExceeded for {version}"
 			);
 		}
 	}

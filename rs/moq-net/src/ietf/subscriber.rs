@@ -1019,7 +1019,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						}
 					};
 					track_stats.frame();
-					frame.finish()?;
+					let commit = object.phase(trace::ObjectPhase::FrameCommit);
+					match frame.finish() {
+						Ok(()) => commit.finish(trace::ObjectOutcome::Success),
+						Err(err) => {
+							commit.finish(trace::ObjectOutcome::Failed);
+							return Err(err);
+						}
+					}
 					object.set_stream_offset_end(stream.offset());
 					object.finish(trace::ObjectOutcome::Success);
 				} else if status == 3 && !group.flags.has_end {
@@ -1048,6 +1055,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(err);
 				}
 
+				// Completion wakes consumers waiting for the whole frame, so it gets a
+				// final commit phase of its own.
 				let commit = object.phase(trace::ObjectPhase::FrameCommit);
 				match frame.finish() {
 					Ok(()) => commit.finish(trace::ObjectOutcome::Success),
@@ -1084,13 +1093,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(err);
 				}
 			};
-			track_stats.bytes(chunk.len() as u64);
-			if let Err(err) = frame.write(chunk) {
-				read.finish(trace::ObjectOutcome::Failed);
-				return Err(err);
-			}
 			read.set_stream_offset_end(stream.offset());
 			read.finish(trace::ObjectOutcome::Success);
+			track_stats.bytes(chunk.len() as u64);
+
+			// Writing a chunk wakes consumers streaming the partial frame, so it is
+			// commit work rather than part of the read.
+			let commit = object.phase(trace::ObjectPhase::FrameCommit);
+			if let Err(err) = frame.write(chunk) {
+				commit.finish(trace::ObjectOutcome::Failed);
+				return Err(err);
+			}
+			commit.finish(trace::ObjectOutcome::Success);
 		}
 		Ok(())
 	}
