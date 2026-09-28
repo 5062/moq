@@ -514,6 +514,58 @@ mod tests {
 	}
 
 	#[test]
+	fn test_subscribe_ok_largest_object() {
+		// Captured from a cloudflare/moq-rs relay, which includes LARGEST_OBJECT
+		// whenever the track has published objects (draft-16 Section 9.2.2.7).
+		// Request ID 2, track alias 2, one parameter, byte value 00 00 = Location(0, 0).
+		let bytes = [0x02, 0x02, 0x01, 0x09, 0x02, 0x00, 0x00];
+
+		for version in [Version::Draft15, Version::Draft16] {
+			let decoded: SubscribeOk = decode_message(&bytes, version).unwrap();
+			assert_eq!(decoded.request_id, Some(RequestId(2)));
+			assert_eq!(decoded.track_alias, 2);
+		}
+	}
+
+	#[test]
+	fn test_subscribe_ok_expires() {
+		// EXPIRES (0x08) is also legal in SUBSCRIBE_OK (draft-16 Section 9.2.2.6).
+		// Not encoded by this implementation, but a peer may set it.
+		let bytes = [0x02, 0x02, 0x01, 0x08, 0x3f];
+
+		for version in [Version::Draft15, Version::Draft16] {
+			let decoded: SubscribeOk = decode_message(&bytes, version).unwrap();
+			assert_eq!(decoded.request_id, Some(RequestId(2)));
+			assert_eq!(decoded.track_alias, 2);
+		}
+	}
+
+	#[test]
+	fn test_subscribe_ok_ignores_unknown_params() {
+		// SUBSCRIBER_PRIORITY (0x20) and SUBSCRIPTION_FILTER (0x21) are not defined
+		// for SUBSCRIBE_OK; draft-16 Section 9.2.2 requires a parameter sent in the
+		// wrong message type to be ignored rather than fatal.
+		for version in [Version::Draft15, Version::Draft16] {
+			let mut buf = BytesMut::new();
+			2u64.encode(&mut buf, version).unwrap(); // request_id
+			2u64.encode(&mut buf, version).unwrap(); // track_alias
+			let params: Result<(), EncodeError> = (|| {
+				encode_params!(&mut buf, version,
+					0x20 => 200u8,
+					0x21 => FilterType::LargestObject,
+				);
+				Ok(())
+			})();
+			params.unwrap();
+
+			let bytes = buf.freeze();
+			let decoded: SubscribeOk = decode_message(&bytes, version).unwrap();
+			assert_eq!(decoded.request_id, Some(RequestId(2)));
+			assert_eq!(decoded.track_alias, 2);
+		}
+	}
+
+	#[test]
 	fn test_subscribe_error() {
 		let msg = SubscribeError {
 			request_id: RequestId(123),
