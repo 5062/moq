@@ -2,6 +2,7 @@
 
 mod decode;
 mod encode;
+mod position;
 mod reader;
 mod size;
 mod stream;

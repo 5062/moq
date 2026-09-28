@@ -1,8 +1,6 @@
-#[cfg(feature = "trace")]
-use std::num::NonZeroU64;
-
 use std::fmt::Debug;
 
+use super::position::Position;
 use crate::{Error, coding::*, ietf};
 
 /// A wrapper around a [web_transport_trait::SendStream] that will reset on Drop.
@@ -10,65 +8,32 @@ pub struct Writer<S: web_transport_trait::SendStream, V> {
 	stream: Option<S>,
 	buffer: bytes::BytesMut,
 	version: V,
-	// The transport stream ID plus one. Stream ID 0 is valid, so the offset lets
-	// `NonZeroU64` supply the niche that keeps this field one word. A plain
-	// `Option<u64>` adds a word to every traced reader and writer, which pushes
-	// enums that hold them, such as the lite subscriber's `Sub`, past clippy's
-	// `large_enum_variant` limit.
-	#[cfg(feature = "trace")]
-	stream_id: Option<NonZeroU64>,
-	#[cfg(feature = "trace")]
-	offset: u64,
+	position: Position,
 }
 
 impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 	/// Create a new writer for the given stream and version.
 	pub fn new(stream: S, version: V) -> Self {
-		#[cfg(feature = "trace")]
-		let identity = stream.stream_id();
 		Self {
+			position: Position::send(&stream),
 			stream: Some(stream),
 			buffer: Default::default(),
 			version,
-			#[cfg(feature = "trace")]
-			stream_id: identity
-				.and_then(|identity| identity.id().checked_add(1))
-				.and_then(NonZeroU64::new),
-			#[cfg(feature = "trace")]
-			offset: identity.map_or(0, |identity| identity.offset()),
 		}
 	}
 
 	/// Return the underlying transport stream ID, when available.
-	#[cfg(feature = "trace")]
 	pub(crate) fn stream_id(&self) -> Option<u64> {
-		self.stream_id.map(|stream_id| stream_id.get() - 1)
-	}
-
-	#[cfg(not(feature = "trace"))]
-	pub(crate) fn stream_id(&self) -> Option<u64> {
-		None
+		self.position.stream_id()
 	}
 
 	/// Return the transport stream byte offset written by this writer.
-	#[cfg(feature = "trace")]
 	pub(crate) fn offset(&self) -> u64 {
-		self.offset
+		self.position.offset()
 	}
 
-	#[cfg(not(feature = "trace"))]
-	pub(crate) fn offset(&self) -> u64 {
-		0
-	}
-
-	#[inline]
 	fn advance(&mut self, amount: usize) {
-		#[cfg(feature = "trace")]
-		{
-			self.offset += amount as u64;
-		}
-		#[cfg(not(feature = "trace"))]
-		let _ = amount;
+		self.position.advance(amount);
 	}
 
 	/// Encode the given message to the stream.
@@ -161,10 +126,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 			stream: self.stream.take(),
 			buffer: std::mem::take(&mut self.buffer),
 			version,
-			#[cfg(feature = "trace")]
-			stream_id: self.stream_id,
-			#[cfg(feature = "trace")]
-			offset: self.offset,
+			position: self.position,
 		}
 	}
 }

@@ -14,7 +14,7 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
-use crate::trace;
+use crate::trace::{self, FinishResult as _};
 
 use super::{Message, Version};
 
@@ -128,7 +128,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		origin: origin::Producer,
 		control: Control,
 		stats: stats::Handle,
-		trace: crate::trace::Handle,
+		trace: trace::Handle,
 		version: Version,
 		tasks: Tasks,
 	) -> Self {
@@ -1010,26 +1010,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			if let Some(status) = status {
 				if status == 0 {
 					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-					let create = object.phase(trace::ObjectPhase::Create);
-					let frame = match producer.create_frame(frame::Info { size: 0, timestamp }) {
-						Ok(frame) => {
-							create.finish(trace::ObjectOutcome::Success);
-							frame
-						}
-						Err(err) => {
-							create.finish(trace::ObjectOutcome::Failed);
-							return Err(err);
-						}
-					};
+					let frame = object
+						.phase(trace::ObjectPhase::Create)
+						.finish_result(producer.create_frame(frame::Info { size: 0, timestamp }))?;
 					track_stats.frame();
-					let commit = object.phase(trace::ObjectPhase::FrameCommit);
-					match frame.finish() {
-						Ok(()) => commit.finish(trace::ObjectOutcome::Success),
-						Err(err) => {
-							commit.finish(trace::ObjectOutcome::Failed);
-							return Err(err);
-						}
-					}
+					object
+						.phase(trace::ObjectPhase::FrameCommit)
+						.finish_result(frame.finish())?;
 					object.set_stream_offset_end(stream.offset());
 					object.finish(trace::ObjectOutcome::Success);
 				} else if status == 3 && !group.flags.has_end {
@@ -1046,17 +1033,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			} else {
 				// `create_frame` rejects an oversized `size` before allocating.
 				let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-				let create = object.phase(trace::ObjectPhase::Create);
-				let mut frame = match producer.create_frame(frame::Info { size, timestamp }) {
-					Ok(frame) => {
-						create.finish(trace::ObjectOutcome::Success);
-						frame
-					}
-					Err(err) => {
-						create.finish(trace::ObjectOutcome::Failed);
-						return Err(err);
-					}
-				};
+				let mut frame = object
+					.phase(trace::ObjectPhase::Create)
+					.finish_result(producer.create_frame(frame::Info { size, timestamp }))?;
 				track_stats.frame();
 
 				if let Err(err) = self.run_frame(stream, &mut frame, &track_stats, &mut object).await {
@@ -1066,14 +1045,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 				// Completion wakes consumers waiting for the whole frame, so it gets a
 				// final commit phase of its own.
-				let commit = object.phase(trace::ObjectPhase::FrameCommit);
-				match frame.finish() {
-					Ok(()) => commit.finish(trace::ObjectOutcome::Success),
-					Err(err) => {
-						commit.finish(trace::ObjectOutcome::Failed);
-						return Err(err);
-					}
-				}
+				object
+					.phase(trace::ObjectPhase::FrameCommit)
+					.finish_result(frame.finish())?;
 				object.set_stream_offset_end(stream.offset());
 				object.finish(trace::ObjectOutcome::Success);
 			}
@@ -1105,12 +1079,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			// Writing a chunk wakes consumers streaming the partial frame, so it is
 			// commit work rather than part of the read.
-			let commit = object.phase(trace::ObjectPhase::FrameCommit);
-			if let Err(err) = frame.write(chunk) {
-				commit.finish(trace::ObjectOutcome::Failed);
-				return Err(err);
-			}
-			commit.finish(trace::ObjectOutcome::Success);
+			object
+				.phase(trace::ObjectPhase::FrameCommit)
+				.finish_result(frame.write(chunk))?;
 		}
 		Ok(())
 	}

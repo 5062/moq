@@ -22,3 +22,22 @@ pub(crate) fn session_handle<S: web_transport_trait::Session>(session: &S) -> Ha
 pub(crate) fn session_handle<S: web_transport_trait::Session>(_session: &S) -> Handle {
 	Handle::disabled()
 }
+
+/// Finishes an object phase from the result of the work it covered.
+pub(crate) trait FinishResult {
+	/// Record `Success` or `Failed` from `result`, then hand it back.
+	///
+	/// Write it as `object.phase(p).finish_result(work())`: the receiver is
+	/// evaluated before the argument, so the phase starts before `work` runs.
+	fn finish_result<T, E>(self, result: Result<T, E>) -> Result<T, E>;
+}
+
+impl FinishResult for ObjectPhaseTrace<'_> {
+	fn finish_result<T, E>(self, result: Result<T, E>) -> Result<T, E> {
+		self.finish(match result {
+			Ok(_) => ObjectOutcome::Success,
+			Err(_) => ObjectOutcome::Failed,
+		});
+		result
+	}
+}

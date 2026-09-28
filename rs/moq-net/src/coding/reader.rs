@@ -1,10 +1,8 @@
-#[cfg(feature = "trace")]
-use std::num::NonZeroU64;
-
 use std::{cmp, fmt::Debug, io};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+use super::position::Position;
 use crate::{Error, coding::*};
 
 /// A reader for decoding messages from a stream.
@@ -12,64 +10,31 @@ pub struct Reader<S: web_transport_trait::RecvStream, V> {
 	stream: S,
 	buffer: BytesMut,
 	version: V,
-	// The transport stream ID plus one. Stream ID 0 is valid, so the offset lets
-	// `NonZeroU64` supply the niche that keeps this field one word. A plain
-	// `Option<u64>` adds a word to every traced reader and writer, which pushes
-	// enums that hold them, such as the lite subscriber's `Sub`, past clippy's
-	// `large_enum_variant` limit.
-	#[cfg(feature = "trace")]
-	stream_id: Option<NonZeroU64>,
-	#[cfg(feature = "trace")]
-	offset: u64,
+	position: Position,
 }
 
 impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	pub fn new(stream: S, version: V) -> Self {
-		#[cfg(feature = "trace")]
-		let identity = stream.stream_id();
 		Self {
+			position: Position::recv(&stream),
 			stream,
 			buffer: Default::default(),
 			version,
-			#[cfg(feature = "trace")]
-			stream_id: identity
-				.and_then(|identity| identity.id().checked_add(1))
-				.and_then(NonZeroU64::new),
-			#[cfg(feature = "trace")]
-			offset: identity.map_or(0, |identity| identity.offset()),
 		}
 	}
 
 	/// Return the underlying transport stream ID, when available.
-	#[cfg(feature = "trace")]
 	pub(crate) fn stream_id(&self) -> Option<u64> {
-		self.stream_id.map(|stream_id| stream_id.get() - 1)
-	}
-
-	#[cfg(not(feature = "trace"))]
-	pub(crate) fn stream_id(&self) -> Option<u64> {
-		None
+		self.position.stream_id()
 	}
 
 	/// Return the transport stream byte offset consumed by this reader.
-	#[cfg(feature = "trace")]
 	pub(crate) fn offset(&self) -> u64 {
-		self.offset
+		self.position.offset()
 	}
 
-	#[cfg(not(feature = "trace"))]
-	pub(crate) fn offset(&self) -> u64 {
-		0
-	}
-
-	#[inline]
 	fn advance(&mut self, amount: usize) {
-		#[cfg(feature = "trace")]
-		{
-			self.offset += amount as u64;
-		}
-		#[cfg(not(feature = "trace"))]
-		let _ = amount;
+		self.position.advance(amount);
 	}
 
 	/// Decode the next message from the stream.
@@ -221,10 +186,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 			stream: self.stream,
 			buffer: self.buffer,
 			version,
-			#[cfg(feature = "trace")]
-			stream_id: self.stream_id,
-			#[cfg(feature = "trace")]
-			offset: self.offset,
+			position: self.position,
 		}
 	}
 }
@@ -244,7 +206,6 @@ mod tests {
 		assert_eq!(reader.offset(), 8);
 	}
 
-	#[cfg(feature = "trace")]
 	#[tokio::test]
 	async fn has_more_buffers_without_advancing_offset() {
 		let mut reader = Reader::new(

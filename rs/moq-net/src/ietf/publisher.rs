@@ -35,7 +35,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		origin: origin::Consumer,
 		control: Control,
 		stats: stats::Handle,
-		trace: crate::trace::Handle,
+		trace: trace::Handle,
 		version: Version,
 	) -> Self {
 		let broadcasts = stats.publisher_broadcasts();
@@ -347,7 +347,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		priority: u8,
 		mut group: group::Consumer,
 		track_stats: std::sync::Arc<stats::PublisherTrack>,
-		trace: crate::trace::Handle,
+		trace: trace::Handle,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
@@ -445,7 +445,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				}
 			}
 
-			object.set_stream_offset_end(stream.offset());
 			object.finish(trace::ObjectOutcome::Success);
 		}
 
