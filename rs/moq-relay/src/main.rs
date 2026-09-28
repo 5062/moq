@@ -87,13 +87,35 @@ async fn main() -> anyhow::Result<()> {
 	#[cfg(not(feature = "jemalloc"))]
 	let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
+	let server_run = async {
+		tokio::select! {
+			Err(err) = cluster.clone().run() => Err(err).context("cluster failed"),
+			Err(err) = web.run() => Err(err).context("web server failed"),
+			Err(err) = internal.run() => Err(err).context("internal server failed"),
+			Err(err) = serve(server, cluster, auth) => Err(err).context("server failed"),
+			Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
+			else => Ok(()),
+		}
+	};
+	let shutdown = async {
+		if let Err(err) = tokio::signal::ctrl_c().await {
+			tracing::warn!(%err, "failed to listen for interrupt");
+		}
+	};
+	run_until_shutdown(server_run, shutdown).await
+}
+
+async fn run_until_shutdown<F, S>(server: F, shutdown: S) -> anyhow::Result<()>
+where
+	F: std::future::Future<Output = anyhow::Result<()>>,
+	S: std::future::Future<Output = ()>,
+{
+	tokio::pin!(server);
+	tokio::pin!(shutdown);
 	tokio::select! {
-		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),
-		Err(err) = web.run() => return Err(err).context("web server failed"),
-		Err(err) = internal.run() => return Err(err).context("internal server failed"),
-		Err(err) = serve(server, cluster, auth) => return Err(err).context("server failed"),
-		Err(err) = jemalloc => return Err(err).context("jemalloc profiler failed"),
-		else => Ok(()),
+		biased;
+		() = &mut shutdown => Ok(()),
+		result = &mut server => result,
 	}
 }
 
@@ -117,4 +139,22 @@ async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> 
 	}
 
 	anyhow::bail!("stopped accepting connections")
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn shutdown_returns_cleanly() {
+		run_until_shutdown(std::future::pending::<anyhow::Result<()>>(), std::future::ready(()))
+			.await
+			.unwrap();
+	}
+
+	#[tokio::test]
+	async fn shutdown_takes_priority_over_a_simultaneous_server_failure() {
+		let server = std::future::ready(Err(anyhow::anyhow!("server stopped")));
+		run_until_shutdown(server, std::future::ready(())).await.unwrap();
+	}
 }
