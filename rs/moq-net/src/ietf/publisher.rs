@@ -392,34 +392,28 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				None => break,
 			};
 			object_id += 1;
-			let mut header = object.phase(trace::ObjectPhase::HeaderEncode);
-			let result: Result<(), Error> = async {
-				// Object ID delta is always 0.
-				stream.encode(&0u64).await?;
+			// Flow control can block the header write, so only the polls that encode count.
+			object
+				.measure(trace::ObjectPhase::HeaderEncode, async {
+					// Object ID delta is always 0.
+					stream.encode(&0u64).await?;
 
-				// Per-object extension headers carry the frame presentation timestamp.
-				if msg.flags.has_extensions {
-					let mut ext = bytes::BytesMut::new();
-					ietf::encode_object_time(&mut ext, frame.timestamp, version)?;
-					stream.encode(&(ext.len() as u64)).await?;
-					stream.write_chunk(ext.freeze()).await?;
-				}
+					// Per-object extension headers carry the frame presentation timestamp.
+					if msg.flags.has_extensions {
+						let mut ext = bytes::BytesMut::new();
+						ietf::encode_object_time(&mut ext, frame.timestamp, version)?;
+						stream.encode(&(ext.len() as u64)).await?;
+						stream.write_chunk(ext.freeze()).await?;
+					}
 
-				stream.encode(&frame.size).await?;
-				if frame.size == 0 {
-					stream.encode(&0u8).await?;
-				}
-				Ok(())
-			}
-			.await;
-			header.set_stream_offset_end(stream.offset());
-			match result {
-				Ok(()) => header.finish(trace::ObjectOutcome::Success),
-				Err(err) => {
-					header.finish(trace::ObjectOutcome::Failed);
-					return Err(err);
-				}
-			}
+					stream.encode(&frame.size).await?;
+					if frame.size == 0 {
+						stream.encode(&0u8).await?;
+					}
+					Ok::<_, Error>(())
+				})
+				.await?;
+			object.set_stream_offset_end(stream.offset());
 			track_stats.frame();
 
 			if frame.size != 0 {
@@ -439,17 +433,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					match chunk? {
 						Some(chunk) => {
 							let n = chunk.len() as u64;
-							let mut write = object.phase(trace::ObjectPhase::PayloadWrite);
-							match stream.write_chunk(chunk).await {
-								Ok(()) => {
-									write.set_stream_offset_end(stream.offset());
-									write.finish(trace::ObjectOutcome::Success);
-								}
-								Err(err) => {
-									write.finish(trace::ObjectOutcome::Failed);
-									return Err(err);
-								}
-							}
+							// Time blocked on flow control belongs to no phase.
+							object
+								.measure(trace::ObjectPhase::PayloadWrite, stream.write_chunk(chunk))
+								.await?;
+							object.set_stream_offset_end(stream.offset());
 							track_stats.bytes(n);
 						}
 						None => break,

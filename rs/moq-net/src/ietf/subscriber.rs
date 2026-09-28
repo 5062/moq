@@ -975,34 +975,37 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			let mut object = self.trace.object(context);
 			object_id += 1;
-			let mut header = object.phase(trace::ObjectPhase::HeaderParse);
-			let id_delta = stream.decode::<u64>().await?;
+			// The header can straddle packets, so only the polls that parse count.
+			let version = self.version;
+			let (timestamp, size, status) = object
+				.measure(trace::ObjectPhase::HeaderParse, async {
+					let id_delta = stream.decode::<u64>().await?;
+					if id_delta != 0 {
+						tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
+						return Err(Error::Unsupported);
+					}
 
-			if id_delta != 0 {
-				header.finish(trace::ObjectOutcome::Failed);
-				tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
-				return Err(Error::Unsupported);
-			}
+					// Per-object extension headers may carry the frame presentation timestamp.
+					// Absent it, stamp the local receive time.
+					let timestamp = if group.flags.has_extensions {
+						let size: usize = stream.decode().await?;
+						let mut ext = stream.read_exact(size).await?;
+						ietf::decode_object_time(&mut ext, version)?
+					} else {
+						None
+					};
 
-			// Per-object extension headers may carry the frame presentation timestamp.
-			// Absent it, stamp the local receive time.
-			let timestamp = if group.flags.has_extensions {
-				let size: usize = stream.decode().await?;
-				let mut ext = stream.read_exact(size).await?;
-				ietf::decode_object_time(&mut ext, self.version)?
-			} else {
-				None
-			};
-
-			let size: u64 = stream.decode().await?;
-			header.set_payload_bytes(size);
-			let status = if size == 0 {
-				Some(stream.decode::<u64>().await?)
-			} else {
-				None
-			};
-			header.set_stream_offset_end(stream.offset());
-			header.finish(trace::ObjectOutcome::Success);
+					let size: u64 = stream.decode().await?;
+					let status = if size == 0 {
+						Some(stream.decode::<u64>().await?)
+					} else {
+						None
+					};
+					Ok::<_, Error>((timestamp, size, status))
+				})
+				.await?;
+			object.set_payload_bytes(size);
+			object.set_stream_offset_end(stream.offset());
 
 			if let Some(status) = status {
 				if status == 0 {
@@ -1081,20 +1084,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		object: &mut trace::ObjectTrace,
 	) -> Result<(), Error> {
 		while frame.remaining() > 0 {
-			let mut read = object.phase(trace::ObjectPhase::PayloadRead);
-			let chunk = match stream.read_chunk(frame.remaining()).await {
-				Ok(Some(chunk)) if !chunk.is_empty() => chunk,
-				Ok(_) => {
-					read.finish(trace::ObjectOutcome::Failed);
-					return Err(Error::WrongSize);
-				}
-				Err(err) => {
-					read.finish(trace::ObjectOutcome::Failed);
-					return Err(err);
-				}
-			};
-			read.set_stream_offset_end(stream.offset());
-			read.finish(trace::ObjectOutcome::Success);
+			// Only the polls that hand over bytes count; waiting for them does not.
+			let remaining = frame.remaining();
+			let chunk = object
+				.measure(trace::ObjectPhase::PayloadRead, async {
+					match stream.read_chunk(remaining).await? {
+						Some(chunk) if !chunk.is_empty() => Ok(chunk),
+						_ => Err(Error::WrongSize),
+					}
+				})
+				.await?;
+			object.set_stream_offset_end(stream.offset());
 			track_stats.bytes(chunk.len() as u64);
 
 			// Writing a chunk wakes consumers streaming the partial frame, so it is
