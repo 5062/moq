@@ -293,9 +293,7 @@ impl Producer {
 	/// consumers trace their outbound copies of the group's frames.
 	#[cfg(feature = "trace")]
 	pub(crate) fn next_frame_identity(&self) -> FrameIdentity {
-		let group = *self
-			.trace_instance
-			.get_or_init(crate::trace::next_logical_group);
+		let group = *self.trace_instance.get_or_init(crate::trace::next_logical_group);
 		FrameIdentity {
 			group,
 			frame: self.frame_count() as u64,

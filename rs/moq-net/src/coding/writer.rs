@@ -10,6 +10,11 @@ pub struct Writer<S: web_transport_trait::SendStream, V> {
 	stream: Option<S>,
 	buffer: bytes::BytesMut,
 	version: V,
+	// The transport stream ID plus one. Stream ID 0 is valid, so the offset lets
+	// `NonZeroU64` supply the niche that keeps this field one word. A plain
+	// `Option<u64>` adds a word to every traced reader and writer, which pushes
+	// enums that hold them, such as the lite subscriber's `Sub`, past clippy's
+	// `large_enum_variant` limit.
 	#[cfg(feature = "trace")]
 	stream_id: Option<NonZeroU64>,
 	#[cfg(feature = "trace")]

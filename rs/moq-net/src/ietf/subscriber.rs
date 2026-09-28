@@ -1033,8 +1033,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					object.set_stream_offset_end(stream.offset());
 					object.finish(trace::ObjectOutcome::Success);
 				} else if status == 3 && !group.flags.has_end {
+					// An end-of-group marker is a real wire object that carries only a
+					// header: nothing enters the model and nothing is forwarded, so its
+					// lifecycle ends here. Finishing it keeps it from reading as abandoned.
+					object.set_stream_offset_end(stream.offset());
+					object.finish(trace::ObjectOutcome::Success);
 					break;
 				} else {
+					object.finish(trace::ObjectOutcome::Failed);
 					return Err(Error::Unsupported);
 				}
 			} else {

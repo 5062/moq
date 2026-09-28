@@ -4647,7 +4647,7 @@ dependencies = [
 [[package]]
 name = "moq-trace"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#f4ece6805e608eb2696f0ab3af44d7f2073a94c7"
+source = "git+https://github.com/5062/moq-trace?branch=main#be58d4ce8882df96bc670a53aa9bc6ce00062469"
 dependencies = [
  "moq-trace-lttng-sys",
  "quic-trace",
@@ -4657,7 +4657,7 @@ dependencies = [
 [[package]]
 name = "moq-trace-lttng-sys"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#f4ece6805e608eb2696f0ab3af44d7f2073a94c7"
+source = "git+https://github.com/5062/moq-trace?branch=main#be58d4ce8882df96bc670a53aa9bc6ce00062469"
 dependencies = [
  "bindgen 0.73.2",
  "cc",
@@ -6436,7 +6436,7 @@ dependencies = [
 [[package]]
 name = "quic-trace"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#f4ece6805e608eb2696f0ab3af44d7f2073a94c7"
+source = "git+https://github.com/5062/moq-trace?branch=main#be58d4ce8882df96bc670a53aa9bc6ce00062469"
 dependencies = [
  "quic-trace-lttng-sys",
  "trace-core",
@@ -6445,7 +6445,7 @@ dependencies = [
 [[package]]
 name = "quic-trace-lttng-sys"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#f4ece6805e608eb2696f0ab3af44d7f2073a94c7"
+source = "git+https://github.com/5062/moq-trace?branch=main#be58d4ce8882df96bc670a53aa9bc6ce00062469"
 dependencies = [
  "bindgen 0.73.2",
  "cc",
@@ -8604,9 +8604,10 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 [[package]]
 name = "trace-core"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#f4ece6805e608eb2696f0ab3af44d7f2073a94c7"
+source = "git+https://github.com/5062/moq-trace?branch=main#be58d4ce8882df96bc670a53aa9bc6ce00062469"
 dependencies = [
  "libc",
+ "quic-trace-lttng-sys",
 ]
 
 [[package]]
