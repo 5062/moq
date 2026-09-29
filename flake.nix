@@ -50,6 +50,21 @@
           overlays = [ (import rust-overlay) ];
         };
 
+        # The traced relay must link the lttng-ust release of moq-trace's
+        # lttng-tools, or its providers never register with the session daemon.
+        # Bump this together with moq-trace's nixpkgs. It is scoped to the dev
+        # shell rather than overlaid, because an overlay would rebuild every
+        # package that depends on lttng-ust, Qt among them.
+        lttng-ust = pkgs.lttng-ust.overrideAttrs (_: rec {
+          version = "2.15.1";
+          src = pkgs.fetchFromGitHub {
+            owner = "lttng";
+            repo = "lttng-ust";
+            rev = "v${version}";
+            hash = "sha256-AWo205IPGKpEyz5RlscHfdfCTV0zOWPHOGk4ImAJbcQ=";
+          };
+        });
+
         rust-toolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [
             "rust-src"
@@ -117,7 +132,7 @@
             # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
             pkgs.release-plz
             # The trace crates (`--features trace`) build an LTTng-UST provider.
-            pkgs.lttng-ust
+            lttng-ust
             # cpal's `alsa-sys` (moq-audio `capture` feature) links libasound on
             # Linux via pkg-config; macOS uses CoreAudio, so no dep there.
             pkgs.alsa-lib
