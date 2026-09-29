@@ -32,6 +32,38 @@ fn apply_transport(transport: &mut quinn::TransportConfig, quic: Resolved) {
 	}
 }
 
+/// Stream this server's qlog into `$QLOGDIR`, when the variable is set.
+///
+/// One stream covers every connection, and quinn tags each event with the
+/// connection's original destination CID. qlog event times are relative to the
+/// stream's start instant, so the title records that instant on the moq-trace
+/// clock, which lets moq-trace place the events on its capture's time axis.
+/// quinn 0.11 writes RTT fields in seconds rather than the milliseconds the
+/// qlog specification defines, and the title declares that with `rtt_unit=s`.
+#[cfg(feature = "qlog")]
+fn apply_qlog(transport: &mut quinn::TransportConfig) {
+	let Some(dir) = std::env::var_os("QLOGDIR") else {
+		return;
+	};
+	let path = std::path::Path::new(&dir).join(format!("relay-{}.sqlog", std::process::id()));
+	let file = match std::fs::File::create(&path) {
+		Ok(file) => file,
+		Err(err) => {
+			tracing::warn!(path = %path.display(), %err, "failed to create qlog file");
+			return;
+		}
+	};
+	// Read both clocks back to back so the recorded start matches `start_time`.
+	let start_ns = moq_trace::now_ns();
+	let start = std::time::Instant::now();
+	let mut config = quinn::QlogConfig::default();
+	config
+		.writer(Box::new(std::io::BufWriter::new(file)))
+		.title(Some(format!("moq-relay monotonic_start_ns={start_ns} rtt_unit=s")))
+		.start_time(start);
+	transport.qlog_stream(config.into_stream());
+}
+
 /// Errors specific to the quinn QUIC backend.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -365,6 +397,8 @@ impl QuinnServer {
 		// TODO Validate the BBR implementation before enabling it
 		let mut transport = quinn::TransportConfig::default();
 		apply_transport(&mut transport, config.quic.resolve());
+		#[cfg(feature = "qlog")]
+		apply_qlog(&mut transport);
 		let transport = Arc::new(transport);
 
 		let provider = crate::crypto::provider();
