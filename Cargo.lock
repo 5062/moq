@@ -1712,7 +1712,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.119",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -4648,7 +4648,7 @@ dependencies = [
 [[package]]
 name = "moq-trace"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#be58d4ce8882df96bc670a53aa9bc6ce00062469"
+source = "git+https://github.com/5062/moq-trace?branch=main#f4b65808e9cb1fc8c7d0fcc9264e2946b1cac88b"
 dependencies = [
  "moq-trace-lttng-sys",
  "quic-trace",
@@ -4658,11 +4658,9 @@ dependencies = [
 [[package]]
 name = "moq-trace-lttng-sys"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#be58d4ce8882df96bc670a53aa9bc6ce00062469"
+source = "git+https://github.com/5062/moq-trace?branch=main#f4b65808e9cb1fc8c7d0fcc9264e2946b1cac88b"
 dependencies = [
- "bindgen 0.73.2",
- "cc",
- "pkg-config",
+ "trace-provider-build",
 ]
 
 [[package]]
@@ -6449,7 +6447,7 @@ dependencies = [
 [[package]]
 name = "quic-trace"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#be58d4ce8882df96bc670a53aa9bc6ce00062469"
+source = "git+https://github.com/5062/moq-trace?branch=main#f4b65808e9cb1fc8c7d0fcc9264e2946b1cac88b"
 dependencies = [
  "quic-trace-lttng-sys",
  "trace-core",
@@ -6458,11 +6456,9 @@ dependencies = [
 [[package]]
 name = "quic-trace-lttng-sys"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#be58d4ce8882df96bc670a53aa9bc6ce00062469"
+source = "git+https://github.com/5062/moq-trace?branch=main#f4b65808e9cb1fc8c7d0fcc9264e2946b1cac88b"
 dependencies = [
- "bindgen 0.73.2",
- "cc",
- "pkg-config",
+ "trace-provider-build",
 ]
 
 [[package]]
@@ -8052,7 +8048,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -8600,10 +8596,20 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 [[package]]
 name = "trace-core"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#be58d4ce8882df96bc670a53aa9bc6ce00062469"
+source = "git+https://github.com/5062/moq-trace?branch=main#f4b65808e9cb1fc8c7d0fcc9264e2946b1cac88b"
 dependencies = [
  "libc",
  "quic-trace-lttng-sys",
+]
+
+[[package]]
+name = "trace-provider-build"
+version = "0.1.0"
+source = "git+https://github.com/5062/moq-trace?branch=main#f4b65808e9cb1fc8c7d0fcc9264e2946b1cac88b"
+dependencies = [
+ "bindgen 0.73.2",
+ "cc",
+ "pkg-config",
 ]
 
 [[package]]
