@@ -45,11 +45,8 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		msg.encode(&mut self.buffer, self.version.clone())?;
 
 		while !self.buffer.is_empty() {
-			let n = self
-				.stream
-				.as_mut()
-				.unwrap()
-				.write_buf(&mut self.buffer)
+			let stream = self.stream.as_mut().unwrap();
+			let n = crate::trace::transport_call(stream.write_buf(&mut self.buffer))
 				.await
 				.map_err(Error::from_transport)?;
 			self.advance(n);
@@ -59,11 +56,8 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 	}
 
 	pub(crate) async fn write<Buf: bytes::Buf + Send>(&mut self, buf: &mut Buf) -> Result<usize, Error> {
-		let n = self
-			.stream
-			.as_mut()
-			.unwrap()
-			.write_buf(buf)
+		let stream = self.stream.as_mut().unwrap();
+		let n = crate::trace::transport_call(stream.write_buf(buf))
 			.await
 			.map_err(Error::from_transport)?;
 		self.advance(n);
@@ -83,10 +77,8 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 	/// Write the entire [`bytes::Bytes`] chunk to the stream.
 	pub async fn write_chunk(&mut self, chunk: bytes::Bytes) -> Result<(), Error> {
 		let len = chunk.len();
-		self.stream
-			.as_mut()
-			.unwrap()
-			.write_chunk(chunk)
+		let stream = self.stream.as_mut().unwrap();
+		crate::trace::transport_call(stream.write_chunk(chunk))
 			.await
 			.map_err(Error::from_transport)?;
 		self.advance(len);

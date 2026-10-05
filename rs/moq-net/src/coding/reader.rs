@@ -112,7 +112,9 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 			self.advance(n);
 			return Ok(Some(self.buffer.split_to(n).freeze()));
 		}
-		let chunk = self.stream.read_chunk(max).await.map_err(Error::from_transport)?;
+		let chunk = crate::trace::transport_call(self.stream.read_chunk(max))
+			.await
+			.map_err(Error::from_transport)?;
 		if let Some(chunk) = &chunk {
 			self.advance(chunk.len());
 		}
@@ -136,7 +138,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		buf.put(data);
 
 		while buf.has_remaining_mut() {
-			match self.stream.read_buf(&mut buf).await {
+			match crate::trace::transport_call(self.stream.read_buf(&mut buf)).await {
 				Ok(Some(n)) => {
 					self.advance(n);
 				}
@@ -168,7 +170,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 
 	/// Try to read more data from the stream. Returns true if data was read, false if stream closed.
 	async fn read_more(&mut self) -> Result<bool, Error> {
-		match self.stream.read_buf(&mut self.buffer).await {
+		match crate::trace::transport_call(self.stream.read_buf(&mut self.buffer)).await {
 			Ok(Some(_)) => Ok(true),
 			Ok(None) => Ok(false),
 			Err(e) => Err(Error::from_transport(e)),
