@@ -358,12 +358,16 @@ impl<T> Drop for Mut<'_, T> {
 			.then(|| [state.waiters_closed.take(), state.waiters_consumer.take()]);
 		drop(state); // Release Mutex BEFORE waking
 
+		#[cfg(feature = "probe")]
+		let probe = crate::probe::start();
 		waiters_value.wake();
 		if let Some(mut extra) = extra {
 			for list in &mut extra {
 				list.wake();
 			}
 		}
+		#[cfg(feature = "probe")]
+		crate::probe::finish(probe);
 	}
 }
 

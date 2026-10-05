@@ -4648,7 +4648,7 @@ dependencies = [
 [[package]]
 name = "moq-trace"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#f4b65808e9cb1fc8c7d0fcc9264e2946b1cac88b"
+source = "git+https://github.com/5062/moq-trace?branch=main#f7500343f49c040e206ee15ff366048a827f5508"
 dependencies = [
  "moq-trace-lttng-sys",
  "quic-trace",
@@ -4658,7 +4658,7 @@ dependencies = [
 [[package]]
 name = "moq-trace-lttng-sys"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#f4b65808e9cb1fc8c7d0fcc9264e2946b1cac88b"
+source = "git+https://github.com/5062/moq-trace?branch=main#f7500343f49c040e206ee15ff366048a827f5508"
 dependencies = [
  "trace-provider-build",
 ]
@@ -6447,7 +6447,7 @@ dependencies = [
 [[package]]
 name = "quic-trace"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#f4b65808e9cb1fc8c7d0fcc9264e2946b1cac88b"
+source = "git+https://github.com/5062/moq-trace?branch=main#f7500343f49c040e206ee15ff366048a827f5508"
 dependencies = [
  "quic-trace-lttng-sys",
  "trace-core",
@@ -6456,7 +6456,7 @@ dependencies = [
 [[package]]
 name = "quic-trace-lttng-sys"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#f4b65808e9cb1fc8c7d0fcc9264e2946b1cac88b"
+source = "git+https://github.com/5062/moq-trace?branch=main#f7500343f49c040e206ee15ff366048a827f5508"
 dependencies = [
  "trace-provider-build",
 ]
@@ -8596,7 +8596,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 [[package]]
 name = "trace-core"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#f4b65808e9cb1fc8c7d0fcc9264e2946b1cac88b"
+source = "git+https://github.com/5062/moq-trace?branch=main#f7500343f49c040e206ee15ff366048a827f5508"
 dependencies = [
  "libc",
  "quic-trace-lttng-sys",
@@ -8605,7 +8605,7 @@ dependencies = [
 [[package]]
 name = "trace-provider-build"
 version = "0.1.0"
-source = "git+https://github.com/5062/moq-trace?branch=main#f4b65808e9cb1fc8c7d0fcc9264e2946b1cac88b"
+source = "git+https://github.com/5062/moq-trace?branch=main#f7500343f49c040e206ee15ff366048a827f5508"
 dependencies = [
  "bindgen 0.73.2",
  "cc",

@@ -128,6 +128,12 @@ pub(crate) struct GroupState {
 
 	// The error that caused the group to be aborted, if any.
 	pub(crate) abort: Option<Error>,
+
+	// When each frame of a traced group became readable, by absolute frame index,
+	// on the trace clock. Zero marks a frame that no traced ingress path recorded.
+	// Kept after eviction, because an outbound copy may still be waiting on it.
+	#[cfg(feature = "trace")]
+	ready_ns: Vec<u64>,
 }
 
 impl GroupState {
@@ -166,6 +172,27 @@ impl GroupState {
 			return Poll::Ready(Ok(None));
 		}
 		Poll::Pending
+	}
+
+	/// Record that the frame at absolute `index` became readable at `ready_ns`.
+	#[cfg(feature = "trace")]
+	fn record_ready(&mut self, index: usize, ready_ns: u64) {
+		if self.ready_ns.len() <= index {
+			self.ready_ns.resize(index + 1, 0);
+		}
+		self.ready_ns[index] = ready_ns;
+	}
+
+	/// When the frame at absolute `index` became readable, if a traced ingress path
+	/// recorded it.
+	#[cfg(feature = "trace")]
+	fn ready_ns(&self, index: usize) -> Option<u64> {
+		self.ready_ns.get(index).copied().filter(|&ready_ns| ready_ns != 0)
+	}
+
+	#[cfg(not(feature = "trace"))]
+	fn ready_ns(&self, _index: usize) -> Option<u64> {
+		None
 	}
 
 	fn poll_finished(&self) -> Poll<Result<u64>> {
@@ -368,6 +395,13 @@ impl Producer {
 			timestamp,
 			buf: buf.clone(),
 		});
+		// The partial frame is readable from here on. Consumers read the instant to
+		// time how long their copy waited for them to pick it up.
+		#[cfg(feature = "trace")]
+		if self.trace_instance.get().is_some() {
+			let index = state.offset + state.frames.len();
+			state.record_ready(index, crate::trace::now_ns());
+		}
 		state.evict();
 
 		// The pool evicts other groups' state, so trigger it only after releasing our
@@ -659,7 +693,7 @@ impl Consumer {
 	///
 	/// Returns None if the group is finished and the index is out of range.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
-		let Some((info, source)) = ready!(self.poll_next_frame_source(waiter)?) else {
+		let Some((info, source, _)) = ready!(self.poll_next_frame_source(waiter)?) else {
 			return Poll::Ready(Ok(None));
 		};
 		Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))))
@@ -679,20 +713,37 @@ impl Consumer {
 	) -> Poll<Result<Option<(frame::Consumer, crate::trace::ObjectTrace)>>> {
 		// The source poll advances `index` past the frame it returns.
 		let index = self.index;
-		let Some((info, source)) = ready!(self.poll_next_frame_source(waiter)?) else {
+		let Some((info, source, ready_ns)) = ready!(self.poll_next_frame_source(waiter)?) else {
 			return Poll::Ready(Ok(None));
 		};
 		let mut object = match self.frame_identity(index) {
 			Some(identity) => trace.object(context(identity).with_payload_bytes(info.size)),
 			None => crate::trace::ObjectTrace::disabled(),
 		};
-		let clone = object.phase(crate::trace::ObjectPhase::Clone);
+		// The copy waited from the instant ingress made the frame readable until now,
+		// where its clone starts. A prefetched frame carries no readable instant.
+		let clone = match ready_ns.filter(|_| object.records_phases()) {
+			Some(ready_ns) => {
+				let now = crate::trace::now_ns();
+				object
+					.phase_at(crate::trace::ObjectPhase::DeliveryWait, ready_ns)
+					.finish_at(crate::trace::ObjectOutcome::Success, now);
+				object.phase_at(crate::trace::ObjectPhase::Clone, now)
+			}
+			None => object.phase(crate::trace::ObjectPhase::Clone),
+		};
 		let frame = frame::Consumer::new(self.state.clone(), info, source);
 		clone.finish(crate::trace::ObjectOutcome::Success);
 		Poll::Ready(Ok(Some((frame, object))))
 	}
 
-	fn poll_next_frame_source(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<(frame::Info, frame::Source)>>> {
+	/// Poll for the next frame's source, with the instant it became readable when a
+	/// traced ingress path recorded one.
+	#[allow(clippy::type_complexity)]
+	fn poll_next_frame_source(
+		&mut self,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<(frame::Info, frame::Source, Option<u64>)>>> {
 		// Hand out any frames a prior read_frame prefetched before touching the tail.
 		if let Some(frame) = self.prefetch.pop() {
 			self.index += 1;
@@ -700,11 +751,15 @@ impl Consumer {
 				size: frame.payload.len() as u64,
 				timestamp: frame.timestamp,
 			};
-			return Poll::Ready(Ok(Some((info, frame::Source::Complete(frame.payload)))));
+			return Poll::Ready(Ok(Some((info, frame::Source::Complete(frame.payload), None))));
 		}
 
 		let index = self.index;
-		let Some(source) = ready!(self.poll(waiter, |state| state.poll_frame_source(index))?) else {
+		let Some(source) = ready!(self.poll(waiter, |state| {
+			state
+				.poll_frame_source(index)
+				.map_ok(|found| found.map(|(info, source)| (info, source, state.ready_ns(index))))
+		})?) else {
 			return Poll::Ready(Ok(None));
 		};
 

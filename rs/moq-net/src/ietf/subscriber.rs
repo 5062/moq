@@ -14,7 +14,7 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
-use crate::trace::{self, FinishResult as _};
+use crate::trace;
 
 use super::{Message, Version};
 
@@ -1010,13 +1010,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			if let Some(status) = status {
 				if status == 0 {
 					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-					let frame = object
-						.phase(trace::ObjectPhase::Create)
-						.finish_result(producer.create_frame(frame::Info { size: 0, timestamp }))?;
+					let frame = trace::publish(&mut object, trace::ObjectPhase::Create, || {
+						producer.create_frame(frame::Info { size: 0, timestamp })
+					})?;
 					track_stats.frame();
-					object
-						.phase(trace::ObjectPhase::FrameCommit)
-						.finish_result(frame.finish())?;
+					trace::publish(&mut object, trace::ObjectPhase::FrameCommit, || frame.finish())?;
 					object.set_stream_offset_end(stream.offset());
 					object.finish(trace::ObjectOutcome::Success);
 				} else if status == 3 && !group.flags.has_end {
@@ -1033,9 +1031,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			} else {
 				// `create_frame` rejects an oversized `size` before allocating.
 				let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-				let mut frame = object
-					.phase(trace::ObjectPhase::Create)
-					.finish_result(producer.create_frame(frame::Info { size, timestamp }))?;
+				// Creating the frame makes its partial payload readable, which wakes consumers.
+				let mut frame = trace::publish(&mut object, trace::ObjectPhase::Create, || {
+					producer.create_frame(frame::Info { size, timestamp })
+				})?;
 				track_stats.frame();
 
 				if let Err(err) = self.run_frame(stream, &mut frame, &track_stats, &mut object).await {
@@ -1045,9 +1044,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 				// Completion wakes consumers waiting for the whole frame, so it gets a
 				// final commit phase of its own.
-				object
-					.phase(trace::ObjectPhase::FrameCommit)
-					.finish_result(frame.finish())?;
+				trace::publish(&mut object, trace::ObjectPhase::FrameCommit, || frame.finish())?;
 				object.set_stream_offset_end(stream.offset());
 				object.finish(trace::ObjectOutcome::Success);
 			}
@@ -1078,10 +1075,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			track_stats.bytes(chunk.len() as u64);
 
 			// Writing a chunk wakes consumers streaming the partial frame, so it is
-			// commit work rather than part of the read.
-			object
-				.phase(trace::ObjectPhase::FrameCommit)
-				.finish_result(frame.write(chunk))?;
+			// commit work rather than part of the read, and the wake is notify work.
+			trace::publish(object, trace::ObjectPhase::FrameCommit, || frame.write(chunk))?;
 		}
 		Ok(())
 	}

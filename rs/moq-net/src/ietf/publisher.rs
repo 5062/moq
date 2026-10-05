@@ -392,26 +392,31 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				None => break,
 			};
 			object_id += 1;
-			// Flow control can block the header write, so only the polls that encode count.
+			// Flow control can block the header write, so only the polls that encode count,
+			// and the time between them is a blocked write.
 			object
-				.measure(trace::ObjectPhase::HeaderEncode, async {
-					// Object ID delta is always 0.
-					stream.encode(&0u64).await?;
+				.measure_waiting(
+					trace::ObjectPhase::HeaderEncode,
+					trace::ObjectPhase::WriteBlocked,
+					async {
+						// Object ID delta is always 0.
+						stream.encode(&0u64).await?;
 
-					// Per-object extension headers carry the frame presentation timestamp.
-					if msg.flags.has_extensions {
-						let mut ext = bytes::BytesMut::new();
-						ietf::encode_object_time(&mut ext, frame.timestamp, version)?;
-						stream.encode(&(ext.len() as u64)).await?;
-						stream.write_chunk(ext.freeze()).await?;
-					}
+						// Per-object extension headers carry the frame presentation timestamp.
+						if msg.flags.has_extensions {
+							let mut ext = bytes::BytesMut::new();
+							ietf::encode_object_time(&mut ext, frame.timestamp, version)?;
+							stream.encode(&(ext.len() as u64)).await?;
+							stream.write_chunk(ext.freeze()).await?;
+						}
 
-					stream.encode(&frame.size).await?;
-					if frame.size == 0 {
-						stream.encode(&0u8).await?;
-					}
-					Ok::<_, Error>(())
-				})
+						stream.encode(&frame.size).await?;
+						if frame.size == 0 {
+							stream.encode(&0u8).await?;
+						}
+						Ok::<_, Error>(())
+					},
+				)
 				.await?;
 			object.set_stream_offset_end(stream.offset());
 			track_stats.frame();
@@ -433,9 +438,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					match chunk? {
 						Some(chunk) => {
 							let n = chunk.len() as u64;
-							// Time blocked on flow control belongs to no phase.
+							// Time blocked on flow control is a blocked write, not write work.
 							object
-								.measure(trace::ObjectPhase::PayloadWrite, stream.write_chunk(chunk))
+								.measure_waiting(
+									trace::ObjectPhase::PayloadWrite,
+									trace::ObjectPhase::WriteBlocked,
+									stream.write_chunk(chunk),
+								)
 								.await?;
 							object.set_stream_offset_end(stream.offset());
 							track_stats.bytes(n);
