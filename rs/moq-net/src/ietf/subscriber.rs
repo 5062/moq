@@ -14,7 +14,7 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
-use crate::trace;
+use crate::trace::{self, FinishOnError as _};
 
 use super::{Message, Version};
 
@@ -1003,7 +1003,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					};
 					Ok::<_, Error>((timestamp, size, status))
 				})
-				.await?;
+				.await
+				.finish_on_error(&mut object)?;
 			object.set_payload_bytes(size);
 			object.set_stream_offset_end(stream.offset());
 
@@ -1012,9 +1013,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
 					let frame = trace::publish(&mut object, trace::ObjectPhase::Create, || {
 						producer.create_frame(frame::Info { size: 0, timestamp })
-					})?;
+					})
+					.finish_on_error(&mut object)?;
 					track_stats.frame();
-					trace::publish(&mut object, trace::ObjectPhase::FrameCommit, || frame.finish())?;
+					trace::publish(&mut object, trace::ObjectPhase::FrameCommit, || frame.finish())
+						.finish_on_error(&mut object)?;
 					object.set_stream_offset_end(stream.offset());
 					object.finish(trace::ObjectOutcome::Success);
 				} else if status == 3 && !group.flags.has_end {
@@ -1034,17 +1037,23 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				// Creating the frame makes its partial payload readable, which wakes consumers.
 				let mut frame = trace::publish(&mut object, trace::ObjectPhase::Create, || {
 					producer.create_frame(frame::Info { size, timestamp })
-				})?;
+				})
+				.finish_on_error(&mut object)?;
 				track_stats.frame();
 
-				if let Err(err) = self.run_frame(stream, &mut frame, &track_stats, &mut object).await {
+				if let Err(err) = self
+					.run_frame(stream, &mut frame, &track_stats, &mut object)
+					.await
+					.finish_on_error(&mut object)
+				{
 					let _ = frame.abort(err.clone());
 					return Err(err);
 				}
 
 				// Completion wakes consumers waiting for the whole frame, so it gets a
 				// final commit phase of its own.
-				trace::publish(&mut object, trace::ObjectPhase::FrameCommit, || frame.finish())?;
+				trace::publish(&mut object, trace::ObjectPhase::FrameCommit, || frame.finish())
+					.finish_on_error(&mut object)?;
 				object.set_stream_offset_end(stream.offset());
 				object.finish(trace::ObjectOutcome::Success);
 			}

@@ -1,4 +1,4 @@
-use crate::trace;
+use crate::trace::{self, FinishOnError as _};
 use crate::{group, origin, stats, track};
 use std::{collections::HashMap, task::Poll};
 
@@ -417,7 +417,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						Ok::<_, Error>(())
 					},
 				)
-				.await?;
+				.await
+				.finish_on_error(&mut object)?;
 			object.set_stream_offset_end(stream.offset());
 			track_stats.frame();
 
@@ -435,7 +436,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						.await
 					};
 
-					match chunk? {
+					// A group evicted or a peer stopping the stream ends the copy here.
+					match chunk.finish_on_error(&mut object)? {
 						Some(chunk) => {
 							let n = chunk.len() as u64;
 							// Time blocked on flow control is a blocked write, not write work.
@@ -445,7 +447,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									trace::ObjectPhase::WriteBlocked,
 									stream.write_chunk(chunk),
 								)
-								.await?;
+								.await
+								.finish_on_error(&mut object)?;
 							object.set_stream_offset_end(stream.offset());
 							track_stats.bytes(n);
 						}

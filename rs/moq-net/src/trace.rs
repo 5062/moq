@@ -69,3 +69,52 @@ pub(crate) fn publish<T, E>(
 ) -> Result<T, E> {
 	step()
 }
+
+/// How an object ended, given the error that stopped it.
+///
+/// A reset or stopped stream, and a stream closed under the copy, end it as
+/// reset. A group the cache evicted or a reader lagged past ends it as dropped,
+/// and a deadline as expired. Every other error is a failure.
+pub(crate) fn outcome_of(err: &crate::Error) -> ObjectOutcome {
+	use crate::Error;
+	match err {
+		Error::Remote(_) | Error::Cancel => ObjectOutcome::Reset,
+		Error::Lagged | Error::Evicted | Error::Old => ObjectOutcome::Dropped,
+		Error::Timeout => ObjectOutcome::Expired,
+		_ => ObjectOutcome::Failed,
+	}
+}
+
+/// Ends an object with the outcome of the error that stopped it.
+pub(crate) trait FinishOnError {
+	/// Finish `object` from the error, if there is one, then hand the result back.
+	///
+	/// Write it as `step.await.finish_on_error(&mut object)?`, so an object an
+	/// early return leaves behind records why it ended instead of being abandoned.
+	fn finish_on_error(self, object: &mut ObjectTrace) -> Self;
+}
+
+impl<T> FinishOnError for Result<T, crate::Error> {
+	fn finish_on_error(self, object: &mut ObjectTrace) -> Self {
+		if let Err(err) = &self {
+			std::mem::replace(object, ObjectTrace::disabled()).finish(outcome_of(err));
+		}
+		self
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn errors_map_to_the_outcome_that_describes_them() {
+		use crate::Error;
+		assert_eq!(outcome_of(&Error::Remote(7)), ObjectOutcome::Reset);
+		assert_eq!(outcome_of(&Error::Cancel), ObjectOutcome::Reset);
+		assert_eq!(outcome_of(&Error::Evicted), ObjectOutcome::Dropped);
+		assert_eq!(outcome_of(&Error::Lagged), ObjectOutcome::Dropped);
+		assert_eq!(outcome_of(&Error::Timeout), ObjectOutcome::Expired);
+		assert_eq!(outcome_of(&Error::WrongSize), ObjectOutcome::Failed);
+	}
+}
