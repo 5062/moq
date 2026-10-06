@@ -11,7 +11,7 @@ pub(crate) use moq_trace::*;
 /// analysis joins on. This crate's feature is the one switch.
 #[cfg(feature = "trace")]
 pub(crate) fn session_handle<S: web_transport_trait::Session>(session: &S) -> Handle {
-	let handle = global().with_new_session_id();
+	let handle = global().with_session_id(next_session_id());
 	match session.connection_id() {
 		Some(connection_id) => handle.with_connection_id(connection_id.into_inner()),
 		None => handle,
