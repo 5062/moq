@@ -963,11 +963,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				break;
 			}
 			let object_start = stream.offset();
-			let frame = producer.next_frame_identity();
 			let mut context = trace::ObjectContext::new(
 				trace::Direction::Rx,
 				trace::ObjectIdentity::new(group.track_alias, group.group_id, object_id),
-				trace::LogicalId::new(frame.group, frame.frame),
+				producer.next_logical_id(),
 			)
 			.with_stream_offset_start(object_start);
 			if let Some(stream_id) = stream.stream_id() {

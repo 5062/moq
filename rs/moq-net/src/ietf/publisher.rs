@@ -363,11 +363,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// Waiting borrows the stream, so capture its transport position first.
 			let offset_start = stream.offset();
 			let stream_id = stream.stream_id();
-			let context = |frame: group::FrameIdentity| {
+			let context = |logical_id: trace::LogicalId| {
 				let context = trace::ObjectContext::new(
 					trace::Direction::Tx,
 					trace::ObjectIdentity::new(msg.track_alias, msg.group_id, object_id),
-					trace::LogicalId::new(frame.group, frame.frame),
+					logical_id,
 				)
 				.with_stream_offset_start(offset_start);
 				match stream_id {
