@@ -4,11 +4,12 @@
 # and connection identity. Patches rewrite Cargo.lock, so `just trace-build`
 # restores the committed lockfile afterwards; the fork revisions are pinned here.
 #
-# moq-trace must keep the same source as the workspace dependency, so the forks'
-# crates.io requirement resolves to the one process-global facade moq-net uses.
+# The Quinn fork requires quic-trace from crates.io. It must keep the source of
+# the workspace's moq-trace dependency, which brings quic-trace with it, so MoQ
+# and transport hooks resolve to the one process-global facade.
 [patch.crates-io]
-moq-trace = { git = "https://github.com/5062/moq-trace", branch = "main" }
-quinn = { git = "https://github.com/5062/quinn", rev = "76c4d143906186dc790c00a0df5582ae26592f36" }
-quinn-proto = { git = "https://github.com/5062/quinn", rev = "76c4d143906186dc790c00a0df5582ae26592f36" }
-web-transport-quinn = { git = "https://github.com/5062/web-transport", rev = "bf84a684d69ea255d315cc62eac5dce02600d830" }
-web-transport-trait = { git = "https://github.com/5062/web-transport", rev = "bf84a684d69ea255d315cc62eac5dce02600d830" }
+quic-trace = { git = "https://github.com/5062/moq-trace", branch = "main" }
+quinn = { git = "https://github.com/5062/quinn", rev = "9a8a50e49a9e4091cf2acea2d0dc7d8a9dd73492" }
+quinn-proto = { git = "https://github.com/5062/quinn", rev = "9a8a50e49a9e4091cf2acea2d0dc7d8a9dd73492" }
+web-transport-quinn = { git = "https://github.com/5062/web-transport", rev = "eea76bc39afacc65364dc3cd258d0b7bd98836f7" }
+web-transport-trait = { git = "https://github.com/5062/web-transport", rev = "eea76bc39afacc65364dc3cd258d0b7bd98836f7" }

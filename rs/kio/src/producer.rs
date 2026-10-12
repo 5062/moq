@@ -358,16 +358,15 @@ impl<T> Drop for Mut<'_, T> {
 			.then(|| [state.waiters_closed.take(), state.waiters_consumer.take()]);
 		drop(state); // Release Mutex BEFORE waking
 
-		#[cfg(feature = "probe")]
-		let probe = crate::probe::start();
+		// Times the wakes for the object a traced relay is publishing on this thread.
+		#[cfg(feature = "trace")]
+		let _wake = moq_trace::Wake::begin();
 		waiters_value.wake();
 		if let Some(mut extra) = extra {
 			for list in &mut extra {
 				list.wake();
 			}
 		}
-		#[cfg(feature = "probe")]
-		crate::probe::finish(probe);
 	}
 }
 

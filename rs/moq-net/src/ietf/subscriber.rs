@@ -1010,12 +1010,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			if let Some(status) = status {
 				if status == 0 {
 					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-					let frame = trace::publish(&mut object, trace::ObjectPhase::Create, || {
+					let frame = object.publish(trace::ObjectPhase::Create, || {
 						producer.create_frame(frame::Info { size: 0, timestamp })
 					})
 					.finish_on_error(&mut object)?;
 					track_stats.frame();
-					trace::publish(&mut object, trace::ObjectPhase::FrameCommit, || frame.finish())
+					object.publish(trace::ObjectPhase::FrameCommit, || frame.finish())
 						.finish_on_error(&mut object)?;
 					object.set_stream_offset_end(stream.offset());
 					object.finish(trace::ObjectOutcome::Success);
@@ -1034,7 +1034,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				// `create_frame` rejects an oversized `size` before allocating.
 				let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
 				// Creating the frame makes its partial payload readable, which wakes consumers.
-				let mut frame = trace::publish(&mut object, trace::ObjectPhase::Create, || {
+				let mut frame = object.publish(trace::ObjectPhase::Create, || {
 					producer.create_frame(frame::Info { size, timestamp })
 				})
 				.finish_on_error(&mut object)?;
@@ -1051,7 +1051,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 				// Completion wakes consumers waiting for the whole frame, so it gets a
 				// final commit phase of its own.
-				trace::publish(&mut object, trace::ObjectPhase::FrameCommit, || frame.finish())
+				object.publish(trace::ObjectPhase::FrameCommit, || frame.finish())
 					.finish_on_error(&mut object)?;
 				object.set_stream_offset_end(stream.offset());
 				object.finish(trace::ObjectOutcome::Success);
@@ -1084,7 +1084,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			// Writing a chunk wakes consumers streaming the partial frame, so it is
 			// commit work rather than part of the read, and the wake is notify work.
-			trace::publish(object, trace::ObjectPhase::FrameCommit, || frame.write(chunk))?;
+			object.publish(trace::ObjectPhase::FrameCommit, || frame.write(chunk))?;
 		}
 		Ok(())
 	}

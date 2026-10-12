@@ -27,9 +27,6 @@ mod weak;
 #[cfg(feature = "tokio")]
 pub mod tokio;
 
-#[cfg(feature = "probe")]
-pub mod probe;
-
 #[cfg(test)]
 mod tests;
 

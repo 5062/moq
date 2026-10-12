@@ -17,7 +17,7 @@ ignored = ["getrandom"]
 
 [features]
 # Object tracing over LTTng. Needs the transport forks: build with `--config rs/trace.toml`.
-trace = ["moq-trace/lttng", "kio/probe"]
+trace = ["moq-trace/lttng", "kio/trace"]
 
 [dependencies]
 bytes = "1"
