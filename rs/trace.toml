@@ -9,7 +9,7 @@
 # and transport hooks resolve to the one process-global facade.
 [patch.crates-io]
 quic-trace = { git = "https://github.com/5062/moq-trace", branch = "main" }
-quinn = { git = "https://github.com/5062/quinn", rev = "0fddfef387a3750bdea9416ef346dee03ba04338" }
-quinn-proto = { git = "https://github.com/5062/quinn", rev = "0fddfef387a3750bdea9416ef346dee03ba04338" }
-web-transport-quinn = { git = "https://github.com/5062/web-transport", rev = "7a59593ac114405c0c2cc48b8fbbbc14362f143a" }
-web-transport-trait = { git = "https://github.com/5062/web-transport", rev = "7a59593ac114405c0c2cc48b8fbbbc14362f143a" }
+quinn = { git = "https://github.com/5062/quinn", rev = "a2ec05f5304d2f80a09ff8e0189a26eb1d43138b" }
+quinn-proto = { git = "https://github.com/5062/quinn", rev = "a2ec05f5304d2f80a09ff8e0189a26eb1d43138b" }
+web-transport-quinn = { git = "https://github.com/5062/web-transport", rev = "97fac89a240c29c7a9cab49cb0261389d2254fd5" }
+web-transport-trait = { git = "https://github.com/5062/web-transport", rev = "97fac89a240c29c7a9cab49cb0261389d2254fd5" }
