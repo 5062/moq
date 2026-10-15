@@ -123,11 +123,11 @@ pub(crate) struct GroupState {
 	// The error that caused the group to be aborted, if any.
 	pub(crate) abort: Option<Error>,
 
-	// When each frame of a traced group became readable, by absolute frame index,
-	// on the trace clock. Zero marks a frame that no traced ingress path recorded.
-	// Kept after eviction, because an outbound copy may still be waiting on it.
+	// When each cached frame became readable on the trace clock, relative to `offset`.
+	// Zero marks a frame that no traced ingress path recorded. Consumers copy the
+	// timestamp when taking a frame, so evicted entries are no longer needed.
 	#[cfg(feature = "trace")]
-	ready_ns: Vec<u64>,
+	ready_ns: VecDeque<u64>,
 }
 
 impl GroupState {
@@ -171,17 +171,19 @@ impl GroupState {
 	/// Record that the frame at absolute `index` became readable at `ready_ns`.
 	#[cfg(feature = "trace")]
 	fn record_ready(&mut self, index: usize, ready_ns: u64) {
-		if self.ready_ns.len() <= index {
-			self.ready_ns.resize(index + 1, 0);
+		let local = index - self.offset;
+		if self.ready_ns.len() <= local {
+			self.ready_ns.resize(local + 1, 0);
 		}
-		self.ready_ns[index] = ready_ns;
+		self.ready_ns[local] = ready_ns;
 	}
 
 	/// When the frame at absolute `index` became readable, if a traced ingress path
 	/// recorded it.
 	#[cfg(feature = "trace")]
 	fn ready_ns(&self, index: usize) -> Option<u64> {
-		self.ready_ns.get(index).copied().filter(|&ready_ns| ready_ns != 0)
+		let local = index.checked_sub(self.offset)?;
+		self.ready_ns.get(local).copied().filter(|&ready_ns| ready_ns != 0)
 	}
 
 	#[cfg(not(feature = "trace"))]
@@ -211,6 +213,8 @@ impl GroupState {
 			self.cache -= size;
 			self.charge.sub(size);
 			self.offset += 1;
+			#[cfg(feature = "trace")]
+			self.ready_ns.pop_front();
 		}
 	}
 
@@ -220,6 +224,10 @@ impl GroupState {
 		self.partial = None;
 		self.cache = 0;
 		self.charge.clear();
+		#[cfg(feature = "trace")]
+		{
+			self.ready_ns = VecDeque::new();
+		}
 	}
 }
 
@@ -1053,6 +1061,71 @@ mod test {
 		assert_eq!(state.offset, 1);
 		assert_eq!(state.frames.len(), 1);
 		assert_eq!(state.frames[0].payload.len(), MAX_GROUP_CACHE as usize);
+	}
+
+	#[cfg(feature = "trace")]
+	#[test]
+	fn ready_timestamps_follow_cached_frames() {
+		let mut producer = Info { sequence: 0 }.produce();
+		let consumer = producer.consume();
+		let payload = Bytes::from(vec![0; (MAX_GROUP_CACHE / 2) as usize]);
+		let mut timestamps = Vec::new();
+
+		for index in 0..12 {
+			if index % 3 == 2 {
+				producer.next_logical_id();
+				let mut frame = producer
+					.create_frame(frame::Info {
+						size: payload.len() as u64,
+						timestamp: Timestamp::ZERO,
+					})
+					.unwrap();
+				// Creating the partial frame evicts an older completed frame.
+				let ready_ns = consumer.state.read().ready_ns(index);
+				assert!(ready_ns.is_some());
+				timestamps.push(ready_ns);
+				frame.write(payload.clone()).unwrap();
+				frame.finish().unwrap();
+			} else {
+				// Uninstrumented writes leave gaps, including after the trace claim.
+				producer.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+				timestamps.push(None);
+			}
+
+			let (offset, frames, stored, retained) = {
+				let state = consumer.state.read();
+				let retained: Vec<_> = (0..=index).map(|index| state.ready_ns(index)).collect();
+				(state.offset, state.frames.len(), state.ready_ns.len(), retained)
+			};
+			assert_eq!(offset, (index + 1).saturating_sub(2));
+			assert!(stored <= frames);
+			for (index, &timestamp) in timestamps.iter().enumerate() {
+				assert_eq!(retained[index], if index < offset { None } else { timestamp });
+			}
+		}
+	}
+
+	#[cfg(feature = "trace")]
+	#[test]
+	fn abort_releases_ready_timestamps() {
+		let mut producer = Info { sequence: 0 }.produce();
+		let consumer = producer.consume();
+		producer.next_logical_id();
+		let frame = producer
+			.create_frame(frame::Info {
+				size: 1,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
+		assert!(consumer.state.read().ready_ns(0).is_some());
+		frame.abort(Error::Cancel).unwrap();
+
+		let (ready_ns, capacity) = {
+			let state = consumer.state.read();
+			(state.ready_ns(0), state.ready_ns.capacity())
+		};
+		assert_eq!(ready_ns, None);
+		assert_eq!(capacity, 0);
 	}
 
 	#[cfg(feature = "trace")]
